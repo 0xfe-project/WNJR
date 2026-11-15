@@ -1,0 +1,345 @@
+//! Executable memory ownership for the native backend.
+//!
+//! This owns one OS-backed writable/executable region. The current machine
+//! backend uses it as a module-wide arena for finalized native code.
+//!
+//! All OS coupling — page allocation, W^X toggling, instruction-cache
+//! invalidation — is delegated to [`crate::vm::jit::runtime::os`]. This module
+//! holds only the per-buffer state (`base`, `capacity`, `offset`) and the
+//! offset-bumping emit helpers.
+
+use crate::config::Config;
+use core::ptr;
+
+use super::os;
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use super::trap_signal;
+#[cfg(debug_assertions)]
+use tracked_alloc::{
+    AllocationDescriptor, AllocationHandle, AllocationState, RUNTIME_MEMORY_OWNER,
+};
+
+pub(crate) struct CodeBuffer {
+    base: *mut u8,
+    capacity: usize,
+    offset: usize,
+    /// Sticky exhaustion marker. An emit that would run past `capacity`
+    /// sets it and becomes a no-op — as does every write after it — so a
+    /// module that outgrows the arena surfaces as a compile error at the
+    /// driver's check instead of a panic in firmware. Cleared by `reset`.
+    exhausted: bool,
+    #[cfg(debug_assertions)]
+    trace: AllocationHandle,
+}
+
+impl CodeBuffer {
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[inline]
+    fn unregister_trap_ranges(&self) {
+        if self.base.is_null() || self.capacity == 0 {
+            return;
+        }
+        let start = self.base as usize;
+        let end = start.saturating_add(self.capacity);
+        trap_signal::unregister_jit_ranges_in(start, end);
+    }
+}
+
+impl core::fmt::Debug for CodeBuffer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CodeBuffer")
+            .field("base", &self.base)
+            .field("capacity", &self.capacity)
+            .field("offset", &self.offset)
+            .finish()
+    }
+}
+
+impl CodeBuffer {
+    #[inline]
+    pub(crate) fn new(config: &Config) -> Result<Self, &'static str> {
+        Self::with_capacity(config.get_code_arena_bytes())
+    }
+
+    pub(crate) fn with_capacity(capacity: usize) -> Result<Self, &'static str> {
+        let base = os::alloc_executable(capacity)?;
+        let buffer = Self {
+            base,
+            capacity,
+            offset: 0,
+            exhausted: false,
+            #[cfg(debug_assertions)]
+            trace: AllocationHandle::new(
+                AllocationDescriptor::new(RUNTIME_MEMORY_OWNER, "CodeBuffer"),
+                AllocationState::new(capacity)
+                    .with_len(0)
+                    .with_capacity(capacity)
+                    .with_ptr(base as usize),
+            ),
+        };
+        Ok(buffer)
+    }
+
+    #[cfg(debug_assertions)]
+    #[inline]
+    fn trace_state(&self) -> AllocationState {
+        AllocationState::new(self.capacity)
+            .with_len(self.offset)
+            .with_capacity(self.capacity)
+            .with_ptr(self.base as usize)
+    }
+
+    /// Runtime address of the next byte an emit would write. Loop-header
+    /// alignment pads against this: function text starts at arbitrary
+    /// buffer offsets, so no function-relative length can align anything.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[inline]
+    pub(crate) fn next_write_addr(&self) -> usize {
+        self.base as usize + self.offset
+    }
+
+    #[inline]
+    pub(crate) fn begin_write(&mut self) {
+        unsafe { os::begin_write_executable(self.base, self.capacity) };
+    }
+
+    #[inline]
+    pub(crate) fn finish_write(&mut self, written_start: usize, written_len: usize) {
+        unsafe {
+            os::finish_write_executable(self.base, self.capacity, written_start, written_len);
+        }
+        #[cfg(debug_assertions)]
+        self.trace.update(self.trace_state());
+    }
+
+    #[cfg(any(target_arch = "x86_64", any(), any(), target_arch = "riscv64"))]
+    #[inline]
+    pub(crate) fn emit_u8(&mut self, byte: u8) -> usize {
+        let offset = self.offset;
+        if self.exhausted || offset >= self.capacity {
+            self.exhausted = true;
+            return offset;
+        }
+        unsafe {
+            self.base.add(offset).write(byte);
+        }
+        self.offset += 1;
+        offset
+    }
+
+    #[inline]
+    pub(crate) fn emit_u32(&mut self, inst: u32) -> usize {
+        let offset = self.offset;
+        if self.exhausted || offset + 4 > self.capacity {
+            self.exhausted = true;
+            return offset;
+        }
+        unsafe {
+            (self.base.add(offset) as *mut u32).write(inst);
+        }
+        self.offset += 4;
+        offset
+    }
+
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "riscv64"
+    ))]
+    #[inline]
+    pub(crate) fn emit_u64(&mut self, value: u64) -> usize {
+        let offset = self.offset;
+        if self.exhausted || offset + 8 > self.capacity {
+            self.exhausted = true;
+            return offset;
+        }
+        unsafe {
+            (self.base.add(offset) as *mut u64).write(value);
+        }
+        self.offset += 8;
+        offset
+    }
+
+    #[inline]
+    pub(crate) fn emit_bytes(&mut self, bytes: &[u8]) -> usize {
+        let offset = self.offset;
+        if self.exhausted || offset + bytes.len() > self.capacity {
+            self.exhausted = true;
+            return offset;
+        }
+        unsafe {
+            ptr::copy_nonoverlapping(bytes.as_ptr(), self.base.add(offset), bytes.len());
+        }
+        self.offset += bytes.len();
+        offset
+    }
+
+    #[inline]
+    pub(crate) fn patch_u32(&mut self, offset: usize, inst: u32) {
+        if self.exhausted {
+            return;
+        }
+        assert!(offset + 4 <= self.offset, "patch beyond written region");
+        unsafe {
+            (self.base.add(offset) as *mut u32).write(inst);
+        }
+    }
+
+    #[cfg(any(
+        target_arch = "aarch64",
+        target_arch = "x86_64",
+        target_arch = "riscv64"
+    ))]
+    #[inline]
+    pub(crate) fn patch_u64(&mut self, offset: usize, value: u64) {
+        if self.exhausted {
+            return;
+        }
+        assert!(offset + 8 <= self.offset, "patch beyond written region");
+        unsafe {
+            (self.base.add(offset) as *mut u64).write(value);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn byte(&self, offset: usize) -> u8 {
+        if self.exhausted {
+            return 0;
+        }
+        assert!(offset < self.offset, "read beyond written region");
+        unsafe { *self.base.add(offset) }
+    }
+
+    #[inline]
+    pub(crate) unsafe fn fn_ptr<F>(&self, offset: usize) -> F
+    where
+        F: Copy,
+    {
+        let ptr = unsafe { self.base.add(offset) };
+        core::mem::transmute_copy(&ptr)
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.offset
+    }
+
+    #[inline]
+    pub(crate) fn as_ptr(&self) -> *const u8 {
+        self.base.cast::<u8>()
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[inline]
+    pub(crate) unsafe fn ptr(&self, offset: usize) -> *const u8 {
+        unsafe { self.base.add(offset) }.cast::<u8>()
+    }
+
+    /// Whether any write ran past `capacity`. The compile drivers check
+    /// this and turn a full arena into an error before anything the
+    /// buffer holds can be executed.
+    #[inline]
+    pub(crate) fn exhausted(&self) -> bool {
+        self.exhausted
+    }
+
+    #[inline]
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    #[inline]
+    pub(crate) fn reset(&mut self) {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        self.unregister_trap_ranges();
+        self.offset = 0;
+        self.exhausted = false;
+        #[cfg(debug_assertions)]
+        self.trace.update(self.trace_state());
+    }
+
+    #[inline]
+    pub(crate) fn set_len(&mut self, len: usize) {
+        if self.exhausted || len > self.capacity {
+            self.exhausted = true;
+            return;
+        }
+        self.offset = len;
+        #[cfg(debug_assertions)]
+        self.trace.update(self.trace_state());
+    }
+
+    #[inline]
+    pub(crate) fn move_region(&mut self, src_offset: usize, dst_offset: usize, len: usize) {
+        if self.exhausted {
+            return;
+        }
+        assert!(
+            src_offset + len <= self.offset,
+            "move source beyond written region"
+        );
+        if dst_offset + len > self.capacity {
+            self.exhausted = true;
+            return;
+        }
+        unsafe {
+            ptr::copy(self.base.add(src_offset), self.base.add(dst_offset), len);
+        }
+    }
+}
+
+impl Drop for CodeBuffer {
+    fn drop(&mut self) {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        self.unregister_trap_ranges();
+        #[cfg(debug_assertions)]
+        self.trace.remove();
+        os::free_executable(self.base, self.capacity);
+    }
+}
+
+// SAFETY: after compilation only the executable mapping is read, from any
+// thread. offset and exhausted are written only while a single thread is
+// emitting into the buffer.
+unsafe impl Send for CodeBuffer {}
+unsafe impl Sync for CodeBuffer {}
+
+#[cfg(test)]
+mod tests {
+    use super::CodeBuffer;
+
+    #[test]
+    fn allocates_and_writes_bytes() {
+        let mut buf = CodeBuffer::with_capacity(64).expect("mmap failed");
+        buf.begin_write();
+        let start = buf.emit_bytes(&[1, 2, 3, 4]);
+        buf.finish_write(start, 4);
+        assert_eq!(start, 0);
+        assert_eq!(buf.len(), 4);
+    }
+
+    #[test]
+    fn overflow_is_sticky_and_inert() {
+        let mut buf = CodeBuffer::with_capacity(8).expect("mmap failed");
+        buf.begin_write();
+        buf.emit_u32(1);
+        let ok = buf.emit_u32(2);
+        assert!(!buf.exhausted());
+        // Would run past capacity: marks exhaustion, writes nothing.
+        let stuck = buf.emit_u32(3);
+        assert!(buf.exhausted());
+        assert_eq!(buf.len(), 8);
+        assert_eq!(stuck, 8);
+        // Everything after the mark is inert — no write, no panic.
+        buf.emit_bytes(&[1, 2, 3]);
+        buf.patch_u32(ok, 9);
+        buf.move_region(0, 4, 4);
+        buf.set_len(4);
+        assert!(buf.exhausted());
+        assert_eq!(buf.len(), 8);
+        // A fresh compile round starts clean.
+        buf.reset();
+        assert!(!buf.exhausted());
+        assert_eq!(buf.len(), 0);
+    }
+}

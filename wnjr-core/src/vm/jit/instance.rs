@@ -1,0 +1,409 @@
+//! The JIT engine's runtime world.
+//!
+//! A `JitInstance` owns one instantiated module's entities plus the caches native
+//! code addresses directly. It is JIT-owned by construction: the interpreter
+//! keeps its own flat runtime state and only ever *reads* a foreign `JitInstance`
+//! through a registry entry when both engines are compiled in.
+//!
+//! The revision counters exist for exactly one consumer: the native
+//! context's cached raw views (`vm::jit::runtime::context`), which must be
+//! refreshed whenever an entity the generated code points into may have
+//! moved.
+
+use crate::collections;
+use crate::config::Config;
+use crate::vm::jit::entities::FunctionInst;
+use tracked_alloc::rc::Rc;
+use tracked_alloc::string::String;
+
+use crate::vm::entities::{GlobalInst, MemInst, TableInst};
+use crate::vm::jit::entities::ModuleInst;
+use crate::vm::jit::gc_heap::{GcHeap, GcRef};
+use crate::vm::jit::instantiate::ExportKind;
+use crate::vm::jit::runtime::dispatch_view::SelfAbsoluteFunctionRange;
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use crate::vm::link::SharedSimdRegistry;
+use crate::vm::link::{
+    alloc_exn_in, FuncEntry, InstanceBackref, RefRegistryEntry, SharedFunctionRegistry,
+    SharedRefRegistry,
+};
+use crate::vm::tag::TagIdentity;
+use crate::vm::value::{RefValue, Value, FUNCADDR_TOP};
+use core::cell::RefCell;
+
+const UNREGISTERED_FUNCADDR: usize = usize::MAX;
+
+pub(crate) struct JitInstance {
+    module: ModuleInst,
+    exports: collections::Vec<(String, ExportKind, usize)>,
+    instance_backref: InstanceBackref,
+    function_registry: SharedFunctionRegistry,
+    local_funcaddrs: collections::Vec<usize>,
+    /// Absolute-handle span occupied by this instance's registered functions.
+    /// Linked functions retain their foreign identity and never populate it.
+    self_absolute_range: SelfAbsoluteFunctionRange,
+    ref_registry: SharedRefRegistry,
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    simd_registry: SharedSimdRegistry,
+    gc_heap: Rc<RefCell<GcHeap>>,
+    module_revision: u64,
+    /// Set to true during decode if any function inlines a Linked import that
+    /// belongs to a foreign instance (decode.rs with_inline_local_spec :318).
+    /// Used by the code cache to decide if PrecompiledModule can be reused.
+    cross_instance_inlined: core::cell::Cell<bool>,
+    /// Set to true during decode if any throw was statically matched to an
+    /// imported catch tag (decode.rs match_throw_handle_to_catch :852 + call
+    /// sites :911/:1000/:1072). The tag comparison depends on the runtime
+    /// TagIdentity registry state and may differ across instances.
+    import_tag_static_catch: core::cell::Cell<bool>,
+    native_context_cache: Option<crate::vm::jit::runtime::context::NativeContextBox>,
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    native_stack_cache: Option<crate::vm::jit::runtime::guard_pages::GuardPageStack>,
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    native_stack_cache: Option<collections::Vec<u64>>,
+}
+
+impl JitInstance {
+    #[inline]
+    pub(crate) fn new_with_registries(
+        module: ModuleInst,
+        instance_backref: InstanceBackref,
+        function_registry: SharedFunctionRegistry,
+        ref_registry: SharedRefRegistry,
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        simd_registry: SharedSimdRegistry,
+    ) -> Self {
+        let function_count = module.functions.len();
+        function_registry.observe_local_function_count(function_count);
+        Self {
+            module,
+            exports: collections::Vec::new(),
+            instance_backref,
+            function_registry,
+            local_funcaddrs: collections::vec![UNREGISTERED_FUNCADDR; function_count],
+            self_absolute_range: SelfAbsoluteFunctionRange::default(),
+            ref_registry,
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            simd_registry,
+            gc_heap: Rc::new(RefCell::new(GcHeap::new())),
+            module_revision: 0,
+            cross_instance_inlined: core::cell::Cell::new(false),
+            import_tag_static_catch: core::cell::Cell::new(false),
+            native_context_cache: None,
+            native_stack_cache: None,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn instance_backref(&self) -> &InstanceBackref {
+        &self.instance_backref
+    }
+
+    /// The engine configuration this store's module was created with.
+    #[inline]
+    pub(crate) fn config(&self) -> &Config {
+        self.module.config()
+    }
+
+    #[inline]
+    pub(crate) fn module(&self) -> &ModuleInst {
+        &self.module
+    }
+
+    #[inline]
+    pub(crate) fn module_mut(&mut self) -> &mut ModuleInst {
+        self.module_revision = self.module_revision.wrapping_add(1);
+        &mut self.module
+    }
+
+    #[inline]
+    pub(crate) fn exports(&self) -> &[(String, ExportKind, usize)] {
+        &self.exports
+    }
+
+    #[inline]
+    pub(crate) fn set_exports(&mut self, exports: collections::Vec<(String, ExportKind, usize)>) {
+        self.exports = exports;
+    }
+
+    #[inline]
+    pub(crate) fn function(&self, idx: usize) -> &FunctionInst {
+        &self.module.functions[idx]
+    }
+
+    #[inline]
+    pub(crate) fn table(&self, idx: usize) -> &TableInst {
+        &self.module.tables[idx]
+    }
+
+    #[inline]
+    pub(crate) fn table_mut(&mut self, idx: usize) -> &mut TableInst {
+        self.module_revision = self.module_revision.wrapping_add(1);
+        &mut self.module.tables[idx]
+    }
+
+    #[inline]
+    pub(crate) fn memory(&self, idx: usize) -> &MemInst {
+        &self.module.memories[idx]
+    }
+
+    #[inline]
+    pub(crate) fn memory_mut(&mut self, idx: usize) -> &mut MemInst {
+        self.module_revision = self.module_revision.wrapping_add(1);
+        &mut self.module.memories[idx]
+    }
+
+    #[inline]
+    pub(crate) fn global(&self, idx: usize) -> &GlobalInst {
+        &self.module.globals[idx]
+    }
+
+    #[inline]
+    pub(crate) fn global_mut(&mut self, idx: usize) -> &mut GlobalInst {
+        self.module_revision = self.module_revision.wrapping_add(1);
+        &mut self.module.globals[idx]
+    }
+
+    #[inline]
+    pub(crate) fn module_revision(&self) -> u64 {
+        self.module_revision
+    }
+
+    /// Set the flag that a cross-instance inline happened during decode.
+    #[inline]
+    pub(crate) fn mark_cross_instance_inlined(&self) {
+        self.cross_instance_inlined.set(true);
+    }
+
+    /// Set the flag that a throw matched an imported tag's catch during decode.
+    #[inline]
+    pub(crate) fn mark_import_tag_static_catch(&self) {
+        self.import_tag_static_catch.set(true);
+    }
+
+    /// Read the cross-instance inline flag.
+    #[inline]
+    pub(crate) fn cross_instance_inlined(&self) -> bool {
+        self.cross_instance_inlined.get()
+    }
+
+    /// Read the imported tag static catch flag.
+    #[inline]
+    pub(crate) fn import_tag_static_catch(&self) -> bool {
+        self.import_tag_static_catch.get()
+    }
+
+    #[inline]
+    pub(crate) fn take_native_context_cache(
+        &mut self,
+    ) -> Option<crate::vm::jit::runtime::context::NativeContextBox> {
+        self.native_context_cache.take()
+    }
+
+    #[inline]
+    pub(crate) fn cache_native_context(
+        &mut self,
+        context: crate::vm::jit::runtime::context::NativeContextBox,
+    ) {
+        if self.native_context_cache.is_none() {
+            self.native_context_cache = Some(context);
+        }
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[inline]
+    pub(crate) fn take_native_stack_cache(
+        &mut self,
+    ) -> Option<crate::vm::jit::runtime::guard_pages::GuardPageStack> {
+        self.native_stack_cache.take()
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    #[inline]
+    pub(crate) fn cache_native_stack(
+        &mut self,
+        stack: crate::vm::jit::runtime::guard_pages::GuardPageStack,
+    ) {
+        if self.native_stack_cache.is_none() {
+            self.native_stack_cache = Some(stack);
+        }
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[inline]
+    pub(crate) fn take_native_stack_cache(&mut self) -> Option<collections::Vec<u64>> {
+        self.native_stack_cache.take()
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    #[inline]
+    pub(crate) fn cache_native_stack(&mut self, stack: collections::Vec<u64>) {
+        if self.native_stack_cache.is_none() {
+            self.native_stack_cache = Some(stack);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn clone_ref_registry(&self) -> SharedRefRegistry {
+        Rc::clone(&self.ref_registry)
+    }
+
+    #[inline]
+    pub(crate) fn gc_heap(&self) -> &Rc<RefCell<GcHeap>> {
+        &self.gc_heap
+    }
+
+    /// Allocate a fresh exception object carrying the given tag identity and
+    /// payload. The object is registry-owned, so the returned handle stays
+    /// valid after this store is dropped.
+    pub(crate) fn alloc_exn(
+        &mut self,
+        tag: TagIdentity,
+        fields: collections::Vec<Value>,
+    ) -> RefValue {
+        alloc_exn_in(&self.ref_registry, tag, fields)
+    }
+
+    pub(crate) fn register_local_function(&mut self, local_index: usize) -> RefValue {
+        self.function_registry
+            .observe_local_function_count(self.module.functions.len());
+        let funcaddr = self.function_registry.register(FuncEntry {
+            owner: self.instance_backref.self_id(),
+            local_index: u32::try_from(local_index)
+                .expect("local function index exceeds the funcaddr encoding"),
+        });
+        if self.local_funcaddrs.len() <= local_index {
+            self.local_funcaddrs
+                .resize(local_index + 1, UNREGISTERED_FUNCADDR);
+        }
+        self.local_funcaddrs[local_index] = funcaddr;
+        let handle = RefValue::new(local_index);
+        self.module.ensure_function_handle_capacity(local_index + 1);
+        self.module.set_function_handle(local_index, handle);
+        handle
+    }
+
+    #[inline]
+    pub(crate) fn funcaddr_for_local_index(&self, local_index: usize) -> Option<usize> {
+        let funcaddr = self.local_funcaddrs.get(local_index).copied()?;
+        (funcaddr != UNREGISTERED_FUNCADDR).then_some(funcaddr)
+    }
+
+    /// Finalize the owner-private absolute-handle span after initial function
+    /// registration. Linked imports carry another instance's absolute identity
+    /// and never enter this range. Instantiation calls this once before native
+    /// compilation.
+    pub(crate) fn finalize_self_absolute_range(&mut self) {
+        let self_id = self.instance_backref.self_id();
+        let mut self_abs_base = usize::MAX;
+        let mut self_abs_hi = 0usize;
+
+        for local_index in 0..self.module.functions.len() {
+            let Some(funcaddr) = self.funcaddr_for_local_index(local_index) else {
+                continue;
+            };
+            let entry = self
+                .function_entry_for_funcaddr(funcaddr)
+                .expect("registered local function is missing from the function arena");
+            assert!(
+                entry.owner == self_id && entry.local_index as usize == local_index,
+                "registered local function has a mismatched arena identity"
+            );
+            let encoded = FUNCADDR_TOP
+                .checked_sub(funcaddr)
+                .expect("registered funcaddr exceeds the encoding range");
+            self_abs_base = self_abs_base.min(encoded);
+            self_abs_hi = self_abs_hi.max(encoded);
+        }
+
+        self.self_absolute_range = if self_abs_base == usize::MAX {
+            SelfAbsoluteFunctionRange::default()
+        } else {
+            SelfAbsoluteFunctionRange {
+                base: self_abs_base,
+                count: self_abs_hi - self_abs_base + 1,
+            }
+        };
+    }
+
+    #[inline]
+    pub(crate) fn self_absolute_range(&self) -> SelfAbsoluteFunctionRange {
+        self.self_absolute_range
+    }
+
+    pub(crate) fn function_entry_for_handle(&self, handle: RefValue) -> Option<FuncEntry> {
+        self.function_registry.entry_for_handle(handle)
+    }
+
+    #[inline]
+    pub(crate) fn function_entry_for_funcaddr(&self, funcaddr: usize) -> Option<FuncEntry> {
+        self.function_registry.borrow().get(funcaddr).copied()
+    }
+
+    pub(crate) fn register_i31(&mut self, value: i32) -> RefValue {
+        if let Some((idx, _)) = self.ref_registry.borrow().iter().enumerate().find(
+            |(_, entry)| matches!(entry, RefRegistryEntry::I31(existing) if *existing == value),
+        ) {
+            return RefValue::from_pool_index(idx);
+        }
+        let idx = {
+            let mut registry = self.ref_registry.borrow_mut();
+            let idx = registry.len();
+            registry.push(RefRegistryEntry::I31(value));
+            idx
+        };
+        RefValue::from_pool_index(idx)
+    }
+
+    pub(crate) fn register_gc_ref(&mut self, gc_ref: GcRef) -> RefValue {
+        let idx = {
+            let mut registry = self.ref_registry.borrow_mut();
+            let idx = registry.len();
+            registry.push(RefRegistryEntry::Gc {
+                owner: self.instance_backref.self_id(),
+                gc_ref,
+            });
+            idx
+        };
+        RefValue::from_pool_index(idx)
+    }
+
+    pub(crate) fn ref_entry_for_handle(&self, handle: RefValue) -> Option<RefRegistryEntry> {
+        let idx = handle.pooled_index()?;
+        self.ref_registry.borrow().get(idx).cloned()
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    // JitInstance a v128 payload out-of-line and return the 64-bit raw handle used by
+    // the current frame/global storage ABI.
+    pub(crate) fn intern_v128(&self, value: [u8; 16]) -> u64 {
+        self.simd_registry.intern(value)
+    }
+
+    #[inline]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    // Resolve a stored raw handle back into the concrete v128 payload.
+    pub(crate) fn get_v128(&self, raw: u64) -> Option<[u8; 16]> {
+        self.simd_registry.get(raw)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::vm::link::LinkRegistry;
+    use tracked_alloc::boxed::Box;
+
+    pub(crate) fn store(module: ModuleInst) -> Box<JitInstance> {
+        let registry = LinkRegistry::new();
+        let (_, instance_backref) = registry.reserve_instance();
+        Box::new(JitInstance::new_with_registries(
+            module,
+            instance_backref,
+            registry.function_registry_shared(),
+            registry.ref_registry_shared(),
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            registry.simd_registry_shared(),
+        ))
+    }
+}

@@ -1,0 +1,1409 @@
+//! x86_64 backend: struct definitions and `ArchBackend` trait implementation.
+//!
+//! This file is the bridge between the common pipeline and the x86_64-specific
+//! instruction emission. It contains only type definitions and trait glue —
+//! all emission logic lives in `inst.rs` and `control.rs` as inherent methods.
+
+use crate::collections;
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use crate::vm::jit::machine::machine_ir::MachineAddr;
+use crate::{
+    error::WasmError,
+    vm::{
+        jit::machine::machine_ir::{
+            MachineBlock, MachineBlockId, MachineBlockParam, MachineFloatWidth, MachineInst,
+            MachineInstKind, MachineIntWidth, MachineMemWidth, MachineReg, MachineRegOwner,
+            MachineReturnAbi, MachineStorageType, MachineTerminator, MachineTrapKind, MachineValue,
+            MACHINE_CTX_REG, MACHINE_FP_REG, MACHINE_MEM0_BASE_REG, MACHINE_MEM0_SIZE_REG,
+        },
+        jit::runtime::{code::NativeRootEntry, code_buf::CodeBuffer, context::ctx_offset},
+    },
+};
+
+use super::{
+    abi::{
+        self, fp_machine_reg, map_fixed_reg, map_reg, max_fp_machine_regs, max_total_machine_regs,
+        C_ARG0, C_ARG1,
+    },
+    callconv,
+    enc::{self, Cc},
+    gp_scratch::GpScratchPool,
+    reg::X86Reg,
+};
+#[cfg(debug_assertions)]
+use crate::vm::jit::arch::common::types::DebugRegion;
+use crate::vm::jit::arch::common::{
+    backend::ArchBackend, core::CompilerCore, scratch_pool::ScratchPool, types::ParallelSource,
+};
+
+// ── Frame layout ────────────────────────────────────────────────────────────
+
+/// Extra bytes subtracted from RSP after the GP saves. Owned by the active
+/// calling convention because the exact shape depends on whether Win64 XMM
+/// spill and shadow space are required. See `callconv::sysv::STACK_PADDING`
+/// / `callconv::win64::STACK_PADDING`.
+const STACK_PADDING: u32 = callconv::STACK_PADDING;
+
+// ── Branch fixup types ───────────────────────────────────────────────────────
+
+/// x86_64 branch fixup: we emit a JMP/Jcc with a placeholder rel32, then
+/// patch it once the target label is bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct BranchFixup {
+    /// Byte offset of the rel32 field in the text.
+    pub rel32_offset: usize,
+    /// Label index to resolve.
+    pub label: usize,
+}
+
+// ── Compiled entry ───────────────────────────────────────────────────────────
+
+/// Result of compiling one function to x86_64 machine code.
+#[derive(Clone, Debug)]
+pub(crate) struct CompiledX86_64Entry {
+    pub entry: NativeRootEntry,
+    pub text_len: usize,
+    #[cfg(debug_assertions)]
+    pub debug_regions: collections::Vec<DebugRegion>,
+}
+
+// ── X86_64Backend ────────────────────────────────────────────────────────────
+
+#[derive(Debug)]
+/// One pending RIP-relative reference into the function's FP literal pool.
+pub(super) struct FpLiteralFixup {
+    /// Text offset of the load's disp32 field.
+    pub disp_offset: usize,
+    /// Index into `fp_literals`.
+    pub literal_index: usize,
+}
+
+pub(crate) struct X86_64Backend<'a> {
+    pub core: CompilerCore<'a>,
+    pub(super) fixups: collections::Vec<BranchFixup>,
+    pub(super) gp_scratch: GpScratchPool,
+    pub(super) fp_scratch: ScratchPool<u32, 2>,
+    /// Deduplicated scalar FP immediates, flushed after the function body as
+    /// its literal pool and loaded RIP-relatively.
+    pub(super) fp_literals: collections::Vec<u64>,
+    pub(super) fp_literal_fixups: collections::Vec<FpLiteralFixup>,
+    /// Peephole state: EFLAGS reflects this register's most recent ALU result
+    /// at the recorded width, valid only while the text cursor
+    /// sits at the recorded position. Emission invalidates the entry unless
+    /// a flags-preserving operation explicitly carries the proof forward.
+    pub(super) int_flags: Option<(MachineIntWidth, X86Reg, usize)>,
+    /// Jump tables pending emission. Entry words flush after the function
+    /// body next to the FP literal pool so table data never sits in the
+    /// instruction stream between a dispatch and its handlers.
+    pub(super) pending_jump_tables: collections::Vec<PendingJumpTable>,
+    /// 1-slot peephole lookahead for load+ALU, compare+select, and GP
+    /// address snapshots immediately followed by a narrow load.
+    /// `emit_inst_at` proves each pair before lowering it together.
+    /// Emission order is preserved on
+    /// every path — hit, miss, and block-end drain.
+    pending_op: Option<(&'a MachineInst, usize)>,
+    pub(super) narrow_equality: Option<super::narrow_equality::NarrowEquality>,
+    /// Trailing float compare consumed by the branch terminator's flags.
+    pub(super) float_branch: Option<super::float_cond::FloatBranch>,
+    /// Trailing GP load that the branch terminator's compare reads in place.
+    pub(super) branch_load_compare: Option<super::fusion::BranchLoadCompare>,
+    /// Ops of a fused read-modify-write still to be skipped in this block.
+    pub(super) rmw_skip: u8,
+}
+
+/// One deferred jump table: the movabs immediate to patch with the
+/// table's address, and the resolved edge label for every entry.
+pub(super) struct PendingJumpTable {
+    pub(super) base_imm_offset: usize,
+    pub(super) entry_labels: collections::Vec<usize>,
+}
+
+impl X86_64Backend<'_> {
+    /// Store scalar lane returns (and any frame-fallback region not already
+    /// at slot 0) into public frame slots `[0, result_count)`, where
+    /// `eval.rs::collect_native_results_from_stack` reads them.
+    fn lower_root_result_copy_to_public_slots(&mut self) {
+        let Some(runtime) = self.core.current_runtime() else {
+            return;
+        };
+        let fp_reg = map_fixed_reg(MACHINE_FP_REG);
+        match &runtime.return_abi {
+            MachineReturnAbi::ScalarGp { .. } => {
+                enc::store_64(&mut self.core.text, fp_reg, 0, abi::W2W_GP_RET0);
+                return;
+            }
+            MachineReturnAbi::ScalarFp { ty } => {
+                let Some(width) = ty.float_width() else {
+                    return;
+                };
+                let src = abi::W2W_FP_RET0 as enc::Xmm;
+                match width {
+                    MachineFloatWidth::F32 => enc::movss_store(&mut self.core.text, fp_reg, 0, src),
+                    MachineFloatWidth::F64 => enc::movsd_store(&mut self.core.text, fp_reg, 0, src),
+                }
+                return;
+            }
+            MachineReturnAbi::ScalarGpPair => {
+                return;
+            }
+            MachineReturnAbi::None | MachineReturnAbi::FrameFallback { .. } => {}
+        }
+        let Some(results) = runtime.return_results else {
+            return;
+        };
+        if results.slots == 0 || results.base_slot == 0 {
+            return;
+        }
+        let temp = self.gp_scratch.scoped_alloc().detach();
+        for index in 0..i32::from(results.slots) {
+            enc::load_64(
+                &mut self.core.text,
+                *temp,
+                fp_reg,
+                (i32::from(results.base_slot) + index) * 8,
+            );
+            enc::store_64(&mut self.core.text, fp_reg, index * 8, *temp);
+        }
+    }
+
+    /// The body's preserved-lane save set and the alignment shim paired
+    /// with it. Body entry has rsp ≡ 8 (mod 16) and internal calls need
+    /// rsp ≡ 0, so the shim is 8 bytes for an even save count and 0 for
+    /// an odd one. Deterministic per function: the prelude and every
+    /// exit path (return, error tail, tail call) consume the same plan.
+    pub(super) fn body_frame_plan(&self) -> (collections::Vec<X86Reg>, u8) {
+        let mut saves = collections::Vec::new();
+        for reg in self.core.preserved_clobbers() {
+            debug_assert!(
+                !self.core.is_fp_reg(*reg),
+                "x86_64 declares no preserved FP lanes"
+            );
+            if let Ok(mapped) = map_reg(*reg) {
+                saves.push(mapped);
+            }
+        }
+        let shim = if saves.len() % 2 == 0 { 8 } else { 0 };
+        (saves, shim)
+    }
+
+    /// Undo the body frame: the shim, then the preserved-lane saves in
+    /// reverse push order.
+    pub(super) fn lower_body_frame_undo(&mut self) {
+        let (saves, shim) = self.body_frame_plan();
+        if shim != 0 {
+            enc::add_rsp_imm8(&mut self.core.text, shim);
+        }
+        for reg in saves.iter().rev() {
+            enc::pop(&mut self.core.text, *reg);
+        }
+    }
+
+    /// Record only ZF for an ALU result, at its exact operand width.
+    pub(super) fn note_int_flags(&mut self, width: MachineIntWidth, reg: X86Reg) {
+        self.int_flags = Some((width, reg, self.core.text.len()));
+    }
+
+    pub(super) fn current_int_flags(&self) -> Option<(MachineIntWidth, X86Reg)> {
+        self.int_flags
+            .filter(|(_, _, position)| *position == self.core.text.len())
+            .map(|(width, reg, _)| (width, reg))
+    }
+
+    /// Low-word zero and full-width zero are different predicates. This
+    /// proof covers ZF only; ordering comparisons still require CMP.
+    pub(super) fn int_flags_current(&self, width: MachineIntWidth, reg: X86Reg) -> bool {
+        self.current_int_flags() == Some((width, reg))
+    }
+
+    pub(super) fn intern_fp_literal(&mut self, bits: u64) -> usize {
+        if let Some(index) = self
+            .fp_literals
+            .iter()
+            .position(|&existing| existing == bits)
+        {
+            return index;
+        }
+        self.fp_literals.push(bits);
+        self.fp_literals.len() - 1
+    }
+}
+
+// ── ArchBackend trait implementation ─────────────────────────────────────────
+
+impl<'a> ArchBackend<'a> for X86_64Backend<'a> {
+    const NAME: &'static str = "x86_64";
+
+    fn max_total_regs() -> usize {
+        max_total_machine_regs()
+    }
+    fn max_fp_regs() -> usize {
+        max_fp_machine_regs()
+    }
+
+    fn new(core: CompilerCore<'a>) -> Self {
+        Self {
+            core,
+            fixups: collections::Vec::new(),
+            gp_scratch: GpScratchPool::new(abi::gp_backend_owned_regs()),
+            fp_scratch: abi::new_fp_scratch_pool(),
+            fp_literals: collections::Vec::new(),
+            fp_literal_fixups: collections::Vec::new(),
+            int_flags: None,
+            pending_jump_tables: collections::Vec::new(),
+            pending_op: None,
+            narrow_equality: None,
+            branch_load_compare: None,
+            float_branch: None,
+            rmw_skip: 0,
+        }
+    }
+
+    fn core(&self) -> &CompilerCore<'a> {
+        &self.core
+    }
+    fn core_mut(&mut self) -> &mut CompilerCore<'a> {
+        &mut self.core
+    }
+    fn into_core(self) -> CompilerCore<'a> {
+        self.core
+    }
+
+    /// 32-byte-align loop headers so a loop body of up to 32 bytes never
+    /// straddles a 32- or 64-byte fetch line: a straddled two-instruction
+    /// loop measured 2 cycles per iteration where the aligned form sustains
+    /// 1, and a 29-byte loop placed across a 64-byte line ran 60% slower
+    /// than the same loop inside one. Padding executes only on fallthrough
+    /// entry, as a few multi-byte NOPs.
+    fn align_loop_header(&mut self) {
+        self.pad_to_runtime_alignment(32);
+    }
+
+    /// A recursive call target measured the same way: fibonacci-rec ran
+    /// 14% slower with its internal entry at byte 61 of a 64-byte line than
+    /// at byte 1, with identical code.
+    fn align_internal_entry(&mut self) {
+        self.pad_to_runtime_alignment(32);
+    }
+
+    fn lower_function_literal_pool(&mut self) -> Result<(), WasmError> {
+        if !self.pending_jump_tables.is_empty() {
+            while self.core.text.len() % 8 != 0 {
+                self.core.text.emit_u8(0);
+            }
+            for table in core::mem::take(&mut self.pending_jump_tables) {
+                let table_offset = self.core.text.len();
+                self.core.resolved_ptr_patches.push(
+                    crate::vm::jit::arch::common::types::LocalPtrPatch {
+                        literal_offset: table.base_imm_offset,
+                        target_offset: table_offset,
+                    },
+                );
+                for label in table.entry_labels {
+                    let literal_offset = self.core.text.emit_u64(0);
+                    self.core.local_ptr_patches.push(
+                        crate::vm::jit::arch::common::types::PendingLocalPtrPatch {
+                            literal_offset,
+                            target_label: label,
+                        },
+                    );
+                }
+            }
+        }
+        if self.fp_literals.is_empty() {
+            return Ok(());
+        }
+        while self.core.text.len() % 8 != 0 {
+            self.core.text.emit_u8(0);
+        }
+        let mut literal_offsets = collections::Vec::with_capacity(self.fp_literals.len());
+        for &bits in &self.fp_literals {
+            literal_offsets.push(self.core.text.emit_u64(bits));
+        }
+        for fixup in &self.fp_literal_fixups {
+            let literal_offset = literal_offsets[fixup.literal_index];
+            // disp32 is relative to the end of the load instruction, whose
+            // last field is the displacement itself.
+            let disp = literal_offset as i64 - (fixup.disp_offset as i64 + 4);
+            let disp = i32::try_from(disp).map_err(|_| {
+                WasmError::internal("x86_64 fp literal pool displacement out of range")
+            })?;
+            self.core.text.patch_i32(fixup.disp_offset, disp);
+        }
+        Ok(())
+    }
+
+    fn lower_prologue(&mut self) {
+        for &reg in abi::callee_saved_gp_regs() {
+            enc::push(&mut self.core.text, reg);
+        }
+        if STACK_PADDING > 0 {
+            if STACK_PADDING <= 127 {
+                enc::sub_rsp_imm8(&mut self.core.text, STACK_PADDING as u8);
+            } else {
+                enc::sub_rsp_imm32(&mut self.core.text, STACK_PADDING);
+            }
+        }
+        // ABI-specific spills (e.g. XMM6..XMM15 on Win64).
+        callconv::emit_prologue_extra(self);
+        enc::mov_rr_64(&mut self.core.text, map_fixed_reg(MACHINE_CTX_REG), C_ARG0);
+        enc::mov_rr_64(&mut self.core.text, map_fixed_reg(MACHINE_FP_REG), C_ARG1);
+        // Load the mem0 base from ctx. The size stays there
+        // (`abi::mem0_size_addr`).
+        enc::load_64(
+            &mut self.core.text,
+            map_fixed_reg(MACHINE_MEM0_BASE_REG),
+            map_fixed_reg(MACHINE_CTX_REG),
+            ctx_offset::MEM0_BASE as i32,
+        );
+    }
+
+    fn lower_epilogue(&mut self) {
+        // ABI-specific restores (mirror of `callconv::emit_prologue_extra`).
+        callconv::emit_epilogue_extra(self);
+        if STACK_PADDING > 0 {
+            if STACK_PADDING <= 127 {
+                enc::add_rsp_imm8(&mut self.core.text, STACK_PADDING as u8);
+            } else {
+                enc::add_rsp_imm32(&mut self.core.text, STACK_PADDING);
+            }
+        }
+        for &reg in abi::callee_saved_gp_regs().iter().rev() {
+            enc::pop(&mut self.core.text, reg);
+        }
+        enc::ret(&mut self.core.text);
+    }
+
+    /// Public-entry caller stub. Loads the register-passed parameter lanes
+    /// from the public frame and `call`s the internal entry. On success it
+    /// copies scalar lane returns into the public result prefix that the
+    /// runtime reads; on error it falls through with `C_RET0` intact.
+    /// Control then falls through to `lower_epilogue` either way.
+    fn lower_root_caller_stub(&mut self) {
+        self.lower_root_param_lanes_from_frame();
+        // call internal_entry_label (patched by patch_fixups)
+        let internal_entry_label = self.core.internal_entry_label;
+        self.emit_call_rel32(internal_entry_label);
+
+        let done = self.core.new_label();
+        enc::test_rr_64(&mut self.core.text, abi::C_RET0, abi::C_RET0);
+        self.emit_jcc(Cc::NE, done);
+        self.lower_root_result_copy_to_public_slots();
+        self.core.bind_label(done);
+    }
+
+    fn lower_body_entry_guard(&mut self, next: Option<MachineBlockId>) -> Result<bool, WasmError> {
+        self.emit_body_entry_guard(next)
+    }
+
+    /// Body entry prelude. On x86_64, `call` already pushed the return
+    /// address onto the host stack when the caller stub entered, leaving SP
+    /// misaligned by 8 (relative to the 16-byte requirement). The body
+    /// prelude subtracts 8 more to restore 16-byte alignment so the body
+    /// can make nested C helper / preserved-helper calls without tripping
+    /// the ABI's stack alignment check.
+    ///
+    /// The body's unified Return and `body_local_error_label` both `add
+    /// rsp, 8` before popping the call record, mirroring this shim.
+    fn lower_body_prelude(&mut self) {
+        let (saves, shim) = self.body_frame_plan();
+        for reg in &saves {
+            enc::push(&mut self.core.text, *reg);
+        }
+        if shim != 0 {
+            enc::sub_rsp_imm8(&mut self.core.text, shim);
+        }
+    }
+
+    /// Body-local error tail (`body_local_error_label`). Reached from trap
+    /// stubs and post-call status checks. Undoes the body prelude and
+    /// `ret`s with `C_RET0` untouched, preserving the error code set by
+    /// the trap stub or inherited from a trapped descendant's call. The
+    /// caller restores its own frame pointer by delta after the call, so
+    /// the tail leaves `MACHINE_FP_REG` alone.
+    fn lower_body_local_error_tail(&mut self) {
+        self.lower_body_frame_undo();
+        enc::ret(&mut self.core.text);
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    fn lower_stack_probe(&mut self, addr: MachineAddr) -> Result<(), WasmError> {
+        self.emit_stack_probe(addr)
+    }
+
+    fn lower_inst(&mut self, inst: &MachineInst) -> Result<(), WasmError> {
+        self.lower_inst_dispatch(inst)
+    }
+
+    fn begin_block(&mut self, block: &MachineBlock) -> Result<(), WasmError> {
+        // Streaming entry: the lookahead never carries across blocks.
+        self.pending_op = None;
+        self.rmw_skip = 0;
+        self.narrow_equality =
+            super::narrow_equality::narrow_equality(block, self.core.mir_blocks()?);
+        self.float_branch = if self.narrow_equality.is_none() {
+            super::float_cond::float_compare_branch(block, self.core.mir_blocks()?)
+        } else {
+            None
+        };
+        // A fallthrough edge may emit no bytes, but other predecessors do
+        // not promise the same flags. Position stamps only prove reuse
+        // within the current block.
+        self.int_flags = None;
+        self.core.current_block = Some(block.id);
+        self.core.current_edge_target = None;
+        self.core.reset_block_fp_state(block)?;
+        Ok(())
+    }
+
+    fn emit_inst_at(&mut self, inst: &'a MachineInst, index: usize) -> Result<(), WasmError> {
+        if self
+            .narrow_equality
+            .is_some_and(|plan| index >= plan.first_skipped)
+        {
+            debug_assert!(self.pending_op.is_none());
+            return Ok(());
+        }
+        if self.float_branch.is_some_and(|plan| index == plan.index) {
+            // An earlier buffered op still flushes in order at `end_block`,
+            // before the terminator emits the compare.
+            return Ok(());
+        }
+        if self.rmw_skip > 0 {
+            self.rmw_skip -= 1;
+            return Ok(());
+        }
+        if let Some(fusion) = self.rmw_candidate(inst, index) {
+            if let Some((prev, prev_index)) = self.pending_op.take() {
+                self.core.current_op_index = Some(prev_index);
+                self.lower_inst(prev)?;
+                self.gp_scratch.assert_all_free();
+                self.fp_scratch.assert_all_free();
+            }
+            self.core.current_op_index = Some(index);
+            self.lower_rmw(&fusion)?;
+            self.gp_scratch.assert_all_free();
+            self.fp_scratch.assert_all_free();
+            self.rmw_skip = 2;
+            return Ok(());
+        }
+        // Try to consume the buffered pair together. On a miss, emit
+        // the previous op first, preserving program order and trap order.
+        if let Some((prev, prev_index)) = self.pending_op.take() {
+            if matches!(prev.kind, MachineInstKind::Move { .. }) {
+                let load = self
+                    .core
+                    .current_block
+                    .and_then(|id| self.core.mir_blocks().ok()?.get(id.as_usize()))
+                    .and_then(|block| {
+                        super::fusion::copied_narrow_load(
+                            prev,
+                            inst,
+                            &block.ops[index + 1..],
+                            &block.terminator,
+                        )
+                    });
+                if let Some(load) = load {
+                    self.core.current_op_index = Some(index);
+                    self.lower_inst(&load)?;
+                    self.gp_scratch.assert_all_free();
+                    self.fp_scratch.assert_all_free();
+                    return Ok(());
+                }
+            }
+            if let Some(fusion) = super::fusion::load_alu_fusion(prev, inst) {
+                let loaded_dead = self
+                    .core
+                    .current_block
+                    .and_then(|id| self.core.mir_blocks().ok()?.get(id.as_usize()))
+                    .is_some_and(|block| {
+                        !crate::vm::jit::machine::peephole::helpers::reg_live_after(
+                            &block.ops[index + 1..],
+                            &block.terminator,
+                            fusion.loaded,
+                        )
+                    });
+                if loaded_dead {
+                    self.core.current_op_index = Some(index);
+                    self.lower_load_alu(&fusion)?;
+                    self.gp_scratch.assert_all_free();
+                    self.fp_scratch.assert_all_free();
+                    return Ok(());
+                }
+            }
+            if super::cpu::has_avx() {
+                if let Some(fusion) =
+                    super::fusion::load_float_fusion(prev, inst, |reg| self.core.is_fp_reg(reg))
+                {
+                    // The arithmetic either overwrites the loaded register or
+                    // must be its last reader.
+                    let loaded_consumed = fusion.dst == fusion.loaded
+                        || self
+                            .core
+                            .current_block
+                            .and_then(|id| self.core.mir_blocks().ok()?.get(id.as_usize()))
+                            .is_some_and(|block| {
+                                !crate::vm::jit::machine::peephole::helpers::reg_live_after(
+                                    &block.ops[index + 1..],
+                                    &block.terminator,
+                                    fusion.loaded,
+                                )
+                            });
+                    if loaded_consumed {
+                        self.core.current_op_index = Some(index);
+                        self.lower_load_float(&fusion)?;
+                        self.gp_scratch.assert_all_free();
+                        self.fp_scratch.assert_all_free();
+                        return Ok(());
+                    }
+                }
+            }
+            if let Some(fusion) = super::float_cond::float_compare_select_fusion(prev, inst) {
+                let bool_is_dead = self
+                    .core
+                    .current_block
+                    .and_then(|id| self.core.mir_blocks().ok()?.get(id.as_usize()))
+                    .is_some_and(|block| {
+                        !crate::vm::jit::machine::peephole::helpers::reg_live_after(
+                            &block.ops[index + 1..],
+                            &block.terminator,
+                            fusion.bool_reg,
+                        )
+                    });
+                if bool_is_dead {
+                    let MachineInstKind::Select {
+                        ty,
+                        dst,
+                        on_true,
+                        on_false,
+                        cond: _,
+                    } = inst.kind
+                    else {
+                        unreachable!("validated float compare-select fusion");
+                    };
+                    self.core.current_op_index = Some(index);
+                    self.lower_fused_float_compare_select(&fusion, ty, dst, on_true, on_false)?;
+                    self.gp_scratch.assert_all_free();
+                    self.fp_scratch.assert_all_free();
+                    return Ok(());
+                }
+            }
+            if let Some(fusion) = super::fusion::int_compare_select_fusion(prev, inst) {
+                let bool_is_dead = self
+                    .core
+                    .current_block
+                    .and_then(|id| self.core.mir_blocks().ok()?.get(id.as_usize()))
+                    .is_some_and(|block| {
+                        fusion.bool_reg == fusion.select_result
+                            || !crate::vm::jit::machine::peephole::helpers::reg_live_after(
+                                &block.ops[index + 1..],
+                                &block.terminator,
+                                fusion.bool_reg,
+                            )
+                    });
+                if bool_is_dead {
+                    let MachineInstKind::Select {
+                        ty,
+                        dst,
+                        on_true,
+                        on_false,
+                        cond: _,
+                    } = inst.kind
+                    else {
+                        unreachable!("validated compare-select fusion");
+                    };
+                    self.core.current_op_index = Some(index);
+                    self.lower_fused_compare_select(&fusion, ty, dst, on_true, on_false)?;
+                    self.gp_scratch.assert_all_free();
+                    self.fp_scratch.assert_all_free();
+                    return Ok(());
+                }
+            }
+            if let Some(fusion) = super::fusion::int_compare_carry_fusion(prev, inst) {
+                let bool_is_dead = self
+                    .core
+                    .current_block
+                    .and_then(|id| self.core.mir_blocks().ok()?.get(id.as_usize()))
+                    .is_some_and(|block| {
+                        fusion.bool_reg == fusion.dst
+                            || !crate::vm::jit::machine::peephole::helpers::reg_live_after(
+                                &block.ops[index + 1..],
+                                &block.terminator,
+                                fusion.bool_reg,
+                            )
+                    });
+                if bool_is_dead {
+                    self.core.current_op_index = Some(index);
+                    self.lower_fused_compare_carry(&fusion)?;
+                    self.gp_scratch.assert_all_free();
+                    self.fp_scratch.assert_all_free();
+                    return Ok(());
+                }
+            }
+            self.core.current_op_index = Some(prev_index);
+            self.lower_inst(prev)?;
+            self.gp_scratch.assert_all_free();
+            self.fp_scratch.assert_all_free();
+        }
+        if super::fusion::fusible_load(&inst.kind)
+            || matches!(
+                inst.kind,
+                MachineInstKind::IntCompare { .. } | MachineInstKind::FloatCompare { .. }
+            )
+            || (matches!(
+                inst.kind,
+                MachineInstKind::Move {
+                    owner: MachineRegOwner::LinearValue,
+                    ty: MachineStorageType::GpWord | MachineStorageType::GpI64,
+                    src: MachineValue::Reg(_),
+                    ..
+                }
+            ) && self
+                .core
+                .current_block
+                .and_then(|id| self.core.mir_blocks().ok()?.get(id.as_usize()))
+                .and_then(|block| block.ops.get(index + 1))
+                .is_some_and(|next| {
+                    matches!(
+                        next.kind,
+                        MachineInstKind::IndexedLoad {
+                            width: MachineMemWidth::U8 | MachineMemWidth::U16,
+                            ..
+                        }
+                    )
+                }))
+        {
+            self.pending_op = Some((inst, index));
+            return Ok(());
+        }
+        self.core.current_op_index = Some(index);
+        self.lower_inst(inst)?;
+        self.gp_scratch.assert_all_free();
+        self.fp_scratch.assert_all_free();
+        Ok(())
+    }
+
+    fn end_block(
+        &mut self,
+        term: &MachineTerminator,
+        fallthrough: Option<MachineBlockId>,
+    ) -> Result<(), WasmError> {
+        if let Some((prev, prev_index)) = self.pending_op.take() {
+            let plan = (self.narrow_equality.is_none() && self.float_branch.is_none())
+                .then(|| {
+                    super::fusion::branch_load_compare(prev, term, |reg| self.core.is_fp_reg(reg))
+                })
+                .flatten();
+            if plan.is_some() {
+                // The branch compare reads the memory operand itself.
+                self.branch_load_compare = plan;
+            } else {
+                self.core.current_op_index = Some(prev_index);
+                self.lower_inst(prev)?;
+                self.gp_scratch.assert_all_free();
+                self.fp_scratch.assert_all_free();
+            }
+        }
+        self.core.current_op_index = None;
+        let result = self.lower_terminator(term, fallthrough);
+        debug_assert!(
+            self.branch_load_compare.is_none(),
+            "branch load compare must be consumed by its branch"
+        );
+        self.branch_load_compare = None;
+        self.narrow_equality = None;
+        self.float_branch = None;
+        self.gp_scratch.assert_all_free();
+        self.fp_scratch.assert_all_free();
+        self.core.current_block = None;
+        result
+    }
+
+    fn lower_terminator(
+        &mut self,
+        term: &MachineTerminator,
+        fallthrough: Option<MachineBlockId>,
+    ) -> Result<(), WasmError> {
+        self.lower_terminator_dispatch(term, fallthrough)
+    }
+
+    fn lower_trap(&mut self, kind: MachineTrapKind) {
+        self.lower_trap_dispatch(kind);
+    }
+
+    fn lower_unconditional_branch(&mut self, label: usize) {
+        self.emit_jmp(label);
+    }
+
+    fn patch_fixups(&mut self) -> Result<(), WasmError> {
+        for fixup in &self.fixups {
+            let target = self
+                .core
+                .labels
+                .get(fixup.label)
+                .and_then(|value| *value)
+                .ok_or_else(|| WasmError::internal("x86_64 branch target label is unresolved"))?;
+            enc::patch_rel32(&mut self.core.text, fixup.rel32_offset, target);
+        }
+        Ok(())
+    }
+
+    fn alloc_gp_scratch(&mut self) -> u8 {
+        self.gp_scratch.alloc()
+    }
+    fn free_gp_scratch(&mut self, id: u8) {
+        self.gp_scratch.free_index(id)
+    }
+    fn alloc_fp_scratch(&mut self) -> u8 {
+        self.fp_scratch.alloc()
+    }
+    fn free_fp_scratch(&mut self, id: u8) {
+        self.fp_scratch.free_index(id)
+    }
+
+    fn lower_source_move(
+        &mut self,
+        dst: MachineBlockParam,
+        src: ParallelSource,
+    ) -> Result<(), WasmError> {
+        self.lower_source_move_dispatch(dst, src)
+    }
+
+    fn lower_gp_cycle_break(
+        &mut self,
+        dst: MachineReg,
+        src: MachineReg,
+        scratch_id: u8,
+    ) -> Result<(), WasmError> {
+        let temp = self.gp_scratch.reg(scratch_id);
+        let dst_gp = self.map_gp_reg(dst)?;
+        let src_gp = self.map_gp_reg(src)?;
+        enc::mov_rr_64(&mut self.core.text, temp, dst_gp);
+        enc::mov_rr_64(&mut self.core.text, dst_gp, src_gp);
+        Ok(())
+    }
+
+    fn lower_fp_cycle_break(
+        &mut self,
+        dst: MachineBlockParam,
+        src: MachineReg,
+        _float_width: Option<MachineFloatWidth>,
+        scratch_id: u8,
+    ) -> Result<(), WasmError> {
+        let temp = self.fp_scratch.reg(scratch_id);
+        let dst_fp = self.map_fp_reg(dst.reg)? as u8;
+        let width = dst.ty.float_width().expect("FP param width");
+        match width {
+            MachineFloatWidth::F32 => enc::movaps_rr(&mut self.core.text, temp as u8, dst_fp),
+            MachineFloatWidth::F64 => enc::movaps_rr(&mut self.core.text, temp as u8, dst_fp),
+        };
+        let src_fp = self.map_fp_reg(src)? as u8;
+        match width {
+            MachineFloatWidth::F32 => {
+                enc::movaps_rr(&mut self.core.text, dst_fp, src_fp);
+                self.core
+                    .set_fp_reg_width(dst.reg, MachineFloatWidth::F32)?;
+            }
+            MachineFloatWidth::F64 => {
+                enc::movaps_rr(&mut self.core.text, dst_fp, src_fp);
+                self.core
+                    .set_fp_reg_width(dst.reg, MachineFloatWidth::F64)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_nop_padding(buf: &mut CodeBuffer, bytes: usize) {
+        const INT3: u8 = 0xCC;
+        for _ in 0..bytes {
+            buf.emit_bytes(&[INT3]);
+        }
+    }
+}
+
+impl<'a> crate::vm::jit::arch::shared_64::ModuleLinkBackend64<'a> for X86_64Backend<'a> {
+    type CompiledEntry = CompiledX86_64Entry;
+
+    fn make_entry(
+        buf: &CodeBuffer,
+        emitted: &crate::vm::jit::arch::shared_64::EmittedFunction64,
+    ) -> Self::CompiledEntry {
+        let entry = unsafe {
+            buf.fn_ptr::<crate::vm::jit::runtime::code::NativeRootEntry>(emitted.text_offset)
+        };
+        CompiledX86_64Entry {
+            entry,
+            text_len: emitted.text_len,
+            #[cfg(debug_assertions)]
+            debug_regions: emitted.debug_regions.clone(),
+        }
+    }
+}
+
+// ── Inherent helper methods ──────────────────────────────────────────────────
+
+impl<'a> X86_64Backend<'a> {
+    #[inline]
+    pub(super) fn emit_gp_move_width(&mut self, width: MachineIntWidth, dst: X86Reg, src: X86Reg) {
+        let flags = self
+            .current_int_flags()
+            .filter(|&(produced_width, producer)| {
+                dst != producer
+                    || (dst == src
+                        && (width == MachineIntWidth::I64
+                            || produced_width == MachineIntWidth::I32))
+            });
+        match width {
+            MachineIntWidth::I32 => enc::mov_rr_32(&mut self.core.text, dst, src),
+            MachineIntWidth::I64 => enc::mov_rr_64(&mut self.core.text, dst, src),
+        }
+        // MOV preserves flags, but replacing the producer invalidates the
+        // association. Even a self-copy through r32 can turn a nonzero i64
+        // with a zero low half into zero, so it cannot carry a 64-bit proof.
+        if let Some((produced_width, producer)) = flags {
+            self.note_int_flags(produced_width, producer);
+        }
+    }
+
+    #[inline]
+    pub(super) fn emit_gp_move_ty(
+        &mut self,
+        ty: MachineStorageType,
+        dst: X86Reg,
+        src: X86Reg,
+    ) -> Result<(), WasmError> {
+        match ty {
+            // GpWord carries both i32 values and references. Preserve the full
+            // 64-bit carrier here so ref null sentinels survive plain moves.
+            MachineStorageType::GpWord | MachineStorageType::GpI64 => {
+                self.emit_gp_move_width(MachineIntWidth::I64, dst, src)
+            }
+            MachineStorageType::Fp32 | MachineStorageType::Fp64 | MachineStorageType::V128 => {
+                return Err(WasmError::internal(
+                    "x86_64 GP move requested for FP storage type".into(),
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub(super) fn emit_gp_cmov_ty(
+        &mut self,
+        ty: MachineStorageType,
+        cc: Cc,
+        dst: X86Reg,
+        src: X86Reg,
+    ) -> Result<(), WasmError> {
+        match ty {
+            // GpWord covers references as well as i32 carriers; keep the full
+            // 64-bit payload when selecting between them.
+            MachineStorageType::GpWord => enc::cmovcc_rr_64(&mut self.core.text, cc, dst, src),
+            MachineStorageType::GpI64 => enc::cmovcc_rr_64(&mut self.core.text, cc, dst, src),
+            MachineStorageType::Fp32 | MachineStorageType::Fp64 | MachineStorageType::V128 => {
+                return Err(WasmError::internal(
+                    "x86_64 GP cmov requested for FP storage type".into(),
+                ))
+            }
+        }
+        Ok(())
+    }
+
+    // ── Branch fixup helpers ─────────────────────────────────────────────
+
+    /// Bound nearby targets use rel8 immediately; others keep a rel32 fixup.
+    pub(super) fn emit_jmp(&mut self, label: usize) {
+        if let Some(target) = self.core.labels.get(label).copied().flatten() {
+            if enc::try_branch_rel8(&mut self.core.text, None, target) {
+                return;
+            }
+        }
+        let rel32_offset = enc::jmp_rel32(&mut self.core.text);
+        self.fixups.push(BranchFixup {
+            rel32_offset,
+            label,
+        });
+    }
+
+    /// Bound nearby targets use rel8 immediately; others keep a rel32 fixup.
+    pub(super) fn emit_jcc(&mut self, cc: Cc, label: usize) {
+        if let Some(target) = self.core.labels.get(label).copied().flatten() {
+            if enc::try_branch_rel8(&mut self.core.text, Some(cc), target) {
+                return;
+            }
+        }
+        let rel32_offset = enc::jcc_rel32(&mut self.core.text, cc);
+        self.fixups.push(BranchFixup {
+            rel32_offset,
+            label,
+        });
+    }
+
+    /// Emit CALL rel32 with a fixup to be patched later.
+    pub(super) fn emit_call_rel32(&mut self, label: usize) {
+        let rel32_offset = enc::call_rel32(&mut self.core.text);
+        self.fixups.push(BranchFixup {
+            rel32_offset,
+            label,
+        });
+    }
+
+    /// Pad with multi-byte NOPs until the next instruction's runtime address
+    /// is a multiple of `align`.
+    fn pad_to_runtime_alignment(&mut self, align: usize) {
+        let misalign = self.core.text.next_addr_for_alignment() % align;
+        if misalign != 0 {
+            enc::emit_nops(&mut self.core.text, align - misalign);
+        }
+    }
+
+    // ── Register mapping ─────────────────────────────────────────────────
+
+    #[inline]
+    pub(super) fn map_gp_reg(&self, reg: MachineReg) -> Result<X86Reg, WasmError> {
+        crate::vm::jit::arch::common::helpers::validate_gp_reg(self, reg)?;
+        map_reg(reg)
+    }
+
+    pub(super) fn map_fp_reg(&self, reg: MachineReg) -> Result<u32, WasmError> {
+        let index = self.core.fp_reg_index(reg)?;
+        fp_machine_reg(index).ok_or_else(|| {
+            WasmError::invalid("x86_64 backend has no physical FP mapping for machine reg")
+        })
+    }
+
+    // ── Value materialization ────────────────────────────────────────────
+
+    /// Read memory 0's byte length from the runtime context
+    /// (`abi::mem0_size_addr`). Leaves EFLAGS untouched.
+    pub(super) fn load_mem0_size(&mut self, dst: X86Reg) {
+        let (base, disp) = abi::mem0_size_addr();
+        enc::load_64(&mut self.core.text, dst, base, disp);
+    }
+
+    /// Memory 0's byte length as a memory operand.
+    pub(super) fn mem0_size_mem() -> enc::GpMem {
+        let (base, disp) = abi::mem0_size_addr();
+        enc::GpMem::Base { base, disp }
+    }
+
+    pub(super) fn materialize_u64(&mut self, dst: X86Reg, value: u64) {
+        if value == 0 {
+            enc::xor_rr_32(&mut self.core.text, dst, dst);
+        } else if value <= u32::MAX as u64 {
+            enc::mov_ri_32(&mut self.core.text, dst, value as u32);
+        } else {
+            enc::mov_ri_64(&mut self.core.text, dst, value);
+        }
+    }
+
+    pub(super) fn materialize_value(
+        &mut self,
+        scratch: X86Reg,
+        value: MachineValue,
+    ) -> Result<X86Reg, WasmError> {
+        match value {
+            MachineValue::Reg(reg) if self.core.is_fp_reg(reg) => {
+                let src_fp = self.map_fp_reg(reg)?;
+                match self.core.fp_reg_width(reg)? {
+                    MachineFloatWidth::F32 => {
+                        enc::movd_r32_xmm(&mut self.core.text, scratch, src_fp as u8);
+                    }
+                    MachineFloatWidth::F64 => {
+                        enc::movq_r64_xmm(&mut self.core.text, scratch, src_fp as u8);
+                    }
+                };
+                Ok(scratch)
+            }
+            MachineValue::Reg(MACHINE_MEM0_SIZE_REG) => {
+                self.load_mem0_size(scratch);
+                Ok(scratch)
+            }
+            MachineValue::Reg(reg) => self.map_gp_reg(reg),
+            MachineValue::Imm64(value) => {
+                self.materialize_u64(scratch, value);
+                Ok(scratch)
+            }
+            MachineValue::ReservedReg(_reg) => Err(WasmError::internal(
+                "x86_64 cannot materialize reserved cache register",
+            )),
+        }
+    }
+
+    /// Load an FP immediate from the function's literal pool: one FP-domain
+    /// load the core can hoist, instead of a GP materialization plus a
+    /// domain-crossing move on the consumer's critical path. Zero is a
+    /// register-clearing XOR.
+    pub(super) fn load_float_immediate(&mut self, width: MachineFloatWidth, bits: u64, dst: u8) {
+        let imm = match width {
+            MachineFloatWidth::F32 => u64::from(bits as u32),
+            MachineFloatWidth::F64 => bits,
+        };
+        if imm == 0 {
+            match width {
+                MachineFloatWidth::F32 => enc::xorps(&mut self.core.text, dst, dst),
+                MachineFloatWidth::F64 => enc::xorpd(&mut self.core.text, dst, dst),
+            };
+            return;
+        }
+        let literal_index = self.intern_fp_literal(imm);
+        let double = width == MachineFloatWidth::F64;
+        let disp_offset = if super::cpu::has_avx() {
+            enc::vex_movs_rip(&mut self.core.text, double, dst)
+        } else if double {
+            enc::movsd_rip(&mut self.core.text, dst)
+        } else {
+            enc::movss_rip(&mut self.core.text, dst)
+        };
+        self.fp_literal_fixups.push(FpLiteralFixup {
+            disp_offset,
+            literal_index,
+        });
+    }
+
+    /// A `load; op; store` triple starting at `index` that fuses into one
+    /// read-modify-write, with both intermediate values dead afterwards.
+    fn rmw_candidate(&self, load: &MachineInst, index: usize) -> Option<super::rmw::RmwFusion> {
+        if !matches!(load.kind, MachineInstKind::IndexedLoad { .. }) {
+            return None;
+        }
+        let block = self
+            .core
+            .mir_blocks()
+            .ok()?
+            .get(self.core.current_block?.as_usize())?;
+        let fusion =
+            super::rmw::rmw_fusion(load, block.ops.get(index + 1)?, block.ops.get(index + 2)?)?;
+        let after = block.ops.get(index + 3..)?;
+        let live = |reg| {
+            crate::vm::jit::machine::peephole::helpers::reg_live_after(
+                after,
+                &block.terminator,
+                reg,
+            )
+        };
+        (!live(fusion.loaded) && !live(fusion.result)).then_some(fusion)
+    }
+
+    /// UCOMISS/UCOMISD `lhs, rhs`: CF=1 when `lhs < rhs` or unordered,
+    /// ZF=1 when equal or unordered, PF=1 only when unordered.
+    pub(super) fn ucomis(&mut self, width: MachineFloatWidth, lhs: u8, rhs: u8) {
+        match width {
+            MachineFloatWidth::F32 => enc::ucomiss(&mut self.core.text, lhs, rhs),
+            MachineFloatWidth::F64 => enc::ucomisd(&mut self.core.text, lhs, rhs),
+        }
+    }
+
+    pub(super) fn prepare_float_operand(
+        &mut self,
+        width: MachineFloatWidth,
+        value: MachineValue,
+        gp_scratch: X86Reg,
+        fp_scratch: u32,
+    ) -> Result<u32, WasmError> {
+        if let MachineValue::Reg(reg) = value {
+            if self.core.is_fp_reg(reg) {
+                return Ok(self.map_fp_reg(reg)?);
+            }
+        }
+        if let MachineValue::Imm64(bits) = value {
+            self.load_float_immediate(width, bits, fp_scratch as u8);
+            return Ok(fp_scratch);
+        }
+        let gp = self.materialize_value(gp_scratch, value)?;
+        match width {
+            MachineFloatWidth::F32 => enc::movd_xmm_r32(&mut self.core.text, fp_scratch as u8, gp),
+            MachineFloatWidth::F64 => enc::movq_xmm_r64(&mut self.core.text, fp_scratch as u8, gp),
+        };
+        Ok(fp_scratch)
+    }
+
+    // ── Source move dispatch ─────────────────────────────────────────────
+
+    fn lower_source_move_dispatch(
+        &mut self,
+        dst: MachineBlockParam,
+        src: ParallelSource,
+    ) -> Result<(), WasmError> {
+        match src {
+            ParallelSource::Reg {
+                reg: src_reg,
+                float_width: src_float_width,
+            } => {
+                if let Some(width) = dst.ty.float_width() {
+                    let dst_fp = self.map_fp_reg(dst.reg)? as u8;
+                    if self.core.is_fp_reg(src_reg) {
+                        let src_fp = self.map_fp_reg(src_reg)? as u8;
+                        match width {
+                            MachineFloatWidth::F32 => {
+                                enc::movaps_rr(&mut self.core.text, dst_fp, src_fp);
+                                self.core
+                                    .set_fp_reg_width(dst.reg, MachineFloatWidth::F32)?;
+                            }
+                            MachineFloatWidth::F64 => {
+                                enc::movaps_rr(&mut self.core.text, dst_fp, src_fp);
+                                self.core
+                                    .set_fp_reg_width(dst.reg, MachineFloatWidth::F64)?;
+                            }
+                        }
+                    } else {
+                        let src_gp = self.map_gp_reg(src_reg)?;
+                        match width {
+                            MachineFloatWidth::F32 => {
+                                enc::movd_xmm_r32(&mut self.core.text, dst_fp, src_gp);
+                                self.core
+                                    .set_fp_reg_width(dst.reg, MachineFloatWidth::F32)?;
+                            }
+                            MachineFloatWidth::F64 => {
+                                enc::movq_xmm_r64(&mut self.core.text, dst_fp, src_gp);
+                                self.core
+                                    .set_fp_reg_width(dst.reg, MachineFloatWidth::F64)?;
+                            }
+                        }
+                    }
+                } else {
+                    let dst_gp = self.map_gp_reg(dst.reg)?;
+                    if self.core.is_fp_reg(src_reg) {
+                        let src_fp = self.map_fp_reg(src_reg)? as u8;
+                        match src_float_width.ok_or_else(|| {
+                            WasmError::internal(
+                                "x86_64 edge move is missing float-width metadata for an FP source reg",
+                            )
+                        })? {
+                            MachineFloatWidth::F32 => {
+                                enc::movd_r32_xmm(&mut self.core.text, dst_gp, src_fp)
+                            }
+                            MachineFloatWidth::F64 => {
+                                enc::movq_r64_xmm(&mut self.core.text, dst_gp, src_fp)
+                            }
+                        }
+                    } else {
+                        let src_gp = self.map_gp_reg(src_reg)?;
+                        enc::mov_rr_64(&mut self.core.text, dst_gp, src_gp);
+                    }
+                }
+            }
+            ParallelSource::ReservedReg(_reg) => {
+                return Err(WasmError::internal(
+                    "x86_64 received non-identity reserved cache edge move into from",
+                ));
+            }
+            ParallelSource::Imm(value) => {
+                if dst.ty.is_fp() {
+                    let dst_fp = self.map_fp_reg(dst.reg)? as u8;
+                    match dst.ty {
+                        MachineStorageType::Fp32 => {
+                            let scratch = self.gp_scratch.scoped_alloc().detach();
+                            self.materialize_u64(*scratch, value);
+                            enc::movd_xmm_r32(&mut self.core.text, dst_fp, *scratch);
+                            self.core
+                                .set_fp_reg_width(dst.reg, MachineFloatWidth::F32)?;
+                        }
+                        MachineStorageType::Fp64 => {
+                            let scratch = self.gp_scratch.scoped_alloc().detach();
+                            self.materialize_u64(*scratch, value);
+                            enc::movq_xmm_r64(&mut self.core.text, dst_fp, *scratch);
+                            self.core
+                                .set_fp_reg_width(dst.reg, MachineFloatWidth::F64)?;
+                        }
+                        MachineStorageType::V128 => {
+                            return Err(WasmError::internal(
+                                "x86_64 edge move cannot materialize a v128 immediate",
+                            ))
+                        }
+                        MachineStorageType::GpWord | MachineStorageType::GpI64 => unreachable!(),
+                    }
+                } else {
+                    let dst_gp = self.map_gp_reg(dst.reg)?;
+                    self.materialize_u64(dst_gp, value);
+                }
+            }
+            ParallelSource::GpTemp(id) => {
+                let temp = self.gp_scratch.reg(id);
+                let dst_gp = self.map_gp_reg(dst.reg)?;
+                enc::mov_rr_64(&mut self.core.text, dst_gp, temp);
+            }
+            ParallelSource::FpTemp(id, width) => {
+                let temp = self.fp_scratch.reg(id);
+                let dst_fp = self.map_fp_reg(dst.reg)? as u8;
+                match width {
+                    MachineFloatWidth::F32 => {
+                        enc::movaps_rr(&mut self.core.text, dst_fp, temp as u8)
+                    }
+                    MachineFloatWidth::F64 => {
+                        enc::movaps_rr(&mut self.core.text, dst_fp, temp as u8)
+                    }
+                };
+                self.core.set_fp_reg_width(dst.reg, width)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod result_flags_tests {
+    use super::*;
+    use crate::vm::jit::{
+        arch::common::core::FunctionBody,
+        backend::BackendConfig,
+        machine::machine_ir::{
+            MachineBranchCond, MachineCompareKind, MachineConstId, MachineEdge, MachineFuncId,
+            MachineFunction, MachineFunctionAbi, MachineIntBinaryOp, MachineSign,
+        },
+        runtime::code::CodegenModuleView,
+    };
+
+    #[derive(Debug)]
+    struct TestModule;
+
+    impl CodegenModuleView for TestModule {
+        fn backend(&self) -> BackendConfig {
+            abi::compile_backend_config()
+        }
+
+        fn memory0_is64(&self) -> Option<bool> {
+            None
+        }
+
+        fn memory0_is_shared(&self) -> Option<bool> {
+            None
+        }
+
+        fn runtime_for(&self, _id: MachineFuncId) -> Option<&MachineFunctionAbi> {
+            None
+        }
+
+        fn const_ptr(&self, _id: MachineConstId) -> Option<*const u8> {
+            None
+        }
+    }
+
+    fn function() -> MachineFunction {
+        let mut function = MachineFunction::default();
+        for id in 0..3 {
+            function.program.blocks.push(MachineBlock {
+                id: MachineBlockId(id),
+                params: collections::Vec::new(),
+                ops: collections::Vec::new(),
+                terminator: MachineTerminator::Return,
+            });
+        }
+        function
+    }
+
+    fn subtract_one(backend: &mut X86_64Backend<'_>, width: MachineIntWidth) {
+        backend
+            .lower_int_binary(
+                width,
+                MachineIntBinaryOp::Sub,
+                MachineReg(4),
+                MachineValue::Reg(MachineReg(4)),
+                MachineValue::Imm64(1),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn zero_branches_omit_compare_only_for_equal_width_eq_and_ne() {
+        let function = function();
+        for produced in [MachineIntWidth::I32, MachineIntWidth::I64] {
+            for compared in [MachineIntWidth::I32, MachineIntWidth::I64] {
+                for kind in [
+                    MachineCompareKind::Eq,
+                    MachineCompareKind::Ne,
+                    MachineCompareKind::Lt,
+                ] {
+                    let core = CompilerCore::new(&TestModule, FunctionBody::Mir(&function));
+                    let mut backend = X86_64Backend::new(core);
+                    subtract_one(&mut backend, produced);
+                    let start = backend.core.text.len();
+                    backend
+                        .lower_terminator_dispatch(
+                            &MachineTerminator::Branch {
+                                cond: MachineBranchCond::IntCompare {
+                                    width: compared,
+                                    kind,
+                                    sign: MachineSign::Unsigned,
+                                    lhs: MachineValue::Reg(MachineReg(4)),
+                                    rhs: MachineValue::Imm64(0),
+                                },
+                                then_edge: MachineEdge {
+                                    target: MachineBlockId(1),
+                                    args: collections::Vec::new(),
+                                },
+                                else_edge: MachineEdge {
+                                    target: MachineBlockId(2),
+                                    args: collections::Vec::new(),
+                                },
+                            },
+                            Some(MachineBlockId(2)),
+                        )
+                        .unwrap();
+                    let only_jcc = backend.core.text.len() - start == 6;
+                    assert_eq!(
+                        only_jcc,
+                        produced == compared && kind != MachineCompareKind::Lt
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn r32_self_moves_cannot_preserve_full_width_zero_proofs() {
+        let function = function();
+        for produced in [MachineIntWidth::I32, MachineIntWidth::I64] {
+            for copied in [MachineIntWidth::I32, MachineIntWidth::I64] {
+                let core = CompilerCore::new(&TestModule, FunctionBody::Mir(&function));
+                let mut backend = X86_64Backend::new(core);
+                subtract_one(&mut backend, produced);
+                let reg = backend.map_gp_reg(MachineReg(4)).unwrap();
+                backend.emit_gp_move_width(copied, reg, reg);
+                assert_eq!(
+                    backend.int_flags_current(produced, reg),
+                    produced == MachineIntWidth::I32 || copied == MachineIntWidth::I64
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn register_replacement_lea_multiply_and_block_entries_end_the_proof() {
+        let function = function();
+        for case in 0..4 {
+            let core = CompilerCore::new(&TestModule, FunctionBody::Mir(&function));
+            let mut backend = X86_64Backend::new(core);
+            subtract_one(&mut backend, MachineIntWidth::I64);
+            let dst = backend.map_gp_reg(MachineReg(4)).unwrap();
+            let src = backend.map_gp_reg(MachineReg(5)).unwrap();
+            match case {
+                0 => backend.emit_gp_move_width(MachineIntWidth::I64, dst, src),
+                1 => backend
+                    .lower_int_binary(
+                        MachineIntWidth::I64,
+                        MachineIntBinaryOp::Sub,
+                        MachineReg(4),
+                        MachineValue::Reg(MachineReg(5)),
+                        MachineValue::Imm64(1),
+                    )
+                    .unwrap(),
+                2 => backend
+                    .lower_int_binary(
+                        MachineIntWidth::I64,
+                        MachineIntBinaryOp::Mul,
+                        MachineReg(4),
+                        MachineValue::Reg(MachineReg(4)),
+                        MachineValue::Imm64(3),
+                    )
+                    .unwrap(),
+                3 => backend.begin_block(&function.program.blocks[1]).unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(
+                !backend.int_flags_current(MachineIntWidth::I64, dst),
+                "case {case}"
+            );
+        }
+    }
+}

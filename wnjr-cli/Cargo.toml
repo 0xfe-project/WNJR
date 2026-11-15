@@ -1,0 +1,20 @@
+[package]
+name = "wnjr-cli"
+publish = false
+version = "0.1.0"
+edition = "2021"
+description = "Command-line WebAssembly runner using wnjr-core"
+license = "Apache-2.0"
+
+[[bin]]
+name = "wnjr-cli"
+path = "src/main.rs"
+
+
+[dependencies]
+wnjr-core = { path = "../wnjr-core" }
+wnjr-wasi = { path = "../wnjr-wasi" }
+
+[dev-dependencies]
+wat = "1.246.2"
+serde_json = "1.0"

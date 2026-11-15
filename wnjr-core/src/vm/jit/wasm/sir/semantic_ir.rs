@@ -1,0 +1,494 @@
+//! Decoded semantic function-body model.
+//!
+//! `PrimitiveOpKind` carries the shared leaf-op vocabulary. `SemanticOpKind` is the
+//! larger per-function IR that embeds those leaf ops alongside locals, calls,
+//! returns, structured control markers, and branch targets.
+//!
+//! Important:
+//! - no frame-slot layout
+//! - no spill/fill preparation artifacts
+//! - no local-cache decisions
+//! - no prepared block shaping or machine placement
+
+use crate::collections;
+
+use tracked_alloc::collections::BTreeMap;
+
+use crate::error::WasmError;
+use crate::value_type::ValueType;
+
+use super::common::{BrTableEntry, SemanticTarget};
+use super::primitive_op::PrimitiveOpKind;
+
+/// Catch clause of a `try_table`, already resolved against the enclosing
+/// control stack. `tag_idx = None` marks a `catch_all[_ref]` wildcard;
+/// `forwards_exn = true` marks the `_ref` forms.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SemanticCatchClause {
+    pub(crate) tag_idx: Option<u32>,
+    pub(crate) payload_arity: u16,
+    pub(crate) forwards_exn: bool,
+    pub(crate) stack_drop: u32,
+    pub(crate) target: SemanticTarget,
+}
+
+/// One semantic Wasm operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SemanticOp {
+    pub(crate) kind: SemanticOpKind,
+}
+
+/// Semantic function-body op kind.
+///
+/// This owns the parts of Wasm that are not just reusable leaf ops: locals,
+/// calls, returns, structured control markers, and branch metadata. Ordinary
+/// non-structural ops are represented as `Primitive(PrimitiveOpKind)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SemanticOpKind {
+    Primitive(PrimitiveOpKind),
+    LocalGet {
+        idx: u16,
+    },
+    LocalSet {
+        idx: u16,
+    },
+    LocalTee {
+        idx: u16,
+    },
+    Block {
+        params: u16,
+        results: u16,
+    },
+    Loop {
+        params: u16,
+        results: u16,
+    },
+    If {
+        params: u16,
+        results: u16,
+        else_target: SemanticTarget,
+    },
+    Else {
+        end_target: SemanticTarget,
+    },
+    End,
+    Br {
+        stack_drop: u32,
+        arity: u16,
+        target: SemanticTarget,
+    },
+    BrIf {
+        stack_drop: u32,
+        arity: u16,
+        target: SemanticTarget,
+    },
+    BrOnNull {
+        stack_drop: u32,
+        arity: u16,
+        target: SemanticTarget,
+        ref_type: ValueType,
+    },
+    BrOnNonNull {
+        stack_drop: u32,
+        arity: u16,
+        target: SemanticTarget,
+        ref_type: ValueType,
+    },
+    BrOnCast {
+        stack_drop: u32,
+        arity: u16,
+        target: SemanticTarget,
+        fail_type: ValueType,
+        cast_type: ValueType,
+    },
+    BrOnCastFail {
+        stack_drop: u32,
+        arity: u16,
+        target: SemanticTarget,
+        fail_type: ValueType,
+        cast_type: ValueType,
+    },
+    BrTable {
+        entries: collections::Vec<BrTableEntry>,
+    },
+    CallDirect {
+        callee: u32,
+        params: u16,
+        results: u16,
+    },
+    CallIndirect {
+        type_idx: u32,
+        table_idx: u32,
+        /// The table is 64-bit, so its index operand is an i64.
+        index64: bool,
+        params: u16,
+        results: u16,
+    },
+    CallRef {
+        type_idx: u32,
+        params: u16,
+        results: u16,
+    },
+    ReturnCallDirect {
+        callee: u32,
+        params: u16,
+        results: u16,
+    },
+    ReturnCallIndirect {
+        type_idx: u32,
+        table_idx: u32,
+        /// The table is 64-bit, so its index operand is an i64.
+        index64: bool,
+        params: u16,
+        results: u16,
+    },
+    ReturnCallRef {
+        type_idx: u32,
+        params: u16,
+        results: u16,
+    },
+    ReturnVoid,
+    ReturnOne,
+    Return {
+        arity: u16,
+    },
+    TryTable {
+        params: u16,
+        results: u16,
+        catches: collections::Vec<SemanticCatchClause>,
+    },
+    Throw {
+        tag_idx: u32,
+        arity: u16,
+    },
+    AllocExnRef {
+        tag_idx: u32,
+    },
+    ThrowRef,
+}
+
+/// Semantic program for one function body.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SemanticProgram {
+    pub(crate) params: u16,
+    pub(crate) results: u16,
+    pub(crate) local_count: u16,
+    pub(crate) max_stack_height: u16,
+    pub(crate) ops: collections::Vec<SemanticOp>,
+    /// Per-local value types (params ++ non-param locals).
+    ///
+    /// When non-empty, `local_types.len() == local_count`.
+    /// When empty, downstream consumers should treat all values as untyped.
+    pub(crate) local_types: collections::Vec<ValueType>,
+    /// Function result types in signature order.
+    ///
+    /// When non-empty, `result_types.len() == results`.
+    pub(crate) result_types: collections::Vec<ValueType>,
+    /// Per-op result types for dynamic producers and structured control signatures.
+    ///
+    /// Maps semantic op index to result value types for ops that push
+    /// results whose types are not deterministic from the opcode alone
+    /// (calls, blocks with multi-value signatures, etc.).
+    pub(crate) op_result_types: BTreeMap<usize, collections::Vec<ValueType>>,
+}
+
+#[cfg(any(debug_assertions, test))]
+fn semantic_op_result_arity(kind: &SemanticOpKind) -> Option<usize> {
+    match kind {
+        SemanticOpKind::CallDirect { results, .. }
+        | SemanticOpKind::CallIndirect { results, .. }
+        | SemanticOpKind::CallRef { results, .. }
+        | SemanticOpKind::ReturnCallDirect { results, .. }
+        | SemanticOpKind::ReturnCallIndirect { results, .. }
+        | SemanticOpKind::ReturnCallRef { results, .. } => Some(*results as usize),
+        SemanticOpKind::Block { results, .. }
+        | SemanticOpKind::Loop { results, .. }
+        | SemanticOpKind::If { results, .. }
+        | SemanticOpKind::TryTable { results, .. } => Some(*results as usize),
+        SemanticOpKind::AllocExnRef { .. } => Some(1),
+        SemanticOpKind::Primitive(kind) => Some(super::primitive_op::stack_effect(kind).1 as usize),
+        _ => None,
+    }
+}
+
+impl SemanticProgram {
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    fn requires_simd(&self) -> bool {
+        self.local_types
+            .iter()
+            .chain(self.result_types.iter())
+            .chain(self.op_result_types.values().flat_map(|types| types.iter()))
+            .any(|value_type| matches!(value_type, ValueType::V128))
+            || self.ops.iter().any(|op| {
+                matches!(
+                    &op.kind,
+                    SemanticOpKind::Primitive(kind)
+                        if matches!(super::primitive_op::result_type(kind), Some(ValueType::V128))
+                )
+            })
+    }
+
+    pub(crate) fn ensure_prepare_supported(&self) -> Result<(), WasmError> {
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if self.requires_simd() {
+            return Err(WasmError::invalid(
+                "SIMD is not supported by the selected backend",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(any(debug_assertions, test))]
+    pub(crate) fn validate(&self) -> Result<(), WasmError> {
+        let len = self.ops.len();
+
+        for (_index, op) in self.ops.iter().enumerate() {
+            match &op.kind {
+                SemanticOpKind::LocalGet { idx }
+                | SemanticOpKind::LocalSet { idx }
+                | SemanticOpKind::LocalTee { idx } => {
+                    if *idx >= self.local_count {
+                        return Err(WasmError::internal(
+                            "semantic op uses out-of-range local (local_count=)",
+                        ));
+                    }
+                }
+                SemanticOpKind::If { else_target, .. } => {
+                    validate_target(*else_target, len)?;
+                }
+                SemanticOpKind::Else { end_target } => {
+                    validate_target(*end_target, len)?;
+                }
+                SemanticOpKind::Br { target, .. }
+                | SemanticOpKind::BrIf { target, .. }
+                | SemanticOpKind::BrOnNull { target, .. }
+                | SemanticOpKind::BrOnNonNull { target, .. }
+                | SemanticOpKind::BrOnCast { target, .. }
+                | SemanticOpKind::BrOnCastFail { target, .. } => {
+                    validate_target(*target, len)?;
+                }
+                SemanticOpKind::BrTable { entries } => {
+                    for entry in entries {
+                        validate_target(entry.target, len)?;
+                    }
+                }
+                SemanticOpKind::TryTable { catches, .. } => {
+                    for catch in catches {
+                        validate_target(catch.target, len)?;
+                    }
+                }
+                SemanticOpKind::ReturnVoid if self.results != 0 => {
+                    return Err(WasmError::internal(
+                        "semantic return_void at op does not match function result arity",
+                    ));
+                }
+                SemanticOpKind::ReturnOne if self.results != 1 => {
+                    return Err(WasmError::internal(
+                        "semantic return_one at op does not match function result arity",
+                    ));
+                }
+                SemanticOpKind::Return { arity } if *arity != self.results => {
+                    return Err(WasmError::internal(
+                        "semantic return at op has arity , expected",
+                    ));
+                }
+                SemanticOpKind::ReturnCallDirect { results, .. }
+                | SemanticOpKind::ReturnCallIndirect { results, .. }
+                | SemanticOpKind::ReturnCallRef { results, .. }
+                    if *results != self.results =>
+                {
+                    return Err(WasmError::internal(
+                        "semantic tail call at op does not match function result arity",
+                    ));
+                }
+                _ => {}
+            }
+        }
+
+        // Validate local_types length when present.
+        if !self.local_types.is_empty() && self.local_types.len() != self.local_count as usize {
+            return Err(WasmError::internal(
+                "semantic local_types length does not match local_count",
+            ));
+        }
+        if !self.result_types.is_empty() && self.result_types.len() != self.results as usize {
+            return Err(WasmError::internal(
+                "semantic result_types length does not match result arity",
+            ));
+        }
+
+        // Validate op_result_types indices are in range and match arity.
+        for (op_idx, result_types) in &self.op_result_types {
+            if *op_idx >= len {
+                return Err(WasmError::internal(
+                    "op_result_types entry for op index is out of range (ops len=)",
+                ));
+            }
+            if let Some(op) = self.ops.get(*op_idx) {
+                let Some(expected_results) = semantic_op_result_arity(&op.kind) else {
+                    return Err(WasmError::internal(
+                        "op_result_types entry at op attached to a non-producing op",
+                    ));
+                };
+                if result_types.len() != expected_results {
+                    return Err(WasmError::internal(
+                        "op_result_types at op has types but op expects results",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg(not(any(debug_assertions, test)))]
+    #[inline]
+    pub(crate) fn validate(&self) -> Result<(), WasmError> {
+        Ok(())
+    }
+}
+
+impl From<PrimitiveOpKind> for SemanticOpKind {
+    #[inline]
+    fn from(kind: PrimitiveOpKind) -> Self {
+        Self::Primitive(kind)
+    }
+}
+
+#[cfg(any(debug_assertions, test))]
+fn validate_target(target: SemanticTarget, len: usize) -> Result<(), WasmError> {
+    if target.is_pending() {
+        return Err(WasmError::internal(
+            "semantic target is still pending at validation time",
+        ));
+    }
+    if target.index().as_usize() >= len {
+        return Err(WasmError::internal(
+            "semantic target is out of range for semantic program length",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_out_of_range_local_access() {
+        let semantic = SemanticProgram {
+            params: 0,
+            results: 0,
+            local_count: 1,
+            max_stack_height: 0,
+            ops: collections::vec![SemanticOp {
+                kind: SemanticOpKind::LocalGet { idx: 1 },
+            }],
+            local_types: collections::vec![],
+            result_types: collections::vec![],
+            op_result_types: tracked_alloc::collections::BTreeMap::new(),
+        };
+
+        let error = semantic
+            .validate()
+            .expect_err("semantic validation should fail");
+        assert!(error.message().contains("out-of-range local"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_branch_target() {
+        let semantic = SemanticProgram {
+            params: 0,
+            results: 0,
+            local_count: 0,
+            max_stack_height: 0,
+            ops: collections::vec![SemanticOp {
+                kind: SemanticOpKind::Br {
+                    stack_drop: 0,
+                    arity: 0,
+                    target: SemanticTarget::new(3),
+                },
+            }],
+            local_types: collections::vec![],
+            result_types: collections::vec![],
+            op_result_types: tracked_alloc::collections::BTreeMap::new(),
+        };
+
+        let error = semantic
+            .validate()
+            .expect_err("semantic validation should fail");
+        assert!(error.message().contains("out of range"));
+    }
+
+    #[test]
+    fn rejects_mismatched_return_arity() {
+        let semantic = SemanticProgram {
+            params: 0,
+            results: 1,
+            local_count: 0,
+            max_stack_height: 1,
+            ops: collections::vec![SemanticOp {
+                kind: SemanticOpKind::ReturnVoid,
+            }],
+            local_types: collections::vec![],
+            result_types: collections::vec![],
+            op_result_types: tracked_alloc::collections::BTreeMap::new(),
+        };
+
+        let error = semantic
+            .validate()
+            .expect_err("semantic validation should fail");
+        assert!(error
+            .message()
+            .contains("does not match function result arity"));
+    }
+
+    #[test]
+    fn accepts_structured_control_result_types() {
+        let semantic = SemanticProgram {
+            params: 1,
+            results: 1,
+            local_count: 1,
+            max_stack_height: 1,
+            ops: collections::vec![
+                SemanticOp {
+                    kind: SemanticOpKind::LocalGet { idx: 0 },
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::If {
+                        params: 0,
+                        results: 1,
+                        else_target: SemanticTarget::new(4),
+                    },
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::Primitive(PrimitiveOpKind::I32Const { value: 1 }),
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::Else {
+                        end_target: SemanticTarget::new(6),
+                    },
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::Primitive(PrimitiveOpKind::I32Const { value: 2 }),
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::End,
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::ReturnOne,
+                },
+            ],
+            local_types: collections::vec![ValueType::I32],
+            result_types: collections::vec![ValueType::I32],
+            op_result_types: tracked_alloc::collections::BTreeMap::from([(
+                1usize,
+                collections::vec![ValueType::I32],
+            )]),
+        };
+
+        semantic
+            .validate()
+            .expect("if result type metadata should be accepted");
+    }
+}

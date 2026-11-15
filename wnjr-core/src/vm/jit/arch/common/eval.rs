@@ -1,0 +1,230 @@
+//! Shared native eval: call a JIT-compiled function entry point.
+//!
+//! This is identical across all architectures since the entry signature
+//! and call convention are the same.
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+use crate::collections;
+
+use crate::{
+    error::WasmError,
+    module::type_defs::FunctionType,
+    vm::{
+        jit::runtime::{
+            code::NativeCode, collect_native_results_from_stack, context::NativeContext,
+            StoreAccess,
+        },
+        jit::value_encoding::value_to_machine_raw_in_store,
+        value::Value,
+    },
+};
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use super::helpers::trap_error;
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use crate::vm::jit::machine::machine_ir::MachineTrapKind;
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+use crate::vm::jit::runtime::trap_signal;
+
+#[cfg(debug_assertions)]
+use crate::vm::jit::debug::function_trace;
+
+pub(crate) fn eval(
+    access: &mut StoreAccess<'_>,
+    local_index: u32,
+    func_type: &FunctionType,
+    code: &NativeCode,
+    args: &[Value],
+    backend: &'static str,
+) -> Result<crate::collections::Vec<Value>, WasmError> {
+    let _ = backend;
+    if args.len() != func_type.params().len() {
+        return Err(WasmError::invalid("invalid argument count"));
+    }
+
+    let compiled = code.compiled();
+    let func_id = code.func_id();
+    let runtime = compiled
+        .abi()
+        .functions
+        .get(func_id.0 as usize)
+        .ok_or_else(|| WasmError::internal("native entry function is missing runtime metadata"))?;
+    let entry = code
+        .native_entry()
+        .ok_or_else(|| WasmError::internal("native entry is missing finalized code"))?;
+    let store_ptr = access.store_pointer()?;
+
+    let prepared = access.with_store_mut(|store| {
+        if store.module().functions.get(local_index as usize).is_none() {
+            return Err(WasmError::internal(
+                "native entry function index is out of range",
+            ));
+        }
+        // Sized by the engine's configuration, which `Engine::new` already
+        // refused to leave unset.
+        let stack_bytes = store.config().get_wasm_stack_bytes();
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        let max_frame_bytes = compiled.max_frame_bytes();
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        let stack = match store.take_native_stack_cache() {
+            Some(stack) if stack.supports(stack_bytes, max_frame_bytes) => stack,
+            _ => crate::vm::jit::runtime::guard_pages::GuardPageStack::new(
+                stack_bytes,
+                max_frame_bytes,
+            )?,
+        };
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        let stack_base = stack.base();
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        let stack_end = stack.end();
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        let stack_guard_end = stack.guard_end();
+
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let mut stack = {
+            let stack_slots = stack_bytes / core::mem::size_of::<u64>();
+            let mut stack = store
+                .take_native_stack_cache()
+                .unwrap_or_else(|| collections::vec![0u64; stack_slots]);
+            if stack.len() < stack_slots {
+                stack.resize(stack_slots, 0);
+            }
+            stack
+        };
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let stack_base = stack.as_mut_ptr();
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let stack_end = unsafe { stack_base.add(stack.len()) };
+
+        unsafe {
+            for (index, arg) in args.iter().enumerate() {
+                *stack_base.add(index) =
+                    value_to_machine_raw_in_store(*arg, compiled.backend().gp_unit_bytes, store);
+            }
+            // Note: zero-init of non-param locals is performed by the callee
+            // itself at function entry, only for slots flagged by the
+            // SsaProgram's `cell_info.reads_before_write` analysis.
+        }
+        if let Err(error) = ensure_stack_capacity(stack_base, stack_end, runtime.total_frame_slots)
+        {
+            store.cache_native_stack(stack);
+            return Err(error);
+        }
+
+        let n_globals = store.module().globals.len();
+        let cached_ctx = store.take_native_context_cache();
+        Ok((
+            stack,
+            stack_base,
+            stack_end,
+            n_globals,
+            cached_ctx,
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            stack_guard_end,
+        ))
+    })??;
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    let (stack, stack_base, stack_end, n_globals, cached_ctx, stack_guard_end) = prepared;
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    let (stack, stack_base, stack_end, n_globals, cached_ctx) = prepared;
+
+    let mut ctx = if let Some(mut ctx) = cached_ctx {
+        ctx.prepare_for_invocation(store_ptr, stack_end);
+        ctx
+    } else {
+        NativeContext::new(store_ptr, stack_end, n_globals)
+    };
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    {
+        ctx.stack_guard_end = stack_guard_end;
+    }
+    ctx.seed_local_call_infos(compiled);
+    // Under the caller-restored local-call ABI, no software call-link record
+    // is needed at the root. The public-entry caller stub calls the internal
+    // entry, and fallback returns are published in the root frame slots that
+    // `collect_native_results_from_stack` reads below.
+    #[cfg(debug_assertions)]
+    {
+        function_trace::init_from_env();
+        function_trace::native_root_entry(&mut ctx, local_index, backend);
+    }
+
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    {
+        use crate::vm::jit::runtime::context::ctx_offset;
+        trap_signal::install_signal_handler();
+        trap_signal::set_context_offsets(
+            ctx_offset::TRAP_KIND as usize,
+            ctx_offset::STACK_END as usize,
+            ctx_offset::STACK_GUARD_END as usize,
+        );
+        trap_signal::reset_debug_state();
+        ctx.trap_kind = 0;
+    }
+
+    let result = (|| {
+        let status = unsafe { entry(&mut *ctx, stack_base) };
+
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        if ctx.trap_kind != 0 {
+            let error = match ctx.trap_kind {
+                trap_signal::TRAP_STACK_OVERFLOW => trap_error(MachineTrapKind::StackOverflow),
+                _ => trap_error(MachineTrapKind::MemoryOutOfBounds),
+            };
+            #[cfg(debug_assertions)]
+            function_trace::native_trap_current(&mut ctx, &error);
+            return Err(error);
+        }
+
+        if status != 0 {
+            let error = ctx
+                .error
+                .take()
+                .or_else(|| {
+                    core::mem::take(&mut ctx.pending_escape).into_error(access.id().world())
+                })
+                .unwrap_or_else(|| {
+                    WasmError::internal("native root entry failed without setting an error")
+                });
+            #[cfg(debug_assertions)]
+            function_trace::native_trap_current(&mut ctx, &error);
+            return Err(error);
+        }
+
+        let out = unsafe {
+            access.with_store_mut(|store| {
+                collect_native_results_from_stack(
+                    stack_base,
+                    func_type.results(),
+                    compiled.backend().gp_unit_bytes,
+                    store,
+                )
+            })??
+        };
+        #[cfg(debug_assertions)]
+        {
+            let results_len = func_type.results().len();
+            let results = unsafe { core::slice::from_raw_parts(stack_base, results_len) };
+            function_trace::native_root_exit(&mut ctx, local_index, results);
+        }
+        Ok(out)
+    })();
+    access.with_store_mut(|store| {
+        store.cache_native_context(ctx);
+        store.cache_native_stack(stack);
+    })?;
+    result
+}
+
+pub(crate) fn ensure_stack_capacity(
+    fp: *mut u64,
+    stack_end: *mut u64,
+    total_frame_slots: u16,
+) -> Result<(), WasmError> {
+    let end =
+        (fp as usize).saturating_add(total_frame_slots as usize * core::mem::size_of::<u64>());
+    if end > stack_end as usize {
+        return Err(WasmError::exhaustion("stack overflow"));
+    }
+    Ok(())
+}

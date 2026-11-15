@@ -1,0 +1,25 @@
+[package]
+name = "wnjr-tests"
+publish = false
+version = "0.1.0"
+edition = "2021"
+description = "WebAssembly spec and WASI testsuite runners for wnjr"
+license = "Apache-2.0"
+
+[[bin]]
+name = "wnjr-spectest"
+path = "src/spectest/main.rs"
+
+[[bin]]
+name = "wnjr-wasitest"
+path = "src/wasitest/main.rs"
+
+[dependencies]
+wnjr-core = { path = "../wnjr-core" }
+log = { version = "0.4", features = ["release_max_level_debug"] }
+env_logger = "0.9"
+structopt = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wast = "246.0.2"
+wat = "1.246.2"

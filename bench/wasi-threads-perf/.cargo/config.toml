@@ -1,0 +1,5 @@
+# @emnapi/wasi-threads speaks the single-argument wasi.thread-spawn ABI, and for
+# it needs to allocate an 8-byte error/tid cell inside the guest. Rust links
+# dlmalloc into a wasip1-threads module already, it just does not export it.
+[target.wasm32-wasip1-threads]
+rustflags = ["-C", "link-arg=--export=malloc", "-C", "link-arg=--export=free"]

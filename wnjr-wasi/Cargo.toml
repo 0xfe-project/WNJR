@@ -1,0 +1,16 @@
+[package]
+name = "wnjr-wasi"
+version.workspace = true
+edition = "2021"
+rust-version = "1.94"
+license = "Apache-2.0"
+description = "WASI preview1 syscall layer for WNJR"
+publish = false
+
+[dependencies]
+wnjr-core = { path = "../wnjr-core" }
+filetime = "0.2"
+
+
+[dev-dependencies]
+wat = "1.246.2"

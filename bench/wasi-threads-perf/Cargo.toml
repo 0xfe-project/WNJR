@@ -1,0 +1,16 @@
+[package]
+name = "wt-perf"
+version = "0.0.0"
+edition = "2021"
+
+# Standalone: this crate is not a member of the WNJR workspace.
+[workspace]
+
+[[bin]]
+name = "wt-perf"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+panic = "abort"
+codegen-units = 1

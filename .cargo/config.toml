@@ -1,0 +1,24 @@
+# Single source of truth for per-target cross-build settings. `ci/correctness.py`
+# and the CI workflows deliberately set no RUSTFLAGS: cargo lets the RUSTFLAGS
+# environment variable *replace* `target.<triple>.rustflags` wholesale rather
+# than merge with it, so any RUSTFLAGS writer would silently drop everything
+# below. `linker` is a separate config key and is not affected, but keeping all
+# of it in one place is the point.
+#
+# Relative `linker` paths resolve against this file's directory, not the
+# invoking cwd, so `cargo build --target ...` works from anywhere in the tree.
+
+[target.riscv64gc-unknown-linux-musl]
+# Unlike the armv7 and x86_64 musl targets, riscv64gc-musl does not carry
+# `crt-static` in its baseline, so it is requested explicitly.
+linker = "rust-lld"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-self-contained=yes",
+    "-C", "panic=abort",
+]
+
+
+[unstable]
+build-std = ["std", "panic_abort"]
+build-std-features = ["optimize_for_size", "panic_immediate_abort"]
