@@ -278,7 +278,7 @@ impl<'a> Validator<'a> {
         let type_count = self.module.types().len();
 
         for (idx, def_type) in self.module.types().as_slice().iter().enumerate() {
-            crate::module::type_defs::validate_type_references(def_type, idx, type_count, self.module.types().as_slice())?;
+            def_type.validate_type_references(idx, type_count, self.module.types().as_slice())?;
         }
 
         // Validate function type indices

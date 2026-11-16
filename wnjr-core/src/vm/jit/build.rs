@@ -1709,7 +1709,7 @@ pub(crate) fn ensure_module_compiled(store: &JitInstance) -> Result<(), WasmErro
 mod tests {
     #[cfg(debug_assertions)]
     use tracked_alloc::string::String;
-    use tracked_alloc::sync::Arc;
+    use tracked_alloc::{rc::Rc, sync::Arc};
 
     use super::ensure_module_compiled;
     use crate::collections;
@@ -1795,7 +1795,7 @@ mod tests {
             } else {
                 assert_eq!(semantic, raw);
             }
-            crate::vm::jit::wasm::sir::semantic_ir::validate(&semantic).unwrap();
+            semantic.validate().unwrap();
             let (abi, facts) = super::build_static_summaries(&module, &store, backend).unwrap();
             let prepared = crate::vm::jit::middle::prepare_function(
                 crate::vm::jit::middle::PrepareInput {

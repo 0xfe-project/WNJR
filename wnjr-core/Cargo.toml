@@ -11,7 +11,6 @@ keywords = ["wasm", "webassembly", "jit", "no_std"]
 categories = ["wasm", "no-std"]
 
 [dependencies]
-njvm-ir = { version = "0.7.0", path = "../njvm-ir" }
 tracked_alloc = { package = "wnjr-tracked-alloc", version = "0.7.0", path = "../tools/tracked-alloc" }
 parking_lot = "0.12"
 

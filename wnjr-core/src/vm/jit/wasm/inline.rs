@@ -588,7 +588,7 @@ mod tests {
             caller.op_result_types[&call],
             collections::vec![ValueType::I64]
         );
-        crate::vm::jit::wasm::sir::semantic_ir::validate(&caller).unwrap();
+        caller.validate().unwrap();
     }
 
     #[test]
@@ -688,7 +688,7 @@ mod tests {
         let mut many_regions = body.clone();
         prepend_loops(&mut many_regions, 32);
         for mut caller in [many_locals, many_ops, large_frame, many_regions] {
-            crate::vm::jit::wasm::sir::semantic_ir::validate(&caller).unwrap();
+            caller.validate().unwrap();
             let before = caller.clone();
             inline_small_calls(&mut caller, 3, |_| {
                 panic!("over-budget caller decoded a callee")
@@ -711,7 +711,7 @@ mod tests {
         regional.local_count = 3;
         regional.local_types.resize(3, ValueType::I64);
         prepend_loops(&mut regional, 3);
-        crate::vm::jit::wasm::sir::semantic_ir::validate(&regional).unwrap();
+        regional.validate().unwrap();
         let mut region_limited = regional.clone();
         let mut resolutions = 0;
         inline_small_calls(&mut region_limited, 3, |_| {
@@ -754,7 +754,7 @@ mod tests {
         caller.ops.push(SemanticOp {
             kind: SemanticOpKind::ReturnVoid,
         });
-        crate::vm::jit::wasm::sir::semantic_ir::validate(&caller).unwrap();
+        caller.validate().unwrap();
         let before = caller.clone();
         let mut decoded = collections::Vec::new();
         inline_small_calls(&mut caller, 3, |callee| {
