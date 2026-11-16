@@ -58,7 +58,7 @@ pub(crate) fn eval_const_expr(
             Opcode::F32_CONST => stack.push(Value::F32(code.read_f32()?)),
             Opcode::F64_CONST => stack.push(Value::F64(code.read_f64()?)),
             Opcode::REF_NULL => {
-                let heap_type = HeapType::parse(&mut code)?;
+                let heap_type = crate::value_type::parse_heap_type(&mut code)?;
                 stack.push(Value::Ref(RefValue::null(), RefType::new(true, heap_type)));
             }
             Opcode::REF_FUNC => {

@@ -72,8 +72,8 @@ pub(crate) fn prepare_function(
     facts: ModuleFacts<'_>,
     semantic: SemanticProgram,
 ) -> Result<PreparedFunction, WasmError> {
-    semantic.validate()?;
-    semantic.ensure_prepare_supported()?;
+    crate::vm::jit::wasm::sir::semantic_ir::validate(&semantic)?;
+    crate::vm::jit::wasm::sir::semantic_ir::ensure_prepare_supported(&semantic)?;
 
     let frame = plan_frame_layout(
         semantic.local_count,

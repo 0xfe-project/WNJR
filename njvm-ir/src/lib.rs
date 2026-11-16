@@ -37,3 +37,81 @@ pub use sir::{
     SemanticProgram, SemanticOp, SemanticOpKind,
     PrimitiveOpKind, SemanticTarget, SemanticIndex, BrTableEntry, SemanticCatchClause,
 };
+
+// TryFrom<u8> for ValueType, implemented here to avoid orphan-rule conflict.
+// The frontend calls parse_value_type directly; this is for legacy decode sites.
+use core::convert::TryFrom;
+impl TryFrom<u8> for ValueType {
+    type Error = ();  // njvm-ir is no_std and has no WasmError; frontend wraps this.
+
+    fn try_from(byte: u8) -> Result<Self, Self::Error> {
+        match byte {
+            0x7F => Ok(ValueType::I32),
+            0x7E => Ok(ValueType::I64),
+            0x7D => Ok(ValueType::F32),
+            0x7C => Ok(ValueType::F64),
+            0x7B => Ok(ValueType::V128),
+            _ => {
+                if let Ok(aht) = AbstractHeapType::try_from(byte) {
+                    Ok(ValueType::Ref(RefType::nullable_abstract(aht)))
+                } else {
+                    Err(())
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod roundtrip_serde {
+    extern crate std;
+    use super::*;
+    use alloc::vec;
+
+    #[test]
+    fn roundtrip_semantic_program() {
+        let prog = SemanticProgram {
+            params: 1,
+            results: 1,
+            local_count: 2,
+            max_stack_height: 3,
+            ops: vec![
+                SemanticOp {
+                    kind: SemanticOpKind::LocalGet { idx: 0 },
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::Primitive(PrimitiveOpKind::I32Const { value: 42 }),
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::ReturnOne,
+                },
+            ],
+            local_types: vec![ValueType::I32, ValueType::I64],
+            result_types: vec![ValueType::I32],
+            op_result_types: Default::default(),
+        };
+
+        let bytes = rmp_serde::to_vec(&prog).expect("serialize failed");
+        let decoded: SemanticProgram = rmp_serde::from_slice(&bytes).expect("deserialize failed");
+        assert_eq!(prog, decoded);
+    }
+
+    #[test]
+    fn roundtrip_value_type() {
+        let types = vec![
+            ValueType::I32,
+            ValueType::I64,
+            ValueType::F32,
+            ValueType::F64,
+            ValueType::V128,
+            ValueType::Ref(RefType::funcref()),
+            ValueType::Ref(RefType::externref()),
+        ];
+
+        for vt in types {
+            let bytes = rmp_serde::to_vec(&vt).expect("serialize failed");
+            let decoded: ValueType = rmp_serde::from_slice(&bytes).expect("deserialize failed");
+            assert_eq!(vt, decoded);
+        }
+    }
+}

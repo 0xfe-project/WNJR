@@ -97,7 +97,7 @@ impl ConstExpr {
                     stack.push(ValueType::F64);
                 }
                 REF_NULL => {
-                    let heap_type = HeapType::parse(&mut code)?;
+                    let heap_type = crate::value_type::parse_heap_type(&mut code)?;
                     let reftype = ValueType::Ref(RefType::new(true, heap_type));
                     stack.push(reftype);
                 }

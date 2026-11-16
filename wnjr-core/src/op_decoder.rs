@@ -6,7 +6,7 @@ use crate::{
     error::WasmError,
     opcodes::*,
     utils::payload::Payload,
-    value_type::{HeapType, RefType, ValueType},
+    value_type::{RefType, ValueType},
 };
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -498,7 +498,7 @@ impl<'a, 'b> Decoder<'a, 'b> {
                 };
             }
             REF_NULL => {
-                let heap_type = HeapType::parse(payload)?;
+                let heap_type = crate::value_type::parse_heap_type(payload)?;
                 let ref_type = RefType::new(true, heap_type);
                 let value_type = ValueType::Ref(ref_type);
                 let wasm_op = OP(op);
@@ -708,8 +708,8 @@ impl<'a, 'b> Decoder<'a, 'b> {
                 let len = payload.read_leb128_u32()?;
                 let mut vec = collections::Vec::new();
                 for _ in 0..len {
-                    let valtype: ValueType = payload.read_u8()?.try_into()?;
-                    valtype.ensure_enabled_in_build()?;
+                    let valtype: ValueType = payload.read_u8()?.try_into().map_err(|_| WasmError::invalid("Invalid value type byte"))?;
+                    crate::value_type::ensure_value_type_enabled_in_build(&valtype)?;
                     vec.push(valtype);
                 }
                 let wasm_op = OP(op);
@@ -829,7 +829,7 @@ impl<'a, 'b> Decoder<'a, 'b> {
                         };
                     }
                     REF_TEST | REF_TEST_NULL | REF_CAST | REF_CAST_NULL => {
-                        let heap_type = HeapType::parse(payload)?;
+                        let heap_type = crate::value_type::parse_heap_type(payload)?;
                         let nullable = matches!(op_ext, REF_TEST_NULL | REF_CAST_NULL);
                         let ref_type = RefType::new(nullable, heap_type);
                         let wasm_op = FB(op_ext);
@@ -848,8 +848,8 @@ impl<'a, 'b> Decoder<'a, 'b> {
                         if flags & !0b11 != 0 {
                             return Err(WasmError::invalid("invalid br_on_cast flags"));
                         }
-                        let from_heap = HeapType::parse(payload)?;
-                        let to_heap = HeapType::parse(payload)?;
+                        let from_heap = crate::value_type::parse_heap_type(payload)?;
+                        let to_heap = crate::value_type::parse_heap_type(payload)?;
                         let rt1 = ValueType::Ref(RefType::new((flags & 0b01) != 0, from_heap));
                         let rt2 = ValueType::Ref(RefType::new((flags & 0b10) != 0, to_heap));
                         let wasm_op = FB(op_ext);
@@ -1193,14 +1193,14 @@ fn decode_block_type(payload: &mut Payload<'_>) -> Result<BlockType, WasmError> 
         // Structured reference types (0x64 = ref ht, 0x63 = ref null ht)
         0x64 | 0x63 => {
             payload.rewind(1)?;
-            let value_type = ValueType::parse(payload)?;
-            value_type.ensure_enabled_in_build()?;
+            let value_type = crate::value_type::parse_value_type(payload)?;
+            crate::value_type::ensure_value_type_enabled_in_build(&value_type)?;
             BlockType::ValueType(value_type)
         }
 
         _ => match ValueType::try_from(byte1) {
             Ok(value_type) => {
-                value_type.ensure_enabled_in_build()?;
+                crate::value_type::ensure_value_type_enabled_in_build(&value_type)?;
                 BlockType::ValueType(value_type)
             }
             Err(_) => {

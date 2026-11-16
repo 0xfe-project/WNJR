@@ -25,7 +25,7 @@ use crate::{
     },
     opcodes::{Opcode, OpcodeFB, OpcodeFD},
     utils::{limits::Limits, payload::Payload},
-    value_type::{HeapType, ValueType},
+    value_type::ValueType,
 };
 
 // ============================================================================
@@ -328,8 +328,8 @@ fn parse_indices(payload: &mut Payload) -> Result<usize, WasmError> {
 }
 
 fn parse_valtype(payload: &mut Payload) -> Result<ValueType, WasmError> {
-    let value_type = ValueType::parse(payload)?;
-    value_type.ensure_enabled_in_build()?;
+    let value_type = crate::value_type::parse_value_type(payload)?;
+    crate::value_type::ensure_value_type_enabled_in_build(&value_type)?;
     Ok(value_type)
 }
 
@@ -467,7 +467,7 @@ fn parse_constexpr(payload: &mut Payload) -> Result<ConstExpr, WasmError> {
                 code.read_f64()?;
             }
             REF_NULL => {
-                HeapType::parse(&mut code)?;
+                crate::value_type::parse_heap_type(&mut code)?;
             }
             REF_FUNC | GLOBAL_GET => {
                 code.read_leb128_u32()?;

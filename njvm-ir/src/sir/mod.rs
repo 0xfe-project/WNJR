@@ -4,9 +4,9 @@
 //! It defines the decoded semantic function model: primitive ops, structured
 //! control flow, locals, calls, and branch targets.
 
-mod common;
-mod primitive_op;
-mod semantic_ir;
+pub mod common;
+pub mod primitive_op;
+pub mod semantic_ir;
 
 pub use common::{SemanticIndex, SemanticTarget, BrTableEntry};
 pub use primitive_op::PrimitiveOpKind;

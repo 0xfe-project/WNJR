@@ -340,6 +340,7 @@ macro_rules! define_primitive_ops {
         /// control, and branch metadata live in `SemanticOpKind`, which embeds
         /// `PrimitiveOpKind` instead of expanding this enum into a whole-function IR.
         #[derive(Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+        #[derive(serde::Serialize, serde::Deserialize)]
         pub enum PrimitiveOpKind {
             $( $(#[$attr])* $name $( { $($field : $ty),* } )?, )*
         }
@@ -357,7 +358,7 @@ macro_rules! define_primitive_ops {
         }
 
         #[inline]
-        pub(crate) fn stack_effect(kind: &PrimitiveOpKind) -> (usize, usize) {
+        pub fn stack_effect(kind: &PrimitiveOpKind) -> (usize, usize) {
             match kind {
                 PrimitiveOpKind::StructNew { field_count, .. } => (*field_count as usize, 1),
                 PrimitiveOpKind::ArrayNewFixed { count, .. } => (*count as usize, 1),
@@ -385,7 +386,7 @@ for_each_primitive_op!(define_primitive_ops);
 /// Returns `None` for ops that produce zero results (stores, drops, etc.) or
 /// ops whose result type depends on context (Select, GlobalGet).
 #[inline]
-pub(crate) fn result_type(kind: &PrimitiveOpKind) -> Option<ValueType> {
+pub fn result_type(kind: &PrimitiveOpKind) -> Option<ValueType> {
     Some(match kind {
         // i32 arithmetic
         PrimitiveOpKind::I32Add

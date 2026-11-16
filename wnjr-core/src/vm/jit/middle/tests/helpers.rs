@@ -160,8 +160,7 @@ pub(super) fn plan_program(
     fp_dynamic_budget: u8,
 ) -> PlannedPipeline {
     let config = host_config(gp_dynamic_budget, fp_dynamic_budget);
-    semantic
-        .validate()
+    crate::vm::jit::wasm::sir::semantic_ir::validate(semantic)
         .unwrap_or_else(|err| panic!("test semantic program must validate: {}", err.message()));
     let frame = plan_frame_layout(semantic.local_count, semantic.max_stack_height, 3);
     let cfg = cfg::build_semantic_cfg(semantic);

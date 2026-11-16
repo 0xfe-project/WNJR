@@ -14,15 +14,16 @@ use tracked_alloc::sync::Arc;
 
 /// A complete type definition from the type section.
 #[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct DefType {
     /// The composite type (function, struct, or array).
-    pub(crate) composite: CompositeType,
+    pub composite: CompositeType,
     /// Indices of declared supertypes.
-    pub(crate) supertypes: collections::Vec<u32>,
+    pub supertypes: collections::Vec<u32>,
     /// Whether this type is final.
-    pub(crate) is_final: bool,
+    pub is_final: bool,
     /// Explicit recursion-group id, if any.
-    pub(crate) rec_group: Option<u32>,
+    pub rec_group: Option<u32>,
 }
 
 
@@ -30,6 +31,7 @@ pub struct DefType {
 // moved to wnjr-wasm-njvm frontend crate — they return WasmError which carries runtime payloads.
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum CompositeType {
     Func(Arc<FunctionType>),
     Struct(StructType),
@@ -37,9 +39,10 @@ pub enum CompositeType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FunctionType {
-    params: collections::Vec<ValueType>,
-    results: collections::Vec<ValueType>,
+    pub params: collections::Vec<ValueType>,
+    pub results: collections::Vec<ValueType>,
 }
 
 impl FunctionType {
@@ -81,47 +84,51 @@ impl fmt::Display for FunctionType {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct StructType {
-    pub(crate) fields: collections::Vec<FieldType>,
+    pub fields: collections::Vec<FieldType>,
 }
 
 impl StructType {
-    pub(crate) fn new(fields: collections::Vec<FieldType>) -> Self {
+    pub fn new(fields: collections::Vec<FieldType>) -> Self {
         Self { fields }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct ArrayType {
-    pub(crate) element: FieldType,
+    pub element: FieldType,
 }
 
 impl ArrayType {
-    pub(crate) fn new(element: FieldType) -> Self {
+    pub fn new(element: FieldType) -> Self {
         Self { element }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct FieldType {
-    pub(crate) storage: StorageType,
-    pub(crate) mutable: bool,
+    pub storage: StorageType,
+    pub mutable: bool,
 }
 
 impl FieldType {
-    pub(crate) fn new(storage: StorageType, mutable: bool) -> Self {
+    pub fn new(storage: StorageType, mutable: bool) -> Self {
         Self { storage, mutable }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum StorageType {
     Val(ValueType),
     Packed(PackedType),
 }
 
 impl StorageType {
-    pub(crate) fn to_valtype(&self) -> ValueType {
+    pub fn to_valtype(&self) -> ValueType {
         match self {
             StorageType::Val(vt) => *vt,
             StorageType::Packed(PackedType::I8 | PackedType::I16) => ValueType::I32,
@@ -130,6 +137,7 @@ impl StorageType {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum PackedType {
     I8,
     I16,

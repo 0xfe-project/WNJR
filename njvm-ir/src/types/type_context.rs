@@ -23,30 +23,31 @@ struct ActiveTypeGroup {
 }
 
 #[derive(Clone)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct TypeContext {
-    types: Arc<[Arc<DefType>]>,
+    pub types: Arc<[Arc<DefType>]>,
 }
 
 impl TypeContext {
-    pub(crate) fn new(types: collections::Vec<Arc<DefType>>) -> Self {
+    pub fn new(types: collections::Vec<Arc<DefType>>) -> Self {
         Self {
             types: collections::into_alloc_vec(types).into(),
         }
     }
 
-    pub(crate) fn get(&self, idx: u32) -> Option<&Arc<DefType>> {
+    pub fn get(&self, idx: u32) -> Option<&Arc<DefType>> {
         self.types.get(idx as usize)
     }
 
-    pub(crate) fn as_slice(&self) -> &[Arc<DefType>] {
+    pub fn as_slice(&self) -> &[Arc<DefType>] {
         &self.types
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.types.len()
     }
 
-    pub(crate) fn get_function_type(&self, idx: u32) -> Option<&Arc<FunctionType>> {
+    pub fn get_function_type(&self, idx: u32) -> Option<&Arc<FunctionType>> {
         self.get(idx)
             .and_then(|def_type| match &def_type.composite {
                 CompositeType::Func(func_type) => Some(func_type),
@@ -54,7 +55,7 @@ impl TypeContext {
             })
     }
 
-    pub(crate) fn types_equivalent(&self, idx1: u32, idx2: u32) -> bool {
+    pub fn types_equivalent(&self, idx1: u32, idx2: u32) -> bool {
         let mut visiting_groups = collections::Vec::new();
         self.types_equivalent_inner(idx1, idx2, &mut visiting_groups)
     }
@@ -328,7 +329,7 @@ impl core::fmt::Debug for TypeContext {
     }
 }
 
-pub(crate) fn check_function_types_equivalent(
+pub fn check_function_types_equivalent(
     export_type: &FunctionType,
     import_type: &FunctionType,
     export_type_ctx: &TypeContext,
@@ -358,7 +359,7 @@ pub(crate) fn check_function_types_equivalent(
     true
 }
 
-pub(crate) fn concrete_type_matches_cross_context(
+pub fn concrete_type_matches_cross_context(
     actual_type_ctx: &TypeContext,
     actual_type_idx: u32,
     expected_type_ctx: &TypeContext,
@@ -395,7 +396,7 @@ pub(crate) fn concrete_type_matches_cross_context(
     false
 }
 
-pub(crate) fn value_types_equivalent_cross_module(
+pub fn value_types_equivalent_cross_module(
     exp_type: &ValueType,
     imp_type: &ValueType,
     export_type_ctx: &TypeContext,
@@ -684,7 +685,7 @@ mod tests {
         types::{CompositeType, DefType, FunctionType},
         types::{HeapType, RefType, ValueType},
     };
-    use tracked_alloc::{rc::Rc, sync::Arc};
+    use tracked_alloc::sync::Arc;
 
     fn func_type(
         params: collections::Vec<ValueType>,

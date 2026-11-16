@@ -8,6 +8,7 @@ use core::fmt;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum AbstractHeapType {
     Func = 0x70,
     NoFunc = 0x73,
@@ -124,6 +125,7 @@ impl fmt::Display for AbstractHeapType {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum HeapType {
     Abstract(AbstractHeapType),
     Concrete(u32),
@@ -156,7 +158,7 @@ impl HeapType {
         }
     }
 
-    pub(crate) fn is_subtype_of(&self, other: &HeapType, types: &TypeContext) -> bool {
+    pub fn is_subtype_of(&self, other: &HeapType, types: &TypeContext) -> bool {
         match (self, other) {
             (a, b) if a == b => true,
             (Self::Abstract(sub), Self::Abstract(sup)) => sub.is_subtype_of(sup),
@@ -210,7 +212,7 @@ impl HeapType {
         }
     }
 
-    pub(crate) fn top_type(&self, types: &TypeContext) -> HeapType {
+    pub fn top_type(&self, types: &TypeContext) -> HeapType {
         match self {
             Self::Abstract(aht) => Self::Abstract(aht.top_type()),
             Self::Concrete(idx) => match types.get(*idx) {
@@ -242,6 +244,7 @@ impl From<AbstractHeapType> for HeapType {
 }
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct RefType {
     pub nullable: bool,
     pub heap_type: HeapType,
@@ -399,7 +402,7 @@ impl RefType {
         )
     }
 
-    pub(crate) fn is_subtype_of(&self, other: &RefType, types: &TypeContext) -> bool {
+    pub fn is_subtype_of(&self, other: &RefType, types: &TypeContext) -> bool {
         let nullability_ok = self.nullable == other.nullable || other.nullable;
         let heap_ok = self.heap_type.is_subtype_of(&other.heap_type, types);
         nullability_ok && heap_ok
@@ -417,6 +420,7 @@ impl fmt::Display for RefType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub enum ValueType {
     I32,
     I64,
@@ -560,7 +564,7 @@ impl ValueType {
         }
     }
 
-    pub(crate) fn is_subtype_of(&self, other: &ValueType, types: &TypeContext) -> bool {
+    pub fn is_subtype_of(&self, other: &ValueType, types: &TypeContext) -> bool {
         if *self == ValueType::Unknown {
             return true;
         }
@@ -578,7 +582,7 @@ impl ValueType {
     }
 
     #[inline]
-    pub(crate) fn can_initialize(&self, target_type: &ValueType, types: &TypeContext) -> bool {
+    pub fn can_initialize(&self, target_type: &ValueType, types: &TypeContext) -> bool {
         self.is_subtype_of(target_type, types)
     }
 
