@@ -1,0 +1,122 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_out_of_range_local_access() {
+        let semantic = SemanticProgram {
+            params: 0,
+            results: 0,
+            local_count: 1,
+            max_stack_height: 0,
+            ops: collections::vec![SemanticOp {
+                kind: SemanticOpKind::LocalGet { idx: 1 },
+            }],
+            local_types: collections::vec![],
+            result_types: collections::vec![],
+            op_result_types: tracked_alloc::collections::BTreeMap::new(),
+        };
+
+        let error = semantic
+            .validate()
+            .expect_err("semantic validation should fail");
+        assert!(error.message().contains("out-of-range local"));
+    }
+
+    #[test]
+    fn rejects_out_of_range_branch_target() {
+        let semantic = SemanticProgram {
+            params: 0,
+            results: 0,
+            local_count: 0,
+            max_stack_height: 0,
+            ops: collections::vec![SemanticOp {
+                kind: SemanticOpKind::Br {
+                    stack_drop: 0,
+                    arity: 0,
+                    target: SemanticTarget::new(3),
+                },
+            }],
+            local_types: collections::vec![],
+            result_types: collections::vec![],
+            op_result_types: tracked_alloc::collections::BTreeMap::new(),
+        };
+
+        let error = semantic
+            .validate()
+            .expect_err("semantic validation should fail");
+        assert!(error.message().contains("out of range"));
+    }
+
+    #[test]
+    fn rejects_mismatched_return_arity() {
+        let semantic = SemanticProgram {
+            params: 0,
+            results: 1,
+            local_count: 0,
+            max_stack_height: 1,
+            ops: collections::vec![SemanticOp {
+                kind: SemanticOpKind::ReturnVoid,
+            }],
+            local_types: collections::vec![],
+            result_types: collections::vec![],
+            op_result_types: tracked_alloc::collections::BTreeMap::new(),
+        };
+
+        let error = semantic
+            .validate()
+            .expect_err("semantic validation should fail");
+        assert!(error
+            .message()
+            .contains("does not match function result arity"));
+    }
+
+    #[test]
+    fn accepts_structured_control_result_types() {
+        let semantic = SemanticProgram {
+            params: 1,
+            results: 1,
+            local_count: 1,
+            max_stack_height: 1,
+            ops: collections::vec![
+                SemanticOp {
+                    kind: SemanticOpKind::LocalGet { idx: 0 },
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::If {
+                        params: 0,
+                        results: 1,
+                        else_target: SemanticTarget::new(4),
+                    },
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::Primitive(PrimitiveOpKind::I32Const { value: 1 }),
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::Else {
+                        end_target: SemanticTarget::new(6),
+                    },
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::Primitive(PrimitiveOpKind::I32Const { value: 2 }),
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::End,
+                },
+                SemanticOp {
+                    kind: SemanticOpKind::ReturnOne,
+                },
+            ],
+            local_types: collections::vec![ValueType::I32],
+            result_types: collections::vec![ValueType::I32],
+            op_result_types: tracked_alloc::collections::BTreeMap::from([(
+                1usize,
+                collections::vec![ValueType::I32],
+            )]),
+        };
+
+        semantic
+            .validate()
+            .expect("if result type metadata should be accepted");
+    }
+}
