@@ -21,6 +21,7 @@ pub(crate) mod collections;
 mod config;
 pub(crate) mod constants;
 mod error;
+pub mod njvm;
 pub(crate) mod module;
 pub(crate) mod op_decoder;
 pub(crate) mod opcodes;
