@@ -27,9 +27,9 @@ use crate::{
             ssa_ir::{
                 ir::{
                     entry_cache_requirements, CellInfo, EntryCacheRequirement, SsaBinding,
-                    SsaBlock, SsaCallArgs, SsaCallLiveArg, SsaCallOp, SsaCallOperandLoc, SsaEdge,
-                    SsaInst, SsaOp, SsaOperand, SsaProgram, SsaScalarResultLoc, SsaTerminator,
-                    SsaValue,
+                    SsaBlock, SsaCallArgs, SsaCallLiveArg, SsaCallOp, SsaCallOperandLoc, SsaCatch,
+                    SsaEdge, SsaInst, SsaOp, SsaOperand, SsaProgram, SsaScalarResultLoc,
+                    SsaTerminator, SsaTryScope, SsaValue,
                 },
                 target::SsaTarget,
             },
@@ -236,6 +236,104 @@ fn insert_primitive_index(index: &mut [u32], pool_idx: u32, hash: u64) {
     index[slot] = pool_idx;
 }
 
+/// Translate the decoder's `try_table` regions into the form the middle end
+/// needs.
+///
+/// The decoder knows each region's body extent (it has the control-frame
+/// stack); the middle end knows block ids. This joins the two: every catch's
+/// handler label becomes a block id, and every block records the innermost
+/// region that contains it. A `try_table` boundary is always a block boundary
+/// in structured wasm, so a block is wholly inside or wholly outside a region.
+fn resolve_try_scopes(
+    semantic: &SemanticProgram,
+    cfg: &RewriteCfg,
+) -> (collections::Vec<SsaTryScope>, collections::Vec<Option<u16>>) {
+    let mut scopes: collections::Vec<SsaTryScope> = collections::Vec::new();
+    let mut bodies: collections::Vec<core::ops::Range<usize>> = collections::Vec::new();
+    for scope in &semantic.try_scopes {
+        let mut catches = collections::Vec::with_capacity(scope.catches.len());
+        let mut resolved = true;
+        for clause in &scope.catches {
+            let target = clause.target.index().as_usize();
+            // A catch label names where control resumes, which is the block
+            // *after* the labelled construct. When decode patched the clause
+            // with the index of the End op itself, that index starts no block,
+            // so the following op is the handler.
+            let handler = cfg
+                .block_for_semantic_index(target)
+                .or_else(|| cfg.block_for_semantic_index(target.saturating_add(1)));
+            let Some(handler) = handler else {
+                resolved = false;
+                break;
+            };
+            // A catch handler starts by binding the payload into locals, one
+            // `local.set` per value, popping the top of the stack first. Those
+            // locals are the only channel that carries the payload into the
+            // handler when the throw came from another function: the values
+            // have to be written into their frame homes before the handler
+            // runs, and nothing else in the machine program names them.
+            let mut payload_locals = collections::Vec::new();
+            if let Some(block) = cfg.blocks.get(handler.0 as usize) {
+                for op_index in block.range.clone() {
+                    if payload_locals.len() == clause.payload_arity as usize {
+                        break;
+                    }
+                    match semantic.ops.get(op_index).map(|op| &op.kind) {
+                        Some(SemanticOpKind::LocalSet { idx }) => payload_locals.push(*idx),
+                        // The block starts at the End that opened it; that is
+                        // not a value, so it does not end the binding run.
+                        Some(SemanticOpKind::End) | None => {}
+                        _ => break,
+                    }
+                }
+            }
+            catches.push(SsaCatch {
+                tag_idx: clause.tag_idx,
+                payload_arity: clause.payload_arity,
+                forwards_exn: clause.forwards_exn,
+                handler: SsaTarget(handler.0),
+                payload_locals,
+            });
+        }
+        // A region whose handler could not be resolved, or that has no
+        // clauses at all, cannot dispatch anything; leaving it out keeps the
+        // pre-existing trap-on-throw behaviour for that region.
+        if !resolved || catches.is_empty() {
+            continue;
+        }
+        scopes.push(SsaTryScope { catches });
+        bodies.push(scope.start..scope.end);
+    }
+
+    let mut block_try_scope: collections::Vec<Option<u16>> =
+        (0..cfg.blocks.len()).map(|_| None).collect();
+    for block in &cfg.blocks {
+        let mut best: Option<(u16, usize)> = None;
+        for (idx, body) in bodies.iter().enumerate() {
+            // The block that opens the region also carries the TryTable op, so
+            // its range starts before the body; only blocks whose ops overlap
+            // the body belong to it.
+            if block.range.start >= body.end || block.range.end <= body.start {
+                continue;
+            }
+            let width = body.end - body.start;
+            let tighter = match best {
+                None => true,
+                Some((_, best_width)) => width < best_width,
+            };
+            if tighter {
+                best = Some((idx as u16, width));
+            }
+        }
+        if let Some((idx, _)) = best {
+            if let Some(slot) = block_try_scope.get_mut(block.id.0 as usize) {
+                *slot = Some(idx);
+            }
+        }
+    }
+    (scopes, block_try_scope)
+}
+
 pub(crate) fn rewrite_function(
     mut semantic: SemanticProgram,
     cfg: &RewriteCfg,
@@ -266,8 +364,15 @@ pub(crate) fn rewrite_function(
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: collections::Vec::new(),
+            block_try_scope: collections::Vec::new(),
         });
     }
+
+    // Resolve the function's `try_table` regions while `semantic` is still
+    // alive: the middle end needs, per block, the handler a throw raised across
+    // a call inside that block would resume at.
+    let (try_scopes, mut block_try_scope) = resolve_try_scopes(&semantic, cfg);
 
     let setup = planner.function_setup();
     let mut values = ValueAlloc::default();
@@ -291,6 +396,9 @@ pub(crate) fn rewrite_function(
     let mut block_exit_cached_slots = collections::Vec::with_capacity(original_block_count);
     let mut extra_blocks = collections::Vec::new();
     let mut extra_block_cached_slots = collections::Vec::new();
+    // Synthetic blocks a block's lowering splits off belong to the same region
+    // as the block they came from: a call inside one may still raise across it.
+    let mut extra_block_try_scopes = collections::Vec::new();
     let mut extra_block_requirement_spans = collections::Vec::new();
     let mut extra_block_exit_cached_slots = collections::Vec::new();
     for (block_index, cfg_block) in cfg.blocks.iter().enumerate() {
@@ -375,13 +483,19 @@ pub(crate) fn rewrite_function(
         }
         extra_block_cached_slots.extend(lowered.extra_block_cached_slots);
         extra_block_exit_cached_slots.extend(lowered.extra_block_exit_cached_slots);
+        let extra_scope = block_try_scope
+            .get(cfg_block.id.0 as usize)
+            .copied()
+            .flatten();
         for mut block in lowered.extra_blocks {
+            extra_block_try_scopes.push(extra_scope);
             shrink_ssa_block_storage(&mut block);
             extra_blocks.push(block);
         }
     }
     blocks.reserve_exact(extra_blocks.len());
     blocks.extend(extra_blocks);
+    block_try_scope.extend(extra_block_try_scopes);
     block_entry_cached_cells.reserve_exact(extra_block_cached_slots.len());
     block_entry_cached_cells.extend(extra_block_cached_slots);
     block_entry_requirement_spans.reserve_exact(extra_block_requirement_spans.len());
@@ -417,6 +531,8 @@ pub(crate) fn rewrite_function(
         cell_homes,
         const_pool: collections::Vec::new(),
         primitive_pool: builder.primitive_pool,
+        try_scopes,
+        block_try_scope,
         call_ops: builder.call_ops,
     };
 
@@ -822,8 +938,10 @@ fn lower_block_body_op(
                 config,
             )
         }
-        SemanticOpKind::AllocExnRef { tag_idx } => lower_alloc_exn_ref(
+        SemanticOpKind::AllocExnRef { tag_idx, arity } => lower_alloc_exn_ref(
             *tag_idx,
+            *arity,
+            frame,
             semantic,
             semantic_index,
             state,
@@ -1217,6 +1335,8 @@ fn live_scalar_call_result(
 
 fn lower_alloc_exn_ref(
     tag_idx: u32,
+    arity: u16,
+    frame: FrameLayoutPlan,
     semantic: &SemanticProgram,
     semantic_index: usize,
     state: &mut BlockState,
@@ -1226,9 +1346,16 @@ fn lower_alloc_exn_ref(
     values: &mut ValueAlloc,
     builder: &mut ProgramBuilder,
 ) -> Result<(), WasmError> {
+    // This op spills everything below it, so the payload is already in its
+    // frame slots when the helper reads them; it only has to be told where.
+    let start_slot = call_base_slot(frame, state.height(), arity);
     lower_primitive(
         semantic,
-        &PrimitiveOpKind::EhAllocExnRef { tag_idx },
+        &PrimitiveOpKind::EhAllocExnRef {
+            tag_idx,
+            start_slot: u32::from(start_slot.0),
+            slot_count: u32::from(arity),
+        },
         semantic_index,
         state,
         planner,
@@ -1630,9 +1757,11 @@ fn lower_block_terminator(
                 planner,
             )?))
         }
-        SemanticOpKind::AllocExnRef { tag_idx } => {
+        SemanticOpKind::AllocExnRef { tag_idx, arity } => {
             lower_alloc_exn_ref(
                 *tag_idx,
+                *arity,
+                frame,
                 semantic,
                 semantic_index,
                 state,
@@ -2851,5 +2980,101 @@ mod primitive_index_tests {
         assert_eq!(builder.primitive_pool.len(), 66);
         assert_eq!(builder.primitive_pool[0], PrimitiveOpKind::I32Add);
         assert_eq!(builder.primitive_pool[1], PrimitiveOpKind::I64Add);
+    }
+}
+
+#[cfg(test)]
+mod eh_scope_tests {
+    use super::*;
+    use crate::vm::jit::wasm::sir::semantic_ir::{
+        SemanticCatchClause, SemanticTryScope,
+    };
+
+    fn block(id: u32, start: usize, end: usize) -> RewriteCfgBlock {
+        RewriteCfgBlock {
+            id: CfgBlockId(id),
+            range: start..end,
+        }
+    }
+
+    fn clause(tag: u32, target: usize) -> SemanticCatchClause {
+        SemanticCatchClause {
+            tag_idx: Some(tag),
+            payload_arity: 1,
+            forwards_exn: false,
+            stack_drop: 0,
+            target: SemanticTarget::new(target),
+        }
+    }
+
+    fn scope(try_op: usize, start: usize, end: usize, catches: collections::Vec<SemanticCatchClause>) -> SemanticTryScope {
+        SemanticTryScope {
+            try_op,
+            start,
+            end,
+            catches,
+        }
+    }
+
+    /// A block records the innermost region that contains it, and a region
+    /// whose handler label does not resolve to a block is dropped entirely.
+    #[test]
+    fn innermost_region_wins_and_unresolved_regions_are_dropped() {
+        // Five blocks covering 0..12; handlers at 10 (block 4) and 6 (block 2).
+        let cfg = RewriteCfg {
+            entry: CfgBlockId(0),
+            blocks: collections::vec![
+                block(0, 0, 3),
+                block(1, 3, 5),
+                block(2, 5, 7),
+                block(3, 7, 10),
+                block(4, 10, 12),
+            ],
+        };
+        let mut semantic = SemanticProgram::default();
+        semantic.try_scopes = collections::vec![
+            // outer 3..10, handler at 10 -> block 4
+            scope(2, 3, 10, collections::vec![clause(0, 10)]),
+            // inner 5..7, handler at 6 -> block 2
+            scope(4, 5, 7, collections::vec![clause(1, 6)]),
+            // 0..2 with a handler label past the last block: dropped.
+            scope(0, 0, 2, collections::vec![clause(2, 12)]),
+        ];
+
+        let (scopes, block_try_scope) = resolve_try_scopes(&semantic, &cfg);
+
+        assert_eq!(scopes.len(), 2, "the unresolvable region must be dropped");
+        assert_eq!(block_try_scope, collections::vec![
+            None,
+            Some(0),
+            Some(1),
+            Some(0),
+            None
+        ]);
+        // The handler of each clause is resolved to the block that contains it.
+        assert_eq!(scopes[0].catches[0].handler, SsaTarget(4));
+        assert_eq!(scopes[1].catches[0].handler, SsaTarget(2));
+        assert_eq!(scopes[1].catches[0].tag_idx, Some(1));
+    }
+
+    /// Attribution is per block: the block that opens a region carries the
+    /// TryTable op itself, so it overlaps the body and must be attributed;
+    /// a block wholly after the region must not.
+    #[test]
+    fn block_opening_a_region_is_attributed_and_later_blocks_are_not() {
+        let cfg = RewriteCfg {
+            entry: CfgBlockId(0),
+            blocks: collections::vec![block(0, 0, 4), block(1, 4, 8), block(2, 8, 10)],
+        };
+        let mut semantic = SemanticProgram::default();
+        semantic.try_scopes = collections::vec![scope(0, 2, 8, collections::vec![clause(0, 9)])];
+
+        let (scopes, block_try_scope) = resolve_try_scopes(&semantic, &cfg);
+
+        assert_eq!(scopes.len(), 1);
+        assert_eq!(
+            block_try_scope,
+            collections::vec![Some(0), Some(0), None]
+        );
     }
 }

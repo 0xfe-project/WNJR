@@ -93,6 +93,7 @@ pub(super) fn typed_program(
         local_types,
         result_types,
         op_result_types: BTreeMap::new(),
+        try_scopes: Default::default(),
     }
 }
 

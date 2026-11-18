@@ -177,15 +177,23 @@ pub(crate) fn eval(
         }
 
         if status != 0 {
-            let error = ctx
-                .error
-                .take()
-                .or_else(|| {
-                    core::mem::take(&mut ctx.pending_escape).into_error(access.id().world())
-                })
-                .unwrap_or_else(|| {
-                    WasmError::internal("native root entry failed without setting an error")
-                });
+            let error = match ctx.error.take() {
+                Some(error) => error,
+                None => {
+                    // An exception that leaves the wasm world becomes a host
+                    // reference here, and only here: everything a catch takes
+                    // stays a plain object on the escape chain.
+                    let pending = core::mem::take(&mut ctx.pending_escape);
+                    let world = access.id().world();
+                    match access.with_store_mut(|store| pending.into_error(store, world)) {
+                        Ok(Some(error)) => error,
+                        Ok(None) => {
+                            WasmError::internal("native root entry failed without setting an error")
+                        }
+                        Err(error) => error,
+                    }
+                }
+            };
             #[cfg(debug_assertions)]
             function_trace::native_trap_current(&mut ctx, &error);
             return Err(error);

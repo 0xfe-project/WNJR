@@ -1,7 +1,9 @@
 # Threads 设计
 
-状态：th1–th10 已实现。`cargo test --workspace`：arm64 666 passed / 0 failed，x86_64 669 passed / 0 failed；
-spec 全量 281 个 wast 文件在 arm64 和 x86_64 上都是 281 通过（含 `proposals/threads/atomic.wast`）；
+状态：th1–th10 已实现。`cargo test --workspace`：arm64 **803 passed / 0 failed / 1 ignored**（本机实测）；
+x86_64 **764 passed / 0 failed**（musl 交叉编译，amd64 容器经 qemu 跑，加入最后一条递归 setjmp 测试前实测；
+加入后只重跑了 `wnjr-core` lib：612 passed / 0 failed），不是原生硬件。riscv64 见下文。
+spec 全量 281 个 wast 文件在 arm64 上 281 通过（含 `proposals/threads/atomic.wast`）；
 官方 wasi-threads testsuite 14 个用例全过。对应实现步骤 th1–th10。
 
 ## 结论
@@ -25,7 +27,7 @@ riscv64 后端**不支持 shared memory，因此也不支持 threads / wasi-thre
 - parser / validator 照常接受 shared memory；实例化时 riscv64 返回 unlinkable 错误 `shared memory is not supported on this target (no guard-page support)`（`jit/instantiate.rs`）。`memory.size` 的 shared lowering 在该 cfg 下同样返回这个错误，保证不会生成读 SharedMemory 头部的代码。
 - riscv64 的 0xFE 原子指令只有 dispatch 桩，没有真实编码。
 
-打开 riscv64 threads 的前提：先写 riscv64-Linux signal handler（guard page 现在只在 aarch64 和 x86_64 上启用），再做原子指令编码。目前只保证 `cargo check --target riscv64gc-unknown-linux-gnu -p wnjr-core` 通过，没有在 riscv64 上跑过测试。`wnjr-wasi`（以及依赖它的 `wnjr-cli`）在 riscv64 上**仍编译不过**：`wnjr-wasi/src/threads.rs` 无条件使用 `SharedMemHandle` 和 `Import::shared_memory`，这两个在该 target 上不存在。
+打开 riscv64 threads 的前提：先写 riscv64-Linux signal handler（guard page 现在只在 aarch64 和 x86_64 上启用），再做原子指令编码。`cargo check --target riscv64gc-unknown-linux-gnu -p wnjr-core` 通过；`wnjr-core` lib 测试经 qemu-riscv64 跑过一次：552 passed / 1 failed（原子指令未实现导致的 `trivial_memory_grow_size_nop_drop_fence`），spectest 没跑。`wnjr-wasi`（以及依赖它的 `wnjr-cli`）在 riscv64 上**仍编译不过**：`wnjr-wasi/src/threads.rs` 无条件使用 `SharedMemHandle` 和 `Import::shared_memory`，这两个在该 target 上不存在。
 
 ## 三层模型
 

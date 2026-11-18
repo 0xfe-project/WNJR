@@ -323,7 +323,7 @@ fn child_bodies(op: &Op) -> Vec<&Vec<Op>> {
         Op::TypeSwitch { cases, .. } => v.extend(cases.iter().map(|(_, b)| b)),
         Op::TryTable { body, catches } => {
             v.push(body);
-            v.extend(catches.iter().map(|(_, b)| b));
+            v.extend(catches.iter().map(|c| &c.body));
         }
         Op::Await { fallback, .. } => v.push(fallback),
         _ => {}
@@ -346,7 +346,7 @@ fn child_bodies_mut(op: &mut Op) -> Vec<&mut Vec<Op>> {
         Op::TypeSwitch { cases, .. } => v.extend(cases.iter_mut().map(|(_, b)| b)),
         Op::TryTable { body, catches } => {
             v.push(body);
-            v.extend(catches.iter_mut().map(|(_, b)| b));
+            v.extend(catches.iter_mut().map(|c| &mut c.body));
         }
         Op::Await { fallback, .. } => v.push(fallback),
         _ => {}
@@ -374,7 +374,7 @@ macro_rules! op_exprs {
                 args.$iter().for_each(|e| $f(e));
             }
             Op::Throw { args, .. } => args.$iter().for_each(|e| $f(e)),
-            Op::Setjmp { buf } => $f(buf),
+            Op::Setjmp { buf, .. } => $f(buf),
             Op::Longjmp { buf, val } => {
                 $f(buf);
                 $f(val);

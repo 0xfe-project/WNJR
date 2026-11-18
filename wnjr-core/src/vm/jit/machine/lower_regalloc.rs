@@ -948,6 +948,7 @@ fn visit_inst_source_regs(kind: &MachineInstKind, mut visit: impl FnMut(MachineR
     match kind {
         MachineInstKind::Move { src, .. } => visit_value_reg(src, &mut visit),
         MachineInstKind::FloatConst { .. } => {}
+        MachineInstKind::EhHelper { .. } => {}
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         MachineInstKind::V128Const { .. } => {}
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
@@ -1589,6 +1590,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         }));
         let regfile = Box::leak(Box::new(
             MachineRegFile::new(BackendConfig::new(4, 5, 0, 8)).expect("regfile"),

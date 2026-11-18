@@ -272,7 +272,16 @@ impl<'a> super::backend::Arm64Backend<'a> {
                 args,
                 results,
                 success,
-            } => self.lower_call(target, *frame_delta, args, results, success, fallthrough),
+                thrown,
+            } => self.lower_call(
+                target,
+                *frame_delta,
+                args,
+                results,
+                success,
+                thrown.as_ref(),
+                fallthrough,
+            ),
             MachineTerminator::TailCall { target, args } => self.lower_tail_call(target, args),
         }
     }
@@ -803,6 +812,7 @@ impl<'a> super::backend::Arm64Backend<'a> {
         args: &MachineCallArgs,
         results: &MachineCallResults,
         success: &MachineEdge,
+        thrown: Option<&MachineEdge>,
         fallthrough: Option<MachineBlockId>,
     ) -> Result<(), WasmError> {
         let body_local_error_label = self.core.body_local_error_label;
@@ -845,9 +855,25 @@ impl<'a> super::backend::Arm64Backend<'a> {
         // propagation; the caller's error tail expects its own frame.
         self.adjust_frame_pointer_by_delta(frame_delta, false);
 
-        // C_RET0 holds 0 (success) or trap kind (error). Status check
-        // propagates to body_local_error_label.
-        self.lower_cbnz(abi::C_RET0, body_local_error_label);
+        // C_RET0 holds 0 (success), 1 (trap), or 2 (an exception is being
+        // unwound). Without a dispatcher every non-zero status is fatal; with
+        // one, status 2 is routed to the catch dispatcher instead, and only the
+        // other statuses reach the error tail.
+        if let Some(thrown_edge) = thrown {
+            let ok_label = self.core.new_label();
+            self.lower_cbz(abi::C_RET0, ok_label);
+            let scratch = *self.gp_scratch.scoped_alloc();
+            self.materialize_u64(scratch, 2);
+            self.core
+                .text
+                .emit_u32(enc::sub_reg_64(scratch, abi::C_RET0, scratch));
+            let thrown_label = self.core.emit_edge(thrown_edge.target, &thrown_edge.args)?;
+            self.lower_cbz(scratch, thrown_label);
+            self.lower_b(body_local_error_label);
+            self.core.bind_label(ok_label);
+        } else {
+            self.lower_cbnz(abi::C_RET0, body_local_error_label);
+        }
         self.lower_call_result_placement(frame_delta, results)?;
 
         // Continuation: branch only if the next emitted block is not the

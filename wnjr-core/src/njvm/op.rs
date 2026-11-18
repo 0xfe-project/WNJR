@@ -9,6 +9,18 @@ use super::types::{AtomicOp, ConstVal, MemType, Type};
 /// A label id for Jmp/JmpIf/BrTable targets (group A).
 pub type LabelId = u32;
 
+/// One catch clause of `Op::TryTable`.
+///
+/// `tag` is the tag caught, `None` = catch_all. On entry to `body` the
+/// exception payload is stored into the locals `bind` (one per tag param, in
+/// order; empty for catch_all), so the operand stack is empty as at a label.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Catch {
+    pub tag: Option<u32>,
+    pub bind: Vec<u32>,
+    pub body: Vec<Op>,
+}
+
 /// An NJVM-IR operation. This is the top-level instruction/statement form, not
 /// the tree-form expressions (which live in `Expr`).
 ///
@@ -117,20 +129,27 @@ pub enum Op {
     // ─────────────────────────────────────────────────────────────────────────
     // Group E: exception handling
     // ─────────────────────────────────────────────────────────────────────────
-    /// Try-catch table: execute `body`, catch exceptions per `catches`.
-    /// Each catch is `(tag_idx, handler_body)`.
+    /// Try-catch table: execute `body`, catch exceptions per `catches`
+    /// (tried in order). `body` and every handler body are regions of their
+    /// own: a jump inside one may only target a label of the same region (N3
+    /// rejects jumps into a try; stackify N6 restructures each region alone).
+    /// Falling off the end of the body or a handler continues after the op.
     TryTable {
         body: Vec<Op>,
-        catches: Vec<(u32, Vec<Op>)>,
+        catches: Vec<Catch>,
     },
 
     /// Throw an exception with the given tag and arguments.
     Throw { tag_idx: u32, args: Vec<Expr> },
 
-    /// Nonlocal control flow: setjmp (store continuation).
-    Setjmp { buf: Expr },
+    /// C `dest = setjmp(buf)`. `buf` is the jmp_buf address, `dest` an `I32`
+    /// local that receives 0 on the direct return and the longjmp value on a
+    /// resume. Pre-lowering marker: `setjmp::lower_module` replaces it (#602).
+    /// Only allowed in a function's top-level body.
+    Setjmp { buf: Expr, dest: u32 },
 
-    /// Nonlocal control flow: longjmp (restore continuation).
+    /// C `longjmp(buf, val)`, `val` an `I32`. Pre-lowering marker, lowered to
+    /// `Throw` of the module's setjmp tag by `setjmp::lower_module`.
     Longjmp { buf: Expr, val: Expr },
 
     // ─────────────────────────────────────────────────────────────────────────

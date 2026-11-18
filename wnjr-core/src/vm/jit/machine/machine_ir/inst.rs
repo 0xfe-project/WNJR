@@ -460,6 +460,9 @@ pub(crate) enum MachineInstKind {
     },
     EhAllocExnRef {
         tag_idx: u32,
+        /// Where the payload values sit in the current frame.
+        start_slot: u32,
+        slot_count: u32,
         dst: MachineReg,
     },
     MemoryGrow {
@@ -739,6 +742,34 @@ pub(crate) enum MachineInstKind {
         offset: MachineValue,
         count: MachineValue,
     },
+
+    /// A preserved helper that reads or drops the pending exception.
+    ///
+    /// Only a catch dispatcher at a call site emits this. The tag comparison
+    /// and the payload read have to happen in the runtime: a clause names a
+    /// module tag index, while the exception carries a TagIdentity that is
+    /// minted per instance and therefore cannot be baked into shared code.
+    EhHelper {
+        op: EhHelperOp,
+        dst: MachineReg,
+        /// Tag index for Match, payload index for Payload, unused otherwise.
+        imm: u32,
+    },
+}
+
+/// Which pending-exception helper an `EhHelper` instruction calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EhHelperOp {
+    /// Does the pending exception carry this clause's tag? `dst` = 0 or 1.
+    Match,
+    /// `dst` = the payload word at `imm`.
+    Payload,
+    /// A handler is taking the exception; drops it.
+    Clear,
+    /// `dst` = an `exnref` for the pending exception, for a `catch_ref` clause.
+    ExnRef,
+    /// No clause matched; unwind this function.
+    Rethrow,
 }
 
 impl MachineInstKind {
@@ -750,6 +781,10 @@ impl MachineInstKind {
     pub(crate) const fn def_owner(&self) -> Option<MachineRegOwner> {
         match self {
             Self::Move { owner, .. } | Self::Load { owner, .. } => Some(*owner),
+            // The destination lane is a reserved dispatcher register, but its
+            // value is produced and consumed within one synthesized block, so
+            // it lives in the linear-value bookkeeping like the atomics do.
+            Self::EhHelper { .. } => Some(MachineRegOwner::LinearValue),
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
             Self::V128FromRaw { owner, .. } => Some(*owner),
             Self::FloatConst { .. }
@@ -871,6 +906,7 @@ impl MachineInstKind {
             | Self::TestBits { dst, .. }
             | Self::EhAllocExnRef { dst, .. }
             | Self::RefFunc { dst, .. }
+            | Self::EhHelper { dst, .. }
             | Self::RefAbsolutize { dst, .. }
             | Self::RefAsNonNull { dst, .. }
             | Self::RefEq { dst, .. }

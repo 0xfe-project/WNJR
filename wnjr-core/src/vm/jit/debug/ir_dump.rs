@@ -650,6 +650,9 @@ fn render_machine_function(out: &mut String, func: &MachineFunction) {
 
 fn render_machine_inst(kind: &MachineInstKind) -> String {
     match kind {
+        MachineInstKind::EhHelper { op, dst, imm } => {
+            format!("eh.{op:?} r{} {imm}", dst.0)
+        }
         MachineInstKind::Move {
             owner,
             ty,
@@ -1212,9 +1215,15 @@ fn render_machine_inst(kind: &MachineInstKind) -> String {
         MachineInstKind::EhThrowRef { exnref_slot } => {
             format!("eh.throw_ref frame[{}]", exnref_slot.0)
         }
-        MachineInstKind::EhAllocExnRef { tag_idx, dst } => {
-            format!("eh.alloc_exn_ref tag={} -> r{}", tag_idx, dst.0)
-        }
+        MachineInstKind::EhAllocExnRef {
+            tag_idx,
+            start_slot,
+            slot_count,
+            dst,
+        } => format!(
+            "eh.alloc_exn_ref tag={} frame[{}..+{}] -> r{}",
+            tag_idx, start_slot, slot_count, dst.0
+        ),
         MachineInstKind::MemoryGrow {
             mem_idx,
             dst,

@@ -138,9 +138,9 @@ fn op_has_jump(op: &Op) -> bool {
             cases.iter().any(|(_, b)| body_has_jump(b)) || body_has_jump(default)
         }
         Op::TypeSwitch { cases, .. } => cases.iter().any(|(_, b)| body_has_jump(b)),
-        Op::TryTable { body, catches } => {
-            body_has_jump(body) || catches.iter().any(|(_, b)| body_has_jump(b))
-        }
+        // A TryTable body and each handler are regions of their own (jumps
+        // never cross them, N3), stackified separately when erased.
+        Op::TryTable { .. } => false,
         Op::Await { fallback, .. } => body_has_jump(fallback),
         _ => false,
     }

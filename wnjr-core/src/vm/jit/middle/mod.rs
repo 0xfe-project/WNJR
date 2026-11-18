@@ -189,5 +189,7 @@ fn empty_program(semantic: &SemanticProgram, frame: FrameLayoutPlan) -> SsaProgr
         const_pool: collections::Vec::new(),
         primitive_pool: collections::Vec::new(),
         call_ops: collections::Vec::new(),
+        try_scopes: collections::Vec::new(),
+        block_try_scope: collections::Vec::new(),
     }
 }

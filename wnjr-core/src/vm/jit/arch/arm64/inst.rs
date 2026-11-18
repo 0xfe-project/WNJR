@@ -460,13 +460,18 @@ impl<'a> super::backend::Arm64Backend<'a> {
                 MachineValue::Imm64(exnref_slot.0 as u64),
                 MachineValue::Imm64(0),
             ),
-            MachineInstKind::EhAllocExnRef { tag_idx, dst } => self.lower_preserved_result(
+            MachineInstKind::EhAllocExnRef {
+                tag_idx,
+                start_slot,
+                slot_count,
+                dst,
+            } => self.lower_preserved_result(
                 preserved_op::EH_ALLOC_EXN_REF,
                 *tag_idx,
                 0,
                 MachineValue::Reg(MACHINE_FP_REG),
-                MachineValue::Imm64(0),
-                MachineValue::Imm64(0),
+                MachineValue::Imm64(u64::from(*start_slot)),
+                MachineValue::Imm64(u64::from(*slot_count)),
                 MachineStorageType::GpWord,
                 *dst,
             ),
@@ -1024,6 +1029,7 @@ impl<'a> super::backend::Arm64Backend<'a> {
             | MachineInstKind::AtomicWait32 { .. }
             | MachineInstKind::AtomicWait64 { .. }
             | MachineInstKind::AtomicNotify { .. } => self.lower_atomic(inst),
+            MachineInstKind::EhHelper { .. } => self.lower_eh_helper(inst),
         }
     }
 
@@ -4157,6 +4163,43 @@ impl<'a> super::backend::Arm64Backend<'a> {
             .text
             .emit_u32(enc::mov_reg_64(dst_gp, result_scratch));
         self.gp_scratch.free_index(result_scratch_idx);
+        Ok(())
+    }
+
+    /// Emit one pending-exception helper call.
+    ///
+    /// `Match` and `Payload` leave their result in `dst`; `Clear` takes none.
+    /// `Rethrow` always fails, and `emit_preserved_call_and_close` turns that
+    /// failure into this function's error tail, which is how the exception
+    /// reaches an outer call site's dispatcher.
+    fn lower_eh_helper(&mut self, inst: &MachineInst) -> Result<(), WasmError> {
+        use crate::vm::jit::machine::machine_ir::EhHelperOp;
+        let MachineInstKind::EhHelper { op, dst, imm } = inst.kind else {
+            return Err(WasmError::internal("arm64 eh helper dispatch mismatch"));
+        };
+        self.emit_preserved_frame_open();
+        self.emit_io_store_imm(preserved_io::IMM0, imm);
+        match op {
+            EhHelperOp::Match | EhHelperOp::Payload | EhHelperOp::ExnRef => {
+                let dst_gp = map_gp(self.core.compiled.backend(), dst)?;
+                let result_scratch_idx = self.gp_scratch.alloc();
+                let result_scratch = self.gp_scratch.reg(result_scratch_idx);
+                let op_code = match op {
+                    EhHelperOp::Match => preserved_op::EH_MATCH,
+                    EhHelperOp::Payload => preserved_op::EH_PAYLOAD,
+                    _ => preserved_op::EH_PENDING_EXN_REF,
+                };
+                self.emit_preserved_call_and_close(op_code, Some(result_scratch_idx))?;
+                self.core
+                    .text
+                    .emit_u32(enc::mov_reg_64(dst_gp, result_scratch));
+                self.gp_scratch.free_index(result_scratch_idx);
+            }
+            EhHelperOp::Clear => self.emit_preserved_call_and_close(preserved_op::EH_CLEAR, None)?,
+            EhHelperOp::Rethrow => {
+                self.emit_preserved_call_and_close(preserved_op::EH_RETHROW, None)?
+            }
+        }
         Ok(())
     }
 

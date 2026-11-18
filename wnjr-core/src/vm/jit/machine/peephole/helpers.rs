@@ -51,6 +51,7 @@ pub(crate) fn visit_source_values(kind: &MachineInstKind, mut f: impl FnMut(&Mac
     match kind {
         MachineInstKind::Move { src, .. } => f(src),
         MachineInstKind::FloatConst { .. } => {}
+        MachineInstKind::EhHelper { .. } => {}
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         MachineInstKind::V128Const { .. } => {}
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
@@ -785,6 +786,7 @@ mod tests {
                 target: MachineBlockId(1),
                 args: collections::vec![MachineValue::Reg(result), MachineValue::Reg(survivor)],
             },
+            thrown: None,
         };
 
         let mut sources = collections::Vec::new();

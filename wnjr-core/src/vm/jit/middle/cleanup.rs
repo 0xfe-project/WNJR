@@ -400,6 +400,9 @@ fn thread_empty_goto_blocks(program: &mut SsaProgram) -> bool {
         if target.as_usize() == block_index {
             continue;
         }
+        if is_eh_handler(program, block_index) {
+            continue;
+        }
 
         if block_index == program.entry.as_usize() {
             if !program.blocks[block_index].params.is_empty() || !bindings_empty {
@@ -535,6 +538,9 @@ fn merge_goto_successor(
     if predecessor_counts[succ_index] != 1 {
         return None;
     }
+    if is_eh_handler(program, succ_index) {
+        return None;
+    }
 
     // Boundary-repair blocks emitted by `rewrite/edge.rs` contain only
     // cache-only ops (CellEnsureCache / CellReserveCache / CellDropCache).
@@ -617,6 +623,20 @@ fn merge_goto_successor(
 
     pred.ops.extend(merged_ops);
     pred.terminator = merged_terminator;
+    // The merged block runs the successor's ops, so it sits in the successor's
+    // try region. A repair block that is not in a region yet inherits it here;
+    // without this a call inside the successor loses the handler a throw would
+    // resume at.
+    let pred_scope = program.block_try_scope.get(pred_index).copied().flatten();
+    let succ_scope = program
+        .block_try_scope
+        .get(succ_index)
+        .copied()
+        .flatten()
+        .or(pred_scope);
+    if let Some(slot) = program.block_try_scope.get_mut(pred_index) {
+        *slot = succ_scope;
+    }
     Some(succ_index)
 }
 
@@ -627,6 +647,15 @@ fn remove_unreachable_blocks(program: &mut SsaProgram) -> bool {
 
     let mut reachable = collections::vec![false; program.blocks.len()];
     let mut stack = collections::vec![program.entry.as_usize()];
+    // A catch handler is entered by an exception edge, which only exists once
+    // the machine layer has built the dispatcher. At SSA level nothing points
+    // at it, so without seeding it here the handler's code is dropped as dead
+    // and the dispatcher has nowhere to resume.
+    for scope in &program.try_scopes {
+        for clause in &scope.catches {
+            stack.push(clause.handler.as_usize());
+        }
+    }
     while let Some(block_index) = stack.pop() {
         if block_index >= program.blocks.len() || reachable[block_index] {
             continue;
@@ -647,6 +676,25 @@ fn remove_unreachable_blocks(program: &mut SsaProgram) -> bool {
     }
     remove_blocks(program, &removed);
     true
+}
+
+/// Whether some try_table catch names this block as its handler.
+///
+/// A handler is entered by an exception edge the machine layer synthesises, and
+/// the dispatcher hands the payload over through the handler block's own entry:
+/// its entry-cache row names the registers to fill, and its first ops name the
+/// frame slots to store. Both are properties of *that block*. Collapsing the
+/// handler into a predecessor moves its entry point back to the predecessor's
+/// start -- and a handler that is also a fallthrough target shares its start
+/// with the very code that raised -- so a handler block is never eliminated or
+/// merged away.
+fn is_eh_handler(program: &SsaProgram, block_index: usize) -> bool {
+    program.try_scopes.iter().any(|scope| {
+        scope
+            .catches
+            .iter()
+            .any(|clause| clause.handler.as_usize() == block_index)
+    })
 }
 
 fn predecessor_counts(program: &SsaProgram) -> collections::Vec<usize> {
@@ -942,6 +990,8 @@ fn remove_blocks(program: &mut SsaProgram, removed: &[usize]) {
         next += 1;
     }
 
+    remap_try_metadata(program, &mapping, &removed_mask);
+
     let old_blocks = core::mem::take(&mut program.blocks);
     let old_entries = core::mem::take(&mut program.block_entry_cached_cells);
     let old_entry_reqs = core::mem::take(&mut program.block_entry_cache_requirements);
@@ -1017,6 +1067,45 @@ fn remove_one_block(program: &mut SsaProgram, removed_index: usize) {
     for block in &mut program.blocks {
         remap_terminator_target_after_single_removal(&mut block.terminator, removed_index);
     }
+
+    let mut removed_mask = collections::vec![false; program.blocks.len() + 1];
+    removed_mask[removed_index] = true;
+    let mut mapping = collections::Vec::with_capacity(program.blocks.len() + 1);
+    for (index, is_removed) in removed_mask.iter().copied().enumerate() {
+        if is_removed {
+            mapping.push(SsaTarget::default());
+        } else {
+            let target = if index > removed_index { index - 1 } else { index };
+            mapping.push(SsaTarget(target as u32));
+        }
+    }
+    remap_try_metadata(program, &mapping, &removed_mask);
+}
+
+/// Keep the try metadata in step with block renumbering.
+///
+/// The scopes name handler blocks and `block_try_scope` is indexed by block id,
+/// so both go stale as soon as blocks are compacted.
+fn remap_try_metadata(program: &mut SsaProgram, mapping: &[SsaTarget], removed: &[bool]) {
+    for scope in &mut program.try_scopes {
+        for clause in &mut scope.catches {
+            clause.handler = mapping
+                .get(clause.handler.as_usize())
+                .copied()
+                .unwrap_or_default();
+        }
+    }
+    if program.block_try_scope.is_empty() {
+        return;
+    }
+    let mut next = collections::Vec::with_capacity(program.block_try_scope.len());
+    for (old_index, is_removed) in removed.iter().copied().enumerate() {
+        if is_removed {
+            continue;
+        }
+        next.push(program.block_try_scope.get(old_index).copied().flatten());
+    }
+    program.block_try_scope = next;
 }
 
 fn remap_terminator_targets(term: &mut SsaTerminator, mapping: &[SsaTarget]) {
@@ -1272,6 +1361,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         };
 
         assert!(fold_block_params_sourced_from_cached_cells(&mut program));
@@ -1362,6 +1453,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         }
     }
 
@@ -1465,6 +1558,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         };
 
         assert!(thread_empty_goto_blocks(&mut program));
@@ -1504,6 +1599,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         };
         let vi = value_inst(&mut program, 0);
         program.blocks = collections::vec![
@@ -1560,6 +1657,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         };
         let vi0 = value_inst(&mut program, 0);
         let vi1 = value_inst(&mut program, 1);
@@ -1651,6 +1750,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         };
 
         assert!(remove_unreachable_blocks(&mut program));
@@ -1679,6 +1780,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         };
         let vi0 = value_inst(&mut program, 0);
         let vi1 = value_inst(&mut program, 1);
@@ -1776,6 +1879,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         };
 
         remove_blocks(&mut program, &[1]);

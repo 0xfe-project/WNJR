@@ -150,6 +150,10 @@ pub(crate) enum MachineTerminator {
         /// post-call values: result regs are produced by the call, and any
         /// non-result args must be preserved survivors.
         success: MachineEdge,
+        /// Optional exceptional edge: taken when the call returns with status
+        /// Thrown (C_RET0 == 2) and there's a pending exception. The backend
+        /// dispatches to the matching try_table handler via this edge.
+        thrown: Option<MachineEdge>,
     },
     /// Tail call transfer into another compiled MachineIR function.
     ///

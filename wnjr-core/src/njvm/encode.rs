@@ -149,6 +149,28 @@ pub fn encode(module: &Module) -> Result<Vec<u8>, EncodeError> {
         }
     }
 
+    // Block types `[] -> params` for catch targets of multi-param tags, in
+    // the tag index space (imports first). Interned before the section is
+    // emitted; erase looks them up per tag.
+    let mut tag_blocks: Vec<Option<u32>> = Vec::new();
+    let all_tags = module
+        .imports
+        .iter()
+        .filter_map(|imp| match &imp.kind {
+            ImportKind::Tag(t) => Some(&t.params),
+            _ => None,
+        })
+        .chain(module.tags.iter().map(|t| &t.params));
+    for params in all_tags {
+        tag_blocks.push(if params.len() >= 2 {
+            // Narrow params already failed above.
+            let vals = params.iter().map(|&t| to_val_type(t)).collect::<Result<Vec<_>, _>>().ok();
+            vals.map(|v| types.intern(Vec::new(), v))
+        } else {
+            None
+        });
+    }
+
     wasm.section(&types.section);
 
     // Import section.
@@ -317,7 +339,7 @@ pub fn encode(module: &Module) -> Result<Vec<u8>, EncodeError> {
     // Code section: each body is lowered by type erasure (N5). Bodies with
     // jumps need stackify (N6) and are rejected with `EncodeError::Body`.
     if !module.functions.is_empty() {
-        let env = EraseEnv::new(module);
+        let env = EraseEnv::new(module).with_tag_block_types(tag_blocks);
         let mut code = CodeSection::new();
         for (i, func) in module.functions.iter().enumerate() {
             let lowered = lower_function(&env, func).map_err(|error| EncodeError::Body {

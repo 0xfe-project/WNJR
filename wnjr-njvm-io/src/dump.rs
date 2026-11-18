@@ -266,8 +266,13 @@ impl Printer {
             Op::TryTable { body, catches } => {
                 self.line(format_args!("try_table"));
                 self.nested(|p| p.body(body));
-                for (tag, ops) in catches {
-                    self.section(format_args!("catch tag {tag}"), ops);
+                for c in catches {
+                    let bind: Vec<String> = c.bind.iter().map(|l| format!("{l}")).collect();
+                    let bind = if bind.is_empty() { String::new() } else { format!(" bind {}", bind.join(" ")) };
+                    match c.tag {
+                        Some(tag) => self.section(format_args!("catch tag {tag}{bind}"), &c.body),
+                        None => self.section(format_args!("catch_all"), &c.body),
+                    }
                 }
                 self.line(format_args!("end"));
             }
@@ -275,8 +280,8 @@ impl Printer {
                 self.line(format_args!("throw tag {tag_idx}"));
                 self.exprs(&args.iter().collect::<Vec<_>>());
             }
-            Op::Setjmp { buf } => {
-                self.line(format_args!("setjmp"));
+            Op::Setjmp { buf, dest } => {
+                self.line(format_args!("setjmp dest={dest}"));
                 self.exprs(&[buf]);
             }
             Op::Longjmp { buf, val } => {

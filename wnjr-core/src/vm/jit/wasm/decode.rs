@@ -31,13 +31,17 @@ use super::{
     common::{BrTableEntry, SemanticIndex, SemanticTarget},
     context::CompileContext,
     primitive_op::{self, PrimitiveOpKind},
-    semantic_ir::{SemanticCatchClause, SemanticOp, SemanticOpKind, SemanticProgram},
+    semantic_ir::{
+    SemanticCatchClause, SemanticOp, SemanticOpKind, SemanticProgram, SemanticTryScope,
+},
 };
 
 /// Semantic IR builder used by Wasm decode.
 #[derive(Default)]
 struct SemanticBuilder {
     ops: collections::Vec<SemanticOp>,
+    /// Finished `try_table` regions, completed as their `end` is decoded.
+    try_scopes: collections::Vec<SemanticTryScope>,
 }
 
 impl SemanticBuilder {
@@ -50,6 +54,28 @@ impl SemanticBuilder {
         let idx = self.current_index();
         self.ops.push(SemanticOp { kind: kind.into() });
         idx
+    }
+
+    /// Patch one catch clause's handler target in the recorded scope.
+    ///
+    /// A region is recorded under the index of its own TryTable op, which is
+    /// how the caller names it here.
+    fn patch_try_scope_catch_target(
+        &mut self,
+        try_op: SemanticIndex,
+        catch_idx: usize,
+        target: SemanticTarget,
+    ) {
+        let try_op = try_op.as_usize();
+        if let Some(scope) = self
+            .try_scopes
+            .iter_mut()
+            .find(|scope| scope.try_op == try_op)
+        {
+            if let Some(clause) = scope.catches.get_mut(catch_idx) {
+                clause.target = target;
+            }
+        }
     }
 
     fn patch_target(&mut self, idx: SemanticIndex, target: SemanticTarget) {
@@ -119,6 +145,7 @@ impl SemanticBuilder {
             local_types,
             result_types,
             op_result_types,
+            try_scopes: self.try_scopes,
         }
     }
 }
@@ -186,6 +213,14 @@ struct StaticCatchMatch {
     /// must be registered at the given frame depth (from the throw's
     /// control stack position).
     pending_fixup_depth: Option<u32>,
+}
+
+/// A `try_table` whose body is still being decoded.
+#[derive(Clone, Debug)]
+struct PendingTryScope {
+    try_op: usize,
+    start: usize,
+    catches: collections::Vec<SemanticCatchClause>,
 }
 
 #[derive(Clone, Debug)]
@@ -494,6 +529,9 @@ fn simple_inline_conditional_throw_wrapper(
 struct DecodeContext<'a> {
     compile: CompileContext<'a>,
     builder: SemanticBuilder,
+    /// `try_table` bodies currently open, innermost last. Finished regions are
+    /// moved to `builder.try_scopes` as their `end` is decoded.
+    pending_try_scopes: collections::Vec<PendingTryScope>,
     control: collections::Vec<DecodeControlFrame>,
     height: usize,
     max_height: usize,
@@ -511,6 +549,7 @@ impl<'a> DecodeContext<'a> {
         Self {
             compile,
             builder: SemanticBuilder::default(),
+        pending_try_scopes: collections::Vec::new(),
             control: collections::vec![DecodeControlFrame {
                 kind: DecodeBlockKind::Function,
                 start_height: 0,
@@ -738,6 +777,17 @@ impl<'a> DecodeContext<'a> {
         let end_idx = self.push_op(SemanticOpKind::End);
         let end_target = SemanticTarget::new(end_idx.as_usize());
         if let Some(frame) = self.exit_block() {
+            if frame.kind == DecodeBlockKind::TryTable {
+                if let Some(scope) = self.pending_try_scopes.pop() {
+                    debug_assert!(scope.try_op < scope.start);
+                    self.builder.try_scopes.push(SemanticTryScope {
+                        try_op: scope.try_op,
+                        start: scope.start,
+                        end: end_idx.as_usize(),
+                        catches: scope.catches,
+                    });
+                }
+            }
             if frame.kind == DecodeBlockKind::If && frame.if_inst_idx.is_some() {
                 if let Some(if_idx) = frame.if_inst_idx {
                     if self.builder.ops.get(if_idx.as_usize()).is_some_and(|op| {
@@ -760,6 +810,15 @@ impl<'a> DecodeContext<'a> {
                     }
                     PendingFixupSite::TryTableCatch(catch_idx) => {
                         self.builder.patch_try_table_catch_target(
+                            fixup.inst_idx,
+                            catch_idx,
+                            end_target,
+                        );
+                        // The op only feeds encoding. The scope record is what
+                        // the middle end reads, and it needs the same patch or
+                        // a catch whose handler is a forward label arrives at
+                        // rewrite with a pending target and cannot dispatch.
+                        self.builder.patch_try_scope_catch_target(
                             fixup.inst_idx,
                             catch_idx,
                             end_target,
@@ -829,6 +888,9 @@ impl<'a> DecodeContext<'a> {
         inst_idx: SemanticIndex,
         site: PendingFixupSite,
     ) {
+        if matches!(site, PendingFixupSite::TryTableCatch(_)) {
+
+        }
         if let Some(frame) = self.frame_at_depth_mut(depth) {
             frame
                 .pending_fixups
@@ -1101,20 +1163,15 @@ impl<'a> DecodeContext<'a> {
     fn handle_throw(&mut self, tag_idx: u32) {
         let (arity, _results) = self.compile.resolve_tag_type(tag_idx);
         if let Some(resolved) = self.match_throw_to_catch(tag_idx) {
+            // A `catch_ref` clause hands the handler an exnref for the
+            // exception it caught, so the throw has to build one. It is built
+            // from the payload that is still on the stack here: the binding
+            // below does not consume it, the branch arm reads it as well.
             if resolved.forwards_exn {
-                if arity == 0 {
-                    let op_idx = self.push_op(SemanticOpKind::AllocExnRef { tag_idx });
-                    self.record_result_types(op_idx, &[ValueType::ref_exn()]);
-                    if !self.unreachable {
-                        self.push_typed_value_with_exn_tag(ValueType::ref_exn(), Some(tag_idx));
-                    }
-                } else {
-                    let op_idx = self.current_index();
-                    self.push_op(PrimitiveOpKind::RefNull);
-                    self.record_result_types(op_idx, &[ValueType::ref_exn()]);
-                    if !self.unreachable {
-                        self.push_typed_value_with_exn_tag(ValueType::ref_exn(), Some(tag_idx));
-                    }
+                let op_idx = self.push_op(SemanticOpKind::AllocExnRef { tag_idx, arity });
+                self.record_result_types(op_idx, &[ValueType::ref_exn()]);
+                if !self.unreachable {
+                    self.push_typed_value_with_exn_tag(ValueType::ref_exn(), Some(tag_idx));
                 }
             }
             self.pop_typed_values(resolved.arity as usize);
@@ -1853,10 +1910,14 @@ impl<'a> DecodeContext<'a> {
                 }
 
                 self.pop_typed_values(params as usize);
+                // The op owns the clause list; the scope record keeps its own
+                // copy so the middle end can read the region without going back
+                // through the op.
+                let scope_catches = sem_catches.clone();
                 let idx = self.push_op(SemanticOpKind::TryTable {
                     params,
                     results,
-                    catches: sem_catches,
+                    catches: scope_catches,
                 });
                 self.record_result_types(idx, &result_types);
                 for (catch_idx, clause) in catches.iter().enumerate() {
@@ -1871,6 +1932,11 @@ impl<'a> DecodeContext<'a> {
                 }
 
                 let try_target = SemanticTarget::new(self.current_index().as_usize());
+                self.pending_try_scopes.push(PendingTryScope {
+                    try_op: idx.as_usize(),
+                    start: try_target.index().as_usize(),
+                    catches: sem_catches,
+                });
                 self.enter_block(
                     DecodeBlockKind::TryTable,
                     params,
@@ -1890,33 +1956,36 @@ impl<'a> DecodeContext<'a> {
             }
             OP(THROW_REF) => {
                 let exn_tag = self.exn_tag_stack.last().copied().flatten();
-                if let Some(tag_idx) = exn_tag {
-                    if let Some(mut resolved) = self.match_throw_to_catch(tag_idx) {
-                        if resolved.forwards_exn {
-                            resolved.stack_drop = resolved.stack_drop.saturating_sub(1);
-                        }
-                        self.pop_typed_values(1);
-                        let br_idx = self.push_op(SemanticOpKind::Br {
-                            stack_drop: resolved.stack_drop,
-                            arity: resolved.arity,
-                            target: resolved.target,
-                        });
-                        if let Some(fixup_depth) = resolved.pending_fixup_depth {
-                            self.register_forward_branch(
-                                fixup_depth,
-                                br_idx,
-                                PendingFixupSite::Target,
-                            );
-                        }
-                        if resolved.forwards_exn {
-                            self.last_static_exn_tag = Some(tag_idx);
-                        }
-                        self.set_unreachable();
-                    } else {
-                        self.pop_typed_values(1);
-                        self.push_op(SemanticOpKind::ThrowRef);
-                        self.set_unreachable();
+                // A static catch is a branch to the handler, and that branch has
+                // to carry the tag's payload -- which a throw_ref does not have
+                // on the stack: it is inside the exception the reference names.
+                // Only a clause that takes nothing but the reference itself is
+                // served this way; anything else keeps unwinding.
+                let resolved = exn_tag
+                    .and_then(|tag_idx| {
+                        self.match_throw_to_catch(tag_idx)
+                            .map(|resolved| (tag_idx, resolved))
+                    })
+                    .filter(|(_, resolved)| {
+                        resolved.arity as usize == usize::from(resolved.forwards_exn)
+                    });
+                if let Some((tag_idx, mut resolved)) = resolved {
+                    if resolved.forwards_exn {
+                        resolved.stack_drop = resolved.stack_drop.saturating_sub(1);
                     }
+                    self.pop_typed_values(1);
+                    let br_idx = self.push_op(SemanticOpKind::Br {
+                        stack_drop: resolved.stack_drop,
+                        arity: resolved.arity,
+                        target: resolved.target,
+                    });
+                    if let Some(fixup_depth) = resolved.pending_fixup_depth {
+                        self.register_forward_branch(fixup_depth, br_idx, PendingFixupSite::Target);
+                    }
+                    if resolved.forwards_exn {
+                        self.last_static_exn_tag = Some(tag_idx);
+                    }
+                    self.set_unreachable();
                 } else {
                     self.pop_typed_values(1);
                     self.push_op(SemanticOpKind::ThrowRef);

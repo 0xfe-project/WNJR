@@ -574,12 +574,19 @@ impl<'a> BlockLowerContext<'a> {
     pub(super) fn lower_eh_alloc_exn_ref(
         &mut self,
         tag_idx: u32,
+        start_slot: u32,
+        slot_count: u32,
         results: &[SsaValue],
     ) -> Result<(), WasmError> {
         let result = single_result(results)?;
         let dst = self.alloc_result_value(result)?;
         self.emit_machine_inst(MachineInst {
-            kind: MachineInstKind::EhAllocExnRef { tag_idx, dst },
+            kind: MachineInstKind::EhAllocExnRef {
+                tag_idx,
+                start_slot,
+                slot_count,
+                dst,
+            },
         });
         Ok(())
     }

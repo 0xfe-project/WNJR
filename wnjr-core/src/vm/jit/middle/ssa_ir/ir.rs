@@ -584,6 +584,33 @@ fn decode_view<'a>(inst: SsaInst, program: &'a SsaProgram, block: &'a SsaBlock) 
     }
 }
 
+/// One catch clause of a `try_table` region, resolved to the middle end.
+///
+/// The tag is carried as the function's tag *index*; its `TagIdentity` is
+/// minted per instance and must be resolved at run time, so nothing here is
+/// baked into generated code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SsaCatch {
+    /// `None` for the `catch_all` / `catch_all_ref` forms.
+    pub tag_idx: Option<u32>,
+    /// Payload values the handler block expects, in front of its own params.
+    pub payload_arity: u16,
+    /// `catch_ref` / `catch_all_ref` also forward the exception reference.
+    pub forwards_exn: bool,
+    /// The handler, already resolved to a block id.
+    pub handler: SsaTarget,
+    /// The locals the handler binds the payload into, in the order the wasm
+    /// stack pops them — that is, the *reverse* of payload order. Empty when
+    /// the handler does not bind through locals.
+    pub payload_locals: collections::Vec<u16>,
+}
+
+/// One `try_table` region, as an SSA block sees it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SsaTryScope {
+    pub catches: collections::Vec<SsaCatch>,
+}
+
 /// Full prepared SSA-IR program for one function.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SsaProgram {
@@ -620,6 +647,17 @@ pub(crate) struct SsaProgram {
     pub primitive_pool: collections::Vec<PrimitiveOpKind>,
     /// Backing store for `Call` variants; `SsaInst.meta` is the index.
     pub call_ops: collections::Vec<SsaCallOp>,
+    /// Every `try_table` region of the function, with each catch's handler
+    /// already resolved to a block id.
+    pub try_scopes: collections::Vec<SsaTryScope>,
+    /// Indexed by block id: the innermost `try_table` region whose body
+    /// contains the whole block, as an index into `try_scopes`.
+    ///
+    /// A call in a block with `Some(scope)` may raise across the call and must
+    /// resume at that scope's matching catch instead of failing the call.
+    /// Structured wasm keeps every `try_table` boundary on a block boundary, so
+    /// a block never straddles two regions.
+    pub block_try_scope: collections::Vec<Option<u16>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

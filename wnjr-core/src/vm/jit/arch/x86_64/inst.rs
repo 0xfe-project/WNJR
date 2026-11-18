@@ -4,7 +4,7 @@ use crate::{
     error::WasmError,
     vm::{
         jit::machine::machine_ir::{
-            MachineCompareKind, MachineConvertOp, MachineFloatBinaryOp, MachineFloatUnaryOp,
+            EhHelperOp, MachineCompareKind, MachineConvertOp, MachineFloatBinaryOp, MachineFloatUnaryOp,
             MachineFloatWidth, MachineIndexExtend, MachineInst, MachineInstKind,
             MachineIntBinaryOp, MachineIntUnaryOp, MachineIntWidth, MachineLoadExtension,
             MachineMemWidth, MachineReg, MachineShiftOp, MachineSign, MachineStorageType,
@@ -130,6 +130,7 @@ impl<'a> X86_64Backend<'a> {
             MachineInstKind::CallRuntime(call) => {
                 self.lower_call_runtime(call.metadata.0 as usize)
             }
+            MachineInstKind::EhHelper { op, dst, imm } => self.lower_eh_helper(*op, *dst, *imm),
             MachineInstKind::EhThrow { tag_idx, args } => self.lower_preserved_no_result(
                 preserved::op::EH_THROW,
                 *tag_idx,
@@ -146,13 +147,18 @@ impl<'a> X86_64Backend<'a> {
                 MachineValue::Imm64(exnref_slot.0 as u64),
                 MachineValue::Imm64(0),
             ),
-            MachineInstKind::EhAllocExnRef { tag_idx, dst } => self.lower_preserved_result(
+            MachineInstKind::EhAllocExnRef {
+                tag_idx,
+                start_slot,
+                slot_count,
+                dst,
+            } => self.lower_preserved_result(
                 preserved::op::EH_ALLOC_EXN_REF,
                 *tag_idx,
                 0,
                 MachineValue::Reg(MACHINE_FP_REG),
-                MachineValue::Imm64(0),
-                MachineValue::Imm64(0),
+                MachineValue::Imm64(u64::from(*start_slot)),
+                MachineValue::Imm64(u64::from(*slot_count)),
                 MachineStorageType::GpWord,
                 *dst,
             ),
@@ -3315,6 +3321,40 @@ impl<'a> X86_64Backend<'a> {
             self.emit_io_store_value(slot, value)?;
         }
         self.emit_preserved_call_and_close(op_code, None);
+        Ok(())
+    }
+
+    /// Emit one pending-exception helper call.
+    ///
+    /// `Match`, `Payload` and `ExnRef` leave their result in `dst`; `Clear` takes
+    /// none. `Rethrow` always fails, and `emit_preserved_call_and_close` turns
+    /// that failure into this function's error tail, which is how the exception
+    /// reaches an outer call site's dispatcher.
+    fn lower_eh_helper(
+        &mut self,
+        op: EhHelperOp,
+        dst: MachineReg,
+        imm: u32,
+    ) -> Result<(), WasmError> {
+        use preserved::io as preserved_io;
+
+        self.emit_preserved_io_open();
+        self.emit_io_store_imm(preserved_io::IMM0, imm);
+        match op {
+            EhHelperOp::Match | EhHelperOp::Payload | EhHelperOp::ExnRef => {
+                let op_code = match op {
+                    EhHelperOp::Match => preserved::op::EH_MATCH,
+                    EhHelperOp::Payload => preserved::op::EH_PAYLOAD,
+                    _ => preserved::op::EH_PENDING_EXN_REF,
+                };
+                let dst_gp = self.map_gp_reg(dst)?;
+                self.emit_preserved_call_and_close(op_code, Some(dst_gp));
+            }
+            EhHelperOp::Clear => self.emit_preserved_call_and_close(preserved::op::EH_CLEAR, None),
+            EhHelperOp::Rethrow => {
+                self.emit_preserved_call_and_close(preserved::op::EH_RETHROW, None)
+            }
+        }
         Ok(())
     }
 

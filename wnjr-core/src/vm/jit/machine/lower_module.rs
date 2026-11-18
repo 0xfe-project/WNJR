@@ -400,6 +400,10 @@ fn lower_function(
     let original_block_count = input.ssa.blocks.len();
     let mut original_blocks = OriginalBlocks::new(original_block_count);
     let mut extra_blocks = collections::Vec::new();
+    // Catch blocks can only be completed once every block exists: the payload
+    // has to land in the registers the handler block was given, and those are
+    // chosen when it is lowered.
+    let mut eh_fixups: collections::Vec<EhCatchFixup> = collections::Vec::new();
     let mut extra_block_ids = ExtraBlockAllocator::new(original_block_count as u32);
     let i64_ops: &'static dyn I64Lowering = if gp_reg_width == 4 {
         &Gp32Lowering
@@ -605,12 +609,25 @@ fn lower_function(
                     {
                         let live_result = inst.result.is_some().then_some(inst.result);
                         let continuation = extra_block_ids.alloc();
-                        let (terminator, continuation_params) = lower.lower_call_internal(
+                        let (mut terminator, continuation_params) = lower.lower_call_internal(
                             *callee,
                             args,
                             *results,
                             live_result,
                             continuation,
+                        )?;
+                        // A call inside a try_table may raise across the call;
+                        // give it a dispatcher so the exception can resume at
+                        // the matching handler instead of escaping.
+                        attach_eh_dispatch(
+                            block.id.as_usize() as u32,
+                            &lower,
+                            &mut terminator,
+                            &mut extra_blocks,
+                            &mut extra_block_ids,
+                            &mut eh_fixups,
+                            &entry_cache_params,
+                            &explicit_cache,
                         )?;
                         push_lowered_block(
                             current_block,
@@ -971,9 +988,16 @@ fn lower_function(
     drop(entry_cache_params);
     drop(explicit_cache);
 
+    // Synthesized blocks (a call's catch dispatcher) are allocated while the
+    // block that owns the call is being lowered, so they can carry ids below a
+    // continuation that is only emitted later. Order by id once everything
+    // exists: the layout passes index blocks by position.
+    extra_blocks.sort_by_key(|block| block.id.as_usize());
+
     let mut blocks = original_blocks.finish()?;
     blocks.reserve_exact(extra_blocks.len());
     blocks.extend(extra_blocks);
+    finish_eh_dispatch(&mut blocks, &eh_fixups)?;
 
     let entry = MachineBlockId(input.ssa.entry.as_u32());
 
@@ -2554,6 +2578,7 @@ fn lower_indirect_dispatch_cluster(
                     target: continuation,
                     args: result_success_args.clone(),
                 },
+                thrown: None,
             }
         }
         None => MachineTerminator::TailCall {
@@ -2640,12 +2665,6 @@ fn push_lowered_block(
     if id.as_usize() < original_len {
         original_blocks.push(id, block)?;
     } else {
-        let expected = original_len + continuation_blocks.len();
-        if id.as_usize() != expected {
-            return Err(WasmError::internal(
-                "machine continuation blocks must be appended in id order".into(),
-            ));
-        }
         continuation_blocks.push(block);
     }
     Ok(())
@@ -2836,6 +2855,569 @@ impl OriginalBlocks {
         }
         Ok(self.blocks)
     }
+}
+
+/// Payload words a first-version catch dispatcher will deliver.
+///
+/// The preserved I/O area has a single result slot, so the payload is read one
+/// helper call at a time into reserved GP lanes; four lanes is what the dynamic
+/// bank can spare beside the match flag. Tags carrying more values keep the
+/// pre-existing behaviour for a throw raised across a call.
+const EH_MAX_PAYLOAD: u16 = 4;
+
+/// Attach a catch dispatcher to a call that may raise across the call.
+///
+/// A cross-function throw returns from the callee with status `Thrown`; without
+/// a dispatcher the caller runs its error tail and the exception escapes the
+/// function even when a `try_table` wraps the call. The dispatcher is a small
+/// synthesized cluster: per clause one tag test and one catch block that loads
+/// the payload into reserved lanes and jumps to the handler, ending in a
+/// rethrow tail. Returns whether a dispatcher was attached.
+/// One catch block whose payload still has to be delivered.
+struct EhCatchFixup {
+    block: MachineBlockId,
+    handler: MachineBlockId,
+    /// Where the catch block goes when it cannot deliver the handler's values.
+    rethrow: MachineBlockId,
+    payload_arity: u16,
+    /// Whether the clause also hands the handler an exnref for the exception it
+    /// caught, which the exception carries on top of its payload.
+    forwards_exn: bool,
+    /// A free linear register the catch block may use to move a payload word
+    /// into its slot.
+    scratch: MachineReg,
+    /// The argument each of the handler's parameters takes, in the handler's
+    /// parameter order. A catch payload arrives through the handler's own
+    /// reloads; every other cached cell is named by an EhCellReload.
+    handler_args: collections::Vec<crate::vm::jit::machine::machine_ir::MachineValue>,
+    /// Cells the catch block has to restore from their frame home before it
+    /// jumps into the handler.
+    reloads: collections::Vec<EhCellReload>,
+}
+
+/// A cached cell the catch block reloads from its frame home.
+///
+/// A call is a safepoint: the lowering publishes every live cached cell to its
+/// frame slot before the call, and the registers that carried them are free for
+/// the call's own arguments afterwards. So at the throw the frame is the only
+/// place a cell is known to be, whatever the throwing block's register
+/// arrangement said.
+#[derive(Clone, Copy, Debug)]
+struct EhCellReload {
+    dst: crate::vm::jit::machine::machine_ir::MachineReg,
+    addr: crate::vm::jit::machine::machine_ir::MachineAddr,
+    ty: crate::vm::jit::machine::machine_ir::MachineStorageType,
+    width: crate::vm::jit::machine::machine_ir::MachineMemWidth,
+}
+
+/// Deliver each catch payload into the registers its handler block reads.
+///
+/// Runs once every block exists: a handler's parameter registers are chosen
+/// when that block is lowered, which may happen after the call that needed the
+/// dispatcher.
+/// One frame slot a catch handler reads an incoming exception value out of.
+#[derive(Clone, Copy, Debug)]
+struct EhPayloadSlot {
+    addr: MachineAddr,
+    ty: MachineStorageType,
+    width: MachineMemWidth,
+}
+
+/// The slots a handler block reads the payload from, in program order.
+///
+/// A handler consumes the payload the way it consumes any other value that
+/// arrives on the stack: through whatever its block entry says. When the value
+/// lands in a parameter register the block reads it there and there is nothing
+/// to store; when it crossed a call the block starts by filling it from a frame
+/// slot, and that leading run of loads names the slots. Requiring a cached cell
+/// after each load would miss the second shape, which is the common one: a
+/// handler that binds the payload into a plain local.
+fn payload_slots(handler: &MachineBlock, want: usize) -> collections::Vec<EhPayloadSlot> {
+    use crate::vm::jit::machine::machine_ir::MachineRegOwner;
+
+    let mut slots = collections::Vec::with_capacity(want);
+    let mut index = 0;
+    while slots.len() < want {
+        let (Some(load), Some(bind)) = (handler.ops.get(index), handler.ops.get(index + 1)) else {
+            break;
+        };
+        let MachineInstKind::Load {
+            dst,
+            addr,
+            ty,
+            width,
+            ..
+        } = &load.kind
+        else {
+            break;
+        };
+        // The slot only carries the payload when the handler binds what it
+        // loaded straight into a cell: either by moving it into the register
+        // the cell lives in, or by storing it into the cell's frame home when
+        // the handler binds the payload into a plain local.
+        let binds = match &bind.kind {
+            MachineInstKind::Move {
+                owner: MachineRegOwner::CachedCell,
+                dst: cell,
+                src: MachineValue::Reg(src),
+                ..
+            } => dst == src && dst != cell,
+            MachineInstKind::Store {
+                src: MachineValue::Reg(src),
+                ..
+            } => dst == src,
+            _ => false,
+        };
+        if !binds {
+            break;
+        }
+        slots.push(EhPayloadSlot {
+            addr: *addr,
+            ty: *ty,
+            width: *width,
+        });
+        index += 2;
+    }
+    slots
+}
+
+fn finish_eh_dispatch(
+    blocks: &mut [MachineBlock],
+    fixups: &[EhCatchFixup],
+) -> Result<(), WasmError> {
+    use crate::vm::jit::machine::machine_ir::{
+        EhHelperOp, MachineEdge, MachineRegOwner, MachineValue,
+    };
+
+    for fixup in fixups {
+        let Some(handler) = blocks.get(fixup.handler.as_usize()) else {
+            return Err(WasmError::internal(
+                "exception handler block is missing from the machine program".into(),
+            ));
+        };
+        // A handler's parameters are its own values plus the registers its
+        // cached locals live in on entry. Only the former carry exception
+        // values; the latter are written by the handler itself when it reloads
+        // a cell, so an identity argument is all they need.
+        let linear = handler
+            .params
+            .iter()
+            .filter(|param| param.owner == MachineRegOwner::LinearValue)
+            .map(|param| param.reg)
+            .collect::<collections::Vec<_>>();
+        let payload_arity = fixup.payload_arity as usize;
+        // Everything the exception can hand over: its payload plus, for a
+        // `catch_ref` clause, the exnref it carries on top of it.
+        let carried = payload_arity.saturating_add(usize::from(fixup.forwards_exn));
+        if linear.len() > carried {
+            rethrow_uncaught(blocks, fixup);
+            continue;
+        }
+        // A catch label takes only what its own arity asks for; the rest of the
+        // payload is dropped, exactly as a br to that label would drop it.
+        let first_word = payload_arity.saturating_sub(linear.len());
+        let scratch = fixup.scratch;
+
+        // How the exception's values reach the handler: through its parameters,
+        // or through the frame slots its own leading reloads name. A `catch_ref`
+        // clause hands over one value more than the payload, and that value is
+        // on top of the stack, so it is the last parameter -- or, when the
+        // handler binds its incoming values into cells, the first slot.
+        let mut payload_regs = linear.as_slice();
+        let mut exn_reg = None;
+        let mut slots = collections::Vec::new();
+        if fixup.forwards_exn {
+            if linear.len() == carried {
+                payload_regs = &linear[..carried - 1];
+                exn_reg = linear.last().copied();
+            } else if linear.is_empty() {
+                slots = payload_slots(handler, carried);
+                if slots.len() != carried {
+                    rethrow_uncaught(blocks, fixup);
+                    continue;
+                }
+            } else {
+                // Part of the handler's values in registers and part in slots
+                // is a shape the plain catch path never produces either; the
+                // exception keeps unwinding rather than being caught wrongly.
+                rethrow_uncaught(blocks, fixup);
+                continue;
+            }
+        } else {
+            slots = payload_slots(handler, payload_arity);
+        }
+
+        let Some(block) = blocks.get_mut(fixup.block.as_usize()) else {
+            return Err(WasmError::internal(
+                "exception catch block is missing from the machine program".into(),
+            ));
+        };
+        let mut ops = collections::Vec::with_capacity(payload_regs.len() + block.ops.len());
+        for (index, reg) in payload_regs.iter().copied().enumerate() {
+            ops.push(MachineInst {
+                kind: MachineInstKind::EhHelper {
+                    op: EhHelperOp::Payload,
+                    dst: reg,
+                    imm: (first_word + index) as u32,
+                },
+            });
+        }
+        if let Some(reg) = exn_reg {
+            ops.push(MachineInst {
+                kind: MachineInstKind::EhHelper {
+                    op: EhHelperOp::ExnRef,
+                    dst: reg,
+                    imm: 0,
+                },
+            });
+        }
+        // Values the handler binds from its frame homes: the loads in front of
+        // it name the slots. The wasm stack pops the exception's values top
+        // first, so the first load takes the value on top -- the exnref when the
+        // clause forwards one -- and the payload words follow in reverse.
+        if fixup.forwards_exn && !slots.is_empty() {
+            push_payload_store(&mut ops, scratch, slots[0], EhHelperOp::ExnRef, 0);
+            for word in 0..payload_arity {
+                push_payload_store(
+                    &mut ops,
+                    scratch,
+                    slots[1 + (payload_arity - 1 - word)],
+                    EhHelperOp::Payload,
+                    word as u32,
+                );
+            }
+        } else if slots.len() == payload_arity {
+            for (word, slot) in slots.iter().enumerate() {
+                push_payload_store(
+                    &mut ops,
+                    scratch,
+                    *slot,
+                    EhHelperOp::Payload,
+                    (slots.len() - 1 - word) as u32,
+                );
+            }
+        }
+        ops.extend(block.ops.drain(..));
+        // Last, so the payload delivery above cannot overwrite a restored cell:
+        // its scratch register may be a lane the handler's cells live in.
+        for reload in fixup.reloads.iter() {
+            ops.push(MachineInst {
+                kind: MachineInstKind::Load {
+                    owner: MachineRegOwner::CachedCell,
+                    ty: reload.ty,
+                    dst: reload.dst,
+                    addr: reload.addr,
+                    width: reload.width,
+                    extension: MachineLoadExtension::None,
+                },
+            });
+        }
+        block.ops = ops;
+        // The handler's parameters come in its own order: the values the
+        // exception delivers first, then the registers its cells live in.
+        let mut args =
+            collections::Vec::with_capacity(payload_regs.len() + fixup.handler_args.len());
+        args.extend(payload_regs.iter().copied().map(MachineValue::Reg));
+        if let Some(reg) = exn_reg {
+            args.push(MachineValue::Reg(reg));
+        }
+        args.extend(fixup.handler_args.iter().copied());
+        block.terminator = MachineTerminator::Jump(MachineEdge {
+            target: fixup.handler,
+            args,
+        });
+    }
+    Ok(())
+}
+
+/// Hand the exception on instead of catching it wrongly.
+///
+/// A handler that wants values the exception does not carry wants the ones that
+/// were already on the stack at the try site; those are gone once the frame has
+/// unwound, so the exception keeps unwinding.
+fn rethrow_uncaught(blocks: &mut [MachineBlock], fixup: &EhCatchFixup) {
+    if let Some(block) = blocks.get_mut(fixup.block.as_usize()) {
+        block.terminator = MachineTerminator::Jump(MachineEdge {
+            target: fixup.rethrow,
+            args: collections::Vec::new(),
+        });
+    }
+}
+
+/// Read one of the exception's values into the scratch lane and store it into
+/// the frame slot the handler reads it from.
+fn push_payload_store(
+    ops: &mut collections::Vec<MachineInst>,
+    scratch: MachineReg,
+    slot: EhPayloadSlot,
+    op: crate::vm::jit::machine::machine_ir::EhHelperOp,
+    imm: u32,
+) {
+    use crate::vm::jit::machine::machine_ir::MachineValue;
+    ops.push(MachineInst {
+        kind: MachineInstKind::EhHelper {
+            op,
+            dst: scratch,
+            imm,
+        },
+    });
+    ops.push(MachineInst {
+        kind: MachineInstKind::Store {
+            ty: slot.ty,
+            addr: slot.addr,
+            width: slot.width,
+            src: MachineValue::Reg(scratch),
+        },
+    });
+}
+
+/// How a catch handler's cached cells cross the throw that led to it.
+///
+/// A handler block names the registers its cells live in as block parameters,
+/// but nothing about the throwing block guarantees the same placement: the
+/// allocator decides per block. On top of that the throwing call is a safepoint
+/// - its arguments may have taken the registers the cells were in - so the
+/// frame slot backing each cell is the only place the value is known to be.
+///
+/// So every cached cell the handler does not bind from the payload is reloaded
+/// here from its frame home, and the edge into the handler hands it over in the
+/// register the handler's parameters name. A payload cell is left to the handler,
+/// which writes it from the payload slots before reading it.
+fn eh_handler_handover(
+    lower: &BlockLowerContext<'_>,
+    clause: &crate::vm::jit::middle::ssa_ir::ir::SsaCatch,
+    throwing_block: usize,
+    entry_cache_params: &[collections::Vec<EntryCacheParam>],
+    cached_cells: &[CachedCell],
+) -> Option<(
+    collections::Vec<crate::vm::jit::machine::machine_ir::MachineValue>,
+    collections::Vec<EhCellReload>,
+)> {
+    use crate::vm::jit::machine::machine_ir::{MachineStorageType, MachineValue};
+
+    let wanted = entry_cache_params.get(clause.handler.as_usize())?;
+    let have = entry_cache_params.get(throwing_block)?;
+    let gp_reg_width = lower.gp_reg_width();
+    let mut args = collections::Vec::with_capacity(wanted.len());
+    let mut reloads = collections::Vec::new();
+    for entry in wanted {
+        let cached = cached_cells.get(usize::from(entry.cached_index))?;
+        if clause
+            .payload_locals
+            .iter()
+            .any(|local| cached.cell.0 == *local)
+        {
+            args.push(MachineValue::ReservedReg(entry.regs.lo));
+            continue;
+        }
+        // A word-sized cell comes back from its frame home; anything the frame
+        // does not hold as one addressable word keeps the throwing block's
+        // register, since the ABI leaves preserved lanes alone across a call.
+        let reloadable = entry.regs.hi.is_none()
+            && match cached.ty {
+                MachineStorageType::GpWord
+                | MachineStorageType::Fp32
+                | MachineStorageType::Fp64 => true,
+                MachineStorageType::GpI64 => gp_reg_width == 8,
+                MachineStorageType::V128 => false,
+            };
+        if reloadable {
+            let home = lower.cell_home(cached.cell).ok()?;
+            let addr = lower.frame_addr(home).ok()?;
+            reloads.push(EhCellReload {
+                dst: entry.regs.lo,
+                addr,
+                ty: cached.ty,
+                width: crate::vm::jit::machine::lower_regalloc::canonical_cached_cell_mem_width(
+                    cached.ty,
+                ),
+            });
+            args.push(MachineValue::Reg(entry.regs.lo));
+            continue;
+        }
+        let source = have
+            .iter()
+            .find(|candidate| candidate.cached_index == entry.cached_index)?;
+        if source.regs.hi.is_some() {
+            return None;
+        }
+        args.push(MachineValue::Reg(source.regs.lo));
+    }
+    Some((args, reloads))
+}
+
+fn attach_eh_dispatch(
+    ssa_block: u32,
+    lower: &BlockLowerContext<'_>,
+    terminator: &mut MachineTerminator,
+    extra_blocks: &mut collections::Vec<MachineBlock>,
+    extra_block_ids: &mut ExtraBlockAllocator,
+    eh_fixups: &mut collections::Vec<EhCatchFixup>,
+    entry_cache_params: &[collections::Vec<EntryCacheParam>],
+    cached_cells: &[CachedCell],
+) -> Result<bool, WasmError> {
+    use crate::vm::jit::machine::machine_ir::{
+        EhHelperOp, MachineBranchCond, MachineCompareKind, MachineEdge, MachineInst,
+        MachineInstKind, MachineIntWidth, MachineSign, MachineStorageType, MachineTrapKind,
+        MachineValue,
+    };
+    let ssa = lower.program();
+    if !matches!(terminator, MachineTerminator::Call { thrown: None, .. }) {
+        return Ok(false);
+    }
+    let Some(scope_idx) = ssa
+        .block_try_scope
+        .get(ssa_block as usize)
+        .copied()
+        .flatten()
+    else {
+        return Ok(false);
+    };
+    let Some(scope) = ssa.try_scopes.get(scope_idx as usize) else {
+        return Ok(false);
+    };
+
+    let max_arity = scope
+        .catches
+        .iter()
+        .map(|clause| clause.payload_arity)
+        .max()
+        .unwrap_or(0);
+    if scope.catches.is_empty() || max_arity > EH_MAX_PAYLOAD {
+        return Ok(false);
+    }
+    // The tag test writes a plain machine word; no backend accepts a reserved
+    // lane as a branch condition or as an edge argument.
+    let Some(flag) = lower.first_free_linear_value_reg(MachineStorageType::GpWord) else {
+        return Ok(false);
+    };
+
+    // Every clause needs its cached cells sourced before any block is created,
+    // so a failure leaves the program exactly as it was.
+    let mut clause_handover = collections::Vec::with_capacity(scope.catches.len());
+    for clause in &scope.catches {
+        let Some(handover) = eh_handler_handover(
+            lower,
+            clause,
+            ssa_block as usize,
+            entry_cache_params,
+            cached_cells,
+        ) else {
+            return Ok(false);
+        };
+        clause_handover.push(handover);
+    }
+
+    let mut catch_blocks = collections::Vec::with_capacity(scope.catches.len());
+    let mut match_blocks = collections::Vec::with_capacity(scope.catches.len());
+    for clause in &scope.catches {
+        catch_blocks.push(extra_block_ids.alloc());
+        match_blocks.push(clause.tag_idx.map(|_| extra_block_ids.alloc()));
+    }
+    let rethrow = extra_block_ids.alloc();
+
+    // Where a failed tag test continues: the next clause that needs a test,
+    // else the next catch-all, else the rethrow tail.
+    let next_target = |from: usize| -> MachineBlockId {
+        for index in from..scope.catches.len() {
+            if let Some(block) = match_blocks[index] {
+                return block;
+            }
+            if scope.catches[index].tag_idx.is_none() {
+                return catch_blocks[index];
+            }
+        }
+        rethrow
+    };
+    let entry = next_target(0);
+
+    for (index, clause) in scope.catches.iter().enumerate() {
+        let mut ops = collections::Vec::with_capacity(1);
+        ops.push(MachineInst {
+            kind: MachineInstKind::EhHelper {
+                op: EhHelperOp::Clear,
+                dst: flag,
+                imm: 0,
+            },
+        });
+
+        eh_fixups.push(EhCatchFixup {
+            block: catch_blocks[index],
+            handler: MachineBlockId(clause.handler.as_usize() as u32),
+            rethrow,
+            payload_arity: clause.payload_arity,
+            forwards_exn: clause.forwards_exn,
+            scratch: flag,
+            handler_args: clause_handover[index].0.clone(),
+            reloads: clause_handover[index].1.clone(),
+        });
+        extra_blocks.push(MachineBlock {
+            id: catch_blocks[index],
+            params: collections::Vec::new(),
+            ops,
+            terminator: MachineTerminator::Jump(MachineEdge {
+                target: MachineBlockId(clause.handler.as_usize() as u32),
+                args: collections::Vec::new(),
+            }),
+        });
+        if let Some(match_block) = match_blocks[index] {
+            extra_blocks.push(MachineBlock {
+                id: match_block,
+                params: collections::Vec::new(),
+                ops: collections::vec![MachineInst {
+                    kind: MachineInstKind::EhHelper {
+                        op: EhHelperOp::Match,
+                        dst: flag,
+                        imm: clause.tag_idx.unwrap_or(0),
+                    },
+                }],
+                terminator: MachineTerminator::Branch {
+                    // A reserved lane is not a mappable branch register on any
+                    // backend; compare it explicitly so the condition is loaded
+                    // through the ordinary value path.
+                    cond: MachineBranchCond::IntCompare {
+                        width: MachineIntWidth::I64,
+                        kind: MachineCompareKind::Ne,
+                        sign: MachineSign::Unsigned,
+                        lhs: MachineValue::Reg(flag),
+                        rhs: MachineValue::Imm64(0),
+                    },
+                    then_edge: MachineEdge {
+                        target: catch_blocks[index],
+                        args: collections::Vec::new(),
+                    },
+                    else_edge: MachineEdge {
+                        target: next_target(index + 1),
+                        args: collections::Vec::new(),
+                    },
+                },
+            });
+        }
+    }
+    extra_blocks.push(MachineBlock {
+        id: rethrow,
+        params: collections::Vec::new(),
+        ops: collections::vec![MachineInst {
+            kind: MachineInstKind::EhHelper {
+                op: EhHelperOp::Rethrow,
+                dst: flag,
+                imm: 0,
+            },
+        }],
+        // The helper always fails, which leaves through the function error
+        // tail; this terminator exists only to keep the block well formed.
+        terminator: MachineTerminator::Trap {
+            kind: MachineTrapKind::Unreachable,
+        },
+    });
+
+    if let MachineTerminator::Call { thrown, .. } = terminator {
+        *thrown = Some(MachineEdge {
+            target: entry,
+            args: collections::Vec::new(),
+        });
+    }
+    Ok(true)
 }
 
 struct ExtraBlockAllocator {
