@@ -18,6 +18,7 @@ pub mod expr;
 pub mod module;
 pub mod op;
 pub mod encode;
+pub mod erase;
 pub mod types;
 pub mod verify;
 
