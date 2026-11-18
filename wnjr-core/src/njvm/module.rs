@@ -5,6 +5,7 @@
 //! A function index `i` means import function `i` when `i` is below the
 //! number of imported functions, otherwise `functions[i - imported]`.
 
+use serde::{Deserialize, Serialize};
 use alloc::string::String;
 
 use crate::collections::Vec;
@@ -17,7 +18,7 @@ use super::types::{ConstVal, Type};
 /// N1 (this task) defines the function body as a flat `Vec<Op>` with labels
 /// and jumps. N3 (verifier) will check that the CFG is reducible and that
 /// labels are declared before use. For now, the builder just appends ops.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Function {
     /// Parameter types.
     pub params: Vec<Type>,
@@ -50,7 +51,7 @@ impl Function {
 }
 
 /// A function type signature.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct FunctionType {
     pub params: Vec<Type>,
     pub results: Vec<Type>,
@@ -58,7 +59,7 @@ pub struct FunctionType {
 
 /// A constant initializer: the value of a global, or the offset of an
 /// active data/element segment.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum InitExpr {
     /// A literal.
     Const(ConstVal),
@@ -74,7 +75,7 @@ impl InitExpr {
 }
 
 /// Whether a data or element segment is copied at instantiation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SegmentMode {
     /// Copied into memory/table `index` at `offset` when the module is
     /// instantiated.
@@ -87,14 +88,14 @@ pub enum SegmentMode {
 
 /// A table. Its element type is always `funcref`: table 0 is the
 /// function-pointer table, and a C function pointer is an index into it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TableType {
     pub min: u32,
     pub max: Option<u32>,
 }
 
 /// An element segment: function indices placed into a table.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ElementSegment {
     pub mode: SegmentMode,
     /// Indices in the function index space.
@@ -102,7 +103,7 @@ pub struct ElementSegment {
 }
 
 /// A linear memory with 32-bit addresses, sized in 64 KiB pages.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct MemoryType {
     pub min: u32,
     pub max: Option<u32>,
@@ -112,21 +113,21 @@ pub struct MemoryType {
 }
 
 /// The type of a global.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct GlobalType {
     pub ty: Type,
     pub mutable: bool,
 }
 
 /// A global defined in this module.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Global {
     pub ty: GlobalType,
     pub init: InitExpr,
 }
 
 /// A data segment.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct DataSegment {
     pub mode: SegmentMode,
     pub bytes: Vec<u8>,
@@ -134,13 +135,13 @@ pub struct DataSegment {
 
 /// An exception tag: the types of the values a `throw` carries.
 /// setjmp/longjmp use one module-level tag.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Tag {
     pub params: Vec<Type>,
 }
 
 /// What an import brings in.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ImportKind {
     /// A function of type `types[i]`.
     Function(u32),
@@ -151,7 +152,7 @@ pub enum ImportKind {
 }
 
 /// An import.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Import {
     pub module: String,
     pub name: String,
@@ -159,7 +160,7 @@ pub struct Import {
 }
 
 /// The index space an export refers to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ExportKind {
     Function,
     Table,
@@ -169,7 +170,7 @@ pub enum ExportKind {
 }
 
 /// An export.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Export {
     pub name: String,
     pub kind: ExportKind,
@@ -178,7 +179,7 @@ pub struct Export {
 }
 
 /// An NJVM-IR module.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Module {
     /// Function types referenced by imported functions. Signatures of
     /// defined functions and tags are added to the wasm type section by the

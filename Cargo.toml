@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "wnjr-core",
+    "wnjr-njvm-io",
     "wnjr-cli",
     "wnjr-tests",
     "wnjr-wasi",
