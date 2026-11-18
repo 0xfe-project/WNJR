@@ -9,3 +9,5 @@ design/_bak-*/
 .DS_Store
 PURPLE.md
 BLUE.md
+NJVM.md
+vendor/
