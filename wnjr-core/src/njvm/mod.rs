@@ -18,6 +18,7 @@ pub mod expr;
 pub mod module;
 pub mod op;
 pub mod encode;
+pub mod setjmp;
 pub mod stackify;
 pub mod erase;
 pub mod types;
