@@ -1,5 +1,6 @@
 //! NJVM-IR operation (statement/control flow) enum, groups A–H.
 
+use serde::{Deserialize, Serialize};
 use crate::collections::Vec;
 
 use super::expr::Expr;
@@ -20,7 +21,7 @@ pub type LabelId = u32;
 /// - F: coroutines (Await, Yield)
 /// - G: memory and locals (LocalSet, GlobalSet, MemoryCopy, MemoryFill, MemorySize, MemoryGrow, Atomic)
 /// - H: other (Const as statement, Drop, Nop; Const as expression is in `Expr`)
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Op {
     // ─────────────────────────────────────────────────────────────────────────
     // Group A: flat CFG

@@ -1,11 +1,12 @@
 //! NJVM-IR scalar types and operator kinds.
 
+use serde::{Deserialize, Serialize};
 /// NJVM-IR type system: integer widths, floats, and Ptr (equivalent to I32).
 ///
 /// Deliberately a subset: no i128, v128, reference types, or function
 /// references. jsval is not represented here. The frontend (N2) splits a jsval
 /// into two locals (one F64, one I64) before producing NJVM-IR.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Type {
     I8,
     U8,
@@ -22,7 +23,7 @@ pub enum Type {
 }
 
 /// Memory access width/type for Load and Store (group B).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MemType {
     I8,
     U8,
@@ -38,7 +39,7 @@ pub enum MemType {
 ///
 /// Integer signedness and float-vs-int selection is carried by the `ty` field
 /// of `Expr::Binary`, not by the operator itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BinaryOp {
     // Arithmetic
     Add,
@@ -68,7 +69,7 @@ pub enum BinaryOp {
 }
 
 /// Unary operators (group B).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UnaryOp {
     Neg,
     Not,
@@ -87,7 +88,7 @@ pub enum UnaryOp {
 ///
 /// The full operand shape (pointer, value, memory ordering) is defined in a
 /// later task; N1 keeps the operator, width, and offset per the IR sketch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AtomicOp {
     Load,
     Store,
@@ -107,7 +108,7 @@ pub enum AtomicOp {
 ///
 /// Floats are stored as their raw bit patterns so the enum can derive `Eq`
 /// and `Hash` and so NaN payloads round-trip exactly.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ConstVal {
     I32(i32),
     I64(i64),

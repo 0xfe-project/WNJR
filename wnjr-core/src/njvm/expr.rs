@@ -3,6 +3,7 @@
 //! An `Expr` computes a single value. Binary/Unary operands are themselves
 //! `Expr` nodes (boxed), so the representation is a tree rather than a stack.
 
+use serde::{Deserialize, Serialize};
 use crate::collections::Vec;
 use alloc::boxed::Box;
 
@@ -10,7 +11,7 @@ use super::op::LabelId;
 use super::types::{BinaryOp, ConstVal, MemType, Type, UnaryOp};
 
 /// A tree-form expression that produces one value.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     /// A constant literal (group H `Const`).
     Const { ty: Type, val: ConstVal },
