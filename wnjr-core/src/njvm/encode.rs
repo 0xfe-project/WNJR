@@ -1,8 +1,7 @@
 //! Encode an NJVM-IR module as a WebAssembly binary.
 //!
-//! N2 task: the encoder writes every function body as `unreachable`, since op
-//! lowering happens in a later task (code is a placeholder, see the code
-//! section below). The module-level facts (types, imports, functions, tables,
+//! Function bodies are lowered by `erase` (N5, type erasure); only
+//! straight-line bodies are supported until stackify (N6). The module-level facts (types, imports, functions, tables,
 //! memories, tags, globals, exports, start, elements, data) are fully encoded.
 
 use alloc::collections::BTreeMap;
@@ -16,8 +15,9 @@ use wasm_encoder::{
     TableType as WasmTableType, TagKind, TagSection, TagType as WasmTagType, TypeSection, ValType,
 };
 
-use crate::collections::{vec, Vec};
+use crate::collections::Vec;
 
+use super::erase::{lower_function, EraseError, Env as EraseEnv};
 use super::module::{ExportKind, ImportKind, InitExpr, Module, SegmentMode};
 use super::types::{ConstVal, Type};
 
@@ -39,6 +39,9 @@ pub enum EncodeError {
     /// A narrow integer type appeared in the import at `index` (position in
     /// `Module::imports`).
     NarrowTypeInImport { index: u32, ty: Type },
+    /// The body of the defined function at `index` (unified function index
+    /// space) could not be lowered by type erasure (N5).
+    Body { index: u32, error: EraseError },
 }
 
 impl core::fmt::Display for EncodeError {
@@ -59,6 +62,9 @@ impl core::fmt::Display for EncodeError {
             }
             EncodeError::NarrowTypeInImport { index, ty } => {
                 write!(f, "import at index {index} has unsupported narrow type {ty:?}")
+            }
+            EncodeError::Body { index, error } => {
+                write!(f, "function {index}: {error}")
             }
         }
     }
@@ -106,9 +112,7 @@ impl TypeInterner {
 
 /// Encode an NJVM-IR module as a wasm binary.
 ///
-/// Every function body is encoded as `unreachable` — a placeholder for N2.
-/// Op lowering (turning the NJVM-IR body into real wasm instructions) is a
-/// later task. Returns an error, carrying the failing item's index, when a
+/// Function bodies go through `erase::lower_function`. Returns an error, carrying the failing item's index, when a
 /// narrow type (I8/U8/I16/U16) appears where wasm needs i32/i64/f32/f64.
 pub fn encode(module: &Module) -> Result<Vec<u8>, EncodeError> {
     let mut wasm = WasmModule::new();
@@ -310,14 +314,18 @@ pub fn encode(module: &Module) -> Result<Vec<u8>, EncodeError> {
         });
     }
 
-    // Code section. PLACEHOLDER: every function body is `unreachable`.
-    // Lowering NJVM-IR ops into real wasm instructions is a later task; here
-    // we only encode a well-formed body so the module parses and validates.
+    // Code section: each body is lowered by type erasure (N5). Bodies with
+    // jumps need stackify (N6) and are rejected with `EncodeError::Body`.
     if !module.functions.is_empty() {
+        let env = EraseEnv::new(module);
         let mut code = CodeSection::new();
-        for _ in &module.functions {
-            let mut body = WasmFunction::new(vec![]); // no locals in the placeholder
-            body.instructions().unreachable().end();
+        for (i, func) in module.functions.iter().enumerate() {
+            let lowered = lower_function(&env, func).map_err(|error| EncodeError::Body {
+                index: imported_funcs + i as u32,
+                error,
+            })?;
+            let mut body = WasmFunction::new_with_locals_types(lowered.locals);
+            body.raw(lowered.code);
             code.function(&body);
         }
         wasm.section(&code);
