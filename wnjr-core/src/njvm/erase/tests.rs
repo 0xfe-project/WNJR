@@ -36,6 +36,9 @@ fn conv(from: Type, to: Type, v: Expr) -> Expr {
 fn ret(e: Expr) -> Op {
     Op::Return { vals: vec![e] }
 }
+fn ret0_void() -> Op {
+    Op::Return { vals: vec![] }
+}
 
 /// Encode `m`, validate it with WNJR, instantiate, and call export `name`.
 fn run_module(m: &Module, name: &str, args: &[Value]) -> Vec<Value> {
@@ -647,30 +650,37 @@ fn throw_is_lowered() {
 // ── errors ──────────────────────────────────────────────────────────────────
 
 #[test]
-fn label_with_jump_needs_stackify() {
+fn flat_cfg_now_lowers_via_stackify() {
+    // Before N6 a body with a jump was rejected with NeedsStackify. Now a
+    // top-level flat CFG goes through stackify and lowers to a real body.
     let body = vec![
         Op::Label { id: 0, params: vec![] },
+        // if (0) goto 0;  (never taken, falls to the return)
         Op::JmpIf { cond: c(Type::I32, 0), target: 0 },
         ret(c(Type::I32, 1)),
     ];
     let m = one_fn(vec![], vec![Type::I32], vec![], body);
-    assert_eq!(lower(&m).unwrap_err().kind, EraseErrorKind::NeedsStackify);
-    match encode(&m) {
-        Err(EncodeError::Body { index: 0, error }) => assert_eq!(error.kind, EraseErrorKind::NeedsStackify),
-        other => panic!("{other:?}"),
-    }
-    // A Jmp nested in a structured body is found too.
+    assert!(lower(&m).is_ok(), "flat CFG lowers via stackify");
+    assert!(encode(&m).is_ok(), "and encodes");
+
+    // A Jmp nested inside a structured op is still out of N6's scope.
     let m = one_fn(vec![], vec![], vec![], vec![
         Op::Label { id: 0, params: vec![] },
         Op::Block { body: vec![Op::Jmp { target: 0 }] },
     ]);
-    assert_eq!(lower(&m).unwrap_err().kind, EraseErrorKind::NeedsStackify);
-    // And BrTable.
+    assert_eq!(
+        lower(&m).unwrap_err().kind,
+        EraseErrorKind::Stackify(crate::njvm::StackifyError::NestedJump)
+    );
+
+    // A top-level BrTable lowers through stackify.
     let m = one_fn(vec![], vec![], vec![], vec![
         Op::Label { id: 0, params: vec![] },
-        Op::BrTable { index: c(Type::I32, 0), targets: vec![0], default: 0 },
+        Op::BrTable { index: c(Type::I32, 0), targets: vec![1], default: 1 },
+        Op::Label { id: 1, params: vec![] },
+        ret0_void(),
     ]);
-    assert_eq!(lower(&m).unwrap_err().kind, EraseErrorKind::NeedsStackify);
+    assert!(lower(&m).is_ok(), "flat BrTable lowers via stackify");
 }
 
 #[test]
