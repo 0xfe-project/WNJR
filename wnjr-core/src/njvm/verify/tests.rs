@@ -3,7 +3,7 @@
 
 use crate::collections::{vec, Vec};
 use crate::njvm::{
-    lower_function, verify_module, BinaryOp, ConstVal, Expr, Function, FunctionBuilder,
+    lower_function, verify_module, BinaryOp, Catch, ConstVal, Expr, Function, FunctionBuilder,
     FunctionType, Global, GlobalType, InitExpr, LabelId, MemType, Module, ModuleBuilder, Op,
     OpName, TableType, Tag, Type, UnaryOp, VerifyError, VerifyErrorKind,
 };
@@ -230,7 +230,7 @@ fn ok_try_internal_and_outward_jumps() {
                 Op::JmpIf { cond: ge10(0), target: 1 }, // leave the try
                 Op::Jmp { target: 0 },                  // loop inside the try
             ],
-            catches: vec![(0, vec![Op::Jmp { target: 1 }])],
+            catches: vec![Catch { tag: Some(0), bind: vec![], body: vec![Op::Jmp { target: 1 }] }],
         },
         label(1),
         ret(),
@@ -466,7 +466,7 @@ fn bad_jump_between_try_bodies() {
     let k = err_at(func(vec![], vec![], vec![], body), &[0, 0, 0]);
     assert_eq!(k, VerifyErrorKind::JumpIntoTry { label: 1 });
 
-    let body = vec![Op::TryTable { body: vec![label(0), ret()], catches: vec![(0, vec![Op::Jmp { target: 0 }])] }];
+    let body = vec![Op::TryTable { body: vec![label(0), ret()], catches: vec![Catch { tag: Some(0), bind: vec![], body: vec![Op::Jmp { target: 0 }] }] }];
     let mut m = module(vec![func(vec![], vec![], vec![], body)]);
     m.tags.push(Tag { params: vec![] });
     let e = verify_module(&m).unwrap_err();

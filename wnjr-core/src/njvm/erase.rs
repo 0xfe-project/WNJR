@@ -57,13 +57,13 @@
 //! The pass checks types itself and returns an error rather than panicking
 //! on input the N3 verifier would have rejected.
 
-use wasm_encoder::{BlockType, Ieee32, Ieee64, InstructionSink, MemArg, ValType};
+use wasm_encoder::{BlockType, Catch as WasmCatch, Ieee32, Ieee64, InstructionSink, MemArg, ValType};
 
 use crate::collections::Vec;
 
 use super::expr::Expr;
 use super::module::{Function, ImportKind, Module};
-use super::op::Op;
+use super::op::{Catch, Op};
 use super::stackify::{stackify, Node, StackifyError};
 use super::types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
 
@@ -130,6 +130,9 @@ pub struct Env<'m> {
     module: &'m Module,
     globals: Vec<Type>,
     tags: Vec<&'m [Type]>,
+    /// Per tag (imports first): the wasm type index of `[] -> params`, needed
+    /// as the block type of a catch target when the tag has 2+ params.
+    tag_blocks: Vec<Option<u32>>,
 }
 
 impl<'m> Env<'m> {
@@ -155,7 +158,15 @@ impl<'m> Env<'m> {
         }
         globals.extend(module.globals.iter().map(|g| g.ty.ty));
         tags.extend(module.tags.iter().map(|t| t.params.as_slice()));
-        Env { funcs, module, globals, tags }
+        Env { funcs, module, globals, tags, tag_blocks: Vec::new() }
+    }
+
+    /// Supply the block type indices of multi-value tags (see `tag_blocks`).
+    /// `encode` interns them; without this a catch of a 2+ param tag is
+    /// `NotImplemented`.
+    pub fn with_tag_block_types(mut self, tag_blocks: Vec<Option<u32>>) -> Self {
+        self.tag_blocks = tag_blocks;
+        self
     }
 }
 
@@ -212,9 +223,8 @@ fn has_jumps(body: &[Op]) -> bool {
             cases.iter().any(|(_, b)| has_jumps(b)) || has_jumps(default)
         }
         Op::TypeSwitch { cases, .. } => cases.iter().any(|(_, b)| has_jumps(b)),
-        Op::TryTable { body, catches } => {
-            has_jumps(body) || catches.iter().any(|(_, b)| has_jumps(b))
-        }
+        // Regions of their own; erased (and stackified) separately.
+        Op::TryTable { .. } => false,
         Op::Await { fallback, .. } => has_jumps(fallback),
         _ => false,
     })
@@ -254,7 +264,7 @@ pub fn lower_function(env: &Env<'_>, func: &Function) -> Result<Lowered, EraseEr
         let tree = stackify(&func.body)
             .map_err(|e| EraseError { at: None, kind: EraseErrorKind::Stackify(e) })?;
         let mut sink = InstructionSink::new(&mut code);
-        cx.emit_tree(&mut sink, &tree)?;
+        cx.emit_tree(&mut sink, &func.body, &tree, None)?;
         // A result-returning function whose structured body never falls off the
         // end (every path returns or loops) still needs a terminator so the
         // implicit function end does not underflow the value stack.
@@ -801,30 +811,136 @@ impl Cx<'_, '_> {
         Ok(ty)
     }
 
+    /// Emit one TryTable region (its body or a handler). A region with jumps
+    /// is stackified on its own; `exit` is the `br` depth that leaves it.
+    /// An error inside the region is reported with its kind only; its `at`
+    /// is the enclosing top-level op.
+    fn region(&mut self, s: &mut InstructionSink<'_>, ops: &[Op], exit: u32) -> Result<(), EraseErrorKind> {
+        if has_jumps(ops) {
+            let tree = stackify(ops).map_err(EraseErrorKind::Stackify)?;
+            self.emit_tree(s, ops, &tree, Some(exit)).map_err(|e| e.kind)
+        } else {
+            for op in ops {
+                self.op(s, op)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// Lower `Op::TryTable` with `n` catches:
+    ///
+    /// ```text
+    /// block                       ;; exit
+    ///   block (result p_{n-1})    ;; h_{n-1}
+    ///     ...
+    ///       block (result p_0)    ;; h_0
+    ///         try_table (catch t_0 0) ... (catch t_{n-1} n-1)
+    ///           <body>            ;; falling off: br 0 (try_table end)
+    ///         end
+    ///         br n                ;; body done -> exit
+    ///       end                   ;; h_0: payload of t_0 on the stack
+    ///       local.set bind_0 (reversed)
+    ///       <handler 0> br n-1
+    ///     ...
+    ///   end                       ;; h_{n-1}
+    ///   <handler n-1> br 0
+    /// end
+    /// ```
+    ///
+    /// Catch labels are resolved outside the try_table, so catch k targets
+    /// h_k at depth k. A handler block's result type is its tag's params.
+    fn try_table(&mut self, s: &mut InstructionSink<'_>, body: &[Op], catches: &[Catch]) -> Result<(), EraseErrorKind> {
+        let n = catches.len() as u32;
+        let mut bts: Vec<BlockType> = Vec::with_capacity(catches.len());
+        for c in catches {
+            let params: Vec<Type> = match c.tag {
+                Some(t) => self.env.tags.get(t as usize).ok_or(EraseErrorKind::TagOutOfRange { idx: t })?.to_vec(),
+                None => Vec::new(),
+            };
+            if c.bind.len() != params.len() {
+                return Err(EraseErrorKind::ArityMismatch { expected: params.len(), got: c.bind.len() });
+            }
+            for (&l, &p) in c.bind.iter().zip(params.iter()) {
+                let lt = self.local(l)?;
+                if lt != p {
+                    return Err(EraseErrorKind::TypeMismatch { expected: p, got: lt });
+                }
+            }
+            let bt = match params.len() {
+                0 => BlockType::Empty,
+                1 => BlockType::Result(wide(params[0])?),
+                _ => {
+                    let t = c.tag.unwrap_or(0);
+                    let idx = self.env.tag_blocks.get(t as usize).copied().flatten().ok_or(
+                        EraseErrorKind::NotImplemented {
+                            op: "TryTable",
+                            reason: "a catch of a multi-param tag needs its block type; build Env with with_tag_block_types (encode does)",
+                        },
+                    )?;
+                    BlockType::FunctionType(idx)
+                }
+            };
+            bts.push(bt);
+        }
+        s.block(BlockType::Empty); // exit
+        for k in (0..catches.len()).rev() {
+            s.block(bts[k]);
+        }
+        let clauses: alloc::vec::Vec<WasmCatch> = catches
+            .iter()
+            .enumerate()
+            .map(|(k, c)| match c.tag {
+                Some(tag) => WasmCatch::One { tag, label: k as u32 },
+                None => WasmCatch::All { label: k as u32 },
+            })
+            .collect();
+        s.try_table(BlockType::Empty, clauses);
+        self.region(s, body, 0)?;
+        s.end();
+        s.br(n);
+        for (k, c) in catches.iter().enumerate() {
+            s.end(); // h_k
+            for &l in c.bind.iter().rev() {
+                s.local_set(l);
+            }
+            let d = n - 1 - k as u32;
+            self.region(s, &c.body, d)?;
+            s.br(d);
+        }
+        s.end(); // exit
+        Ok(())
+    }
+
     /// Emit a stackified [`Node`] tree. Blocks and loops carry no stack values
     /// (the IR keeps the operand stack empty at labels), so every construct has
     /// an empty block type.
-    fn emit_tree(&mut self, s: &mut InstructionSink<'_>, nodes: &[Node]) -> Result<(), EraseError> {
+    ///
+    /// `ops` is the region the tree was built from (the function body, or a
+    /// `TryTable` body/handler). `exit` is the `br` depth, at the tree's top
+    /// level, that leaves the region; `None` for the function body, where
+    /// falling off the end returns or traps.
+    fn emit_tree(&mut self, s: &mut InstructionSink<'_>, ops: &[Op], nodes: &[Node], exit: Option<u32>) -> Result<(), EraseError> {
+        let inner = exit.map(|d| d + 1);
         for node in nodes {
             match node {
                 Node::Block { body } => {
                     s.block(BlockType::Empty);
-                    self.emit_tree(s, body)?;
+                    self.emit_tree(s, ops, body, inner)?;
                     s.end();
                 }
                 Node::Loop { body } => {
                     s.loop_(BlockType::Empty);
-                    self.emit_tree(s, body)?;
+                    self.emit_tree(s, ops, body, inner)?;
                     s.end();
                 }
                 Node::If { cond, then_body, else_body } => {
-                    let c = jmp_cond(self.func, *cond);
+                    let c = jmp_cond(ops, *cond);
                     self.cond(s, c).map_err(|kind| EraseError { at: Some(*cond), kind })?;
                     s.if_(BlockType::Empty);
-                    self.emit_tree(s, then_body)?;
+                    self.emit_tree(s, ops, then_body, inner)?;
                     if !else_body.is_empty() {
                         s.else_();
-                        self.emit_tree(s, else_body)?;
+                        self.emit_tree(s, ops, else_body, inner)?;
                     }
                     s.end();
                 }
@@ -832,20 +948,23 @@ impl Cx<'_, '_> {
                     s.br(*depth);
                 }
                 Node::BrIf { cond, depth } => {
-                    let c = jmp_cond(self.func, *cond);
+                    let c = jmp_cond(ops, *cond);
                     self.cond(s, c).map_err(|kind| EraseError { at: Some(*cond), kind })?;
                     s.br_if(*depth);
                 }
                 Node::BrTable { index, targets, default } => {
-                    let e = brtable_index(self.func, *index);
+                    let e = brtable_index(ops, *index);
                     // The index selects a target; wasm br_table wants an i32.
                     self.expect_class(s, e, ValType::I32)
                         .map_err(|kind| EraseError { at: Some(*index), kind })?;
                     s.br_table(targets.iter().copied(), *default);
                 }
                 Node::Stmt { idx } => {
-                    let func = self.func;
-                    self.op(s, &func.body[*idx]).map_err(|kind| EraseError { at: Some(*idx), kind })?;
+                    self.op(s, &ops[*idx]).map_err(|kind| EraseError { at: Some(*idx), kind })?;
+                }
+                Node::FallOffEnd if exit.is_some() => {
+                    // End of a TryTable region: continue after the TryTable.
+                    s.br(exit.unwrap());
                 }
                 Node::FallOffEnd => {
                     // Reaching the body end: return for a void function, trap
@@ -973,7 +1092,7 @@ impl Cx<'_, '_> {
                     reason: "no consumer in this version: NJVM-IR has no reference types, so there is no type tag to dispatch on",
                 })
             }
-            Op::TryTable { .. } => return Err(EraseErrorKind::Unsupported { op: "TryTable" }),
+            Op::TryTable { body, catches } => self.try_table(s, body, catches)?,
             Op::Setjmp { .. } => return Err(EraseErrorKind::Unsupported { op: "Setjmp" }),
             Op::Longjmp { .. } => return Err(EraseErrorKind::Unsupported { op: "Longjmp" }),
             Op::Await { .. } => return Err(EraseErrorKind::Unsupported { op: "Await" }),
@@ -992,17 +1111,17 @@ impl Cx<'_, '_> {
     }
 }
 
-/// The condition of the `JmpIf` at body index `idx` (stackify only points there).
-fn jmp_cond(func: &Function, idx: usize) -> &Expr {
-    match &func.body[idx] {
+/// The condition of the `JmpIf` at region index `idx` (stackify only points there).
+fn jmp_cond(ops: &[Op], idx: usize) -> &Expr {
+    match &ops[idx] {
         Op::JmpIf { cond, .. } => cond,
         _ => unreachable!("stackify points If/BrIf cond at a JmpIf"),
     }
 }
 
-/// The index of the `BrTable` at body index `idx`.
-fn brtable_index(func: &Function, idx: usize) -> &Expr {
-    match &func.body[idx] {
+/// The index of the `BrTable` at region index `idx`.
+fn brtable_index(ops: &[Op], idx: usize) -> &Expr {
+    match &ops[idx] {
         Op::BrTable { index, .. } => index,
         _ => unreachable!("stackify points BrTable index at a BrTable"),
     }

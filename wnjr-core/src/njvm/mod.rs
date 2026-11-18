@@ -30,7 +30,7 @@ pub use module::{
     DataSegment, ElementSegment, Export, ExportKind, Function, FunctionType, Global, GlobalType,
     Import, ImportKind, InitExpr, MemoryType, Module, SegmentMode, TableType, Tag,
 };
-pub use op::{LabelId, Op};
+pub use op::{Catch, LabelId, Op};
 pub use types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
 pub use stackify::{stackify, max_depth, Node, StackifyError};
 pub use verify::{verify_module, OpName, OpPath, VerifyError, VerifyErrorKind};

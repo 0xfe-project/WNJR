@@ -107,6 +107,9 @@ pub enum VerifyErrorKind {
     Irreducible { label: Option<LabelId>, target: OpPath },
     /// A jump from outside a `TryTable` body to a label inside it.
     JumpIntoTry { label: LabelId },
+    /// A catch clause's `bind` locals do not have the types of its tag's
+    /// params (catch_all binds nothing).
+    CatchBind { expected: Vec<Type>, got: Vec<Type> },
     /// A pre-lowering computed-goto marker (`Expr::LabelAddr` or
     /// `Op::GotoIndirect`) is still present; run `computed_goto::lower_module` first.
     UnloweredComputedGoto,
@@ -283,7 +286,7 @@ fn child_bodies(op: &Op) -> Vec<&[Op]> {
         Op::TypeSwitch { cases, .. } => v.extend(cases.iter().map(|(_, b)| b.as_slice())),
         Op::TryTable { body, catches } => {
             v.push(body);
-            v.extend(catches.iter().map(|(_, b)| b.as_slice()));
+            v.extend(catches.iter().map(|c| c.body.as_slice()));
         }
         Op::Await { fallback, .. } => v.push(fallback),
         _ => {}
@@ -489,20 +492,31 @@ impl FnCx<'_, '_> {
                 self.call_indirect(*type_idx, *table_idx, callee, args)?;
             }
             Op::TryTable { catches, .. } => {
-                for (tag, _) in catches {
-                    self.tag(*tag)?;
+                for c in catches {
+                    let params: Vec<Type> = match c.tag {
+                        Some(t) => self.tag(t)?.to_vec(),
+                        None => Vec::new(),
+                    };
+                    let got = c.bind.iter().map(|&l| self.local(l)).collect::<Result<Vec<_>, _>>()?;
+                    if got != params {
+                        return Err(VerifyErrorKind::CatchBind { expected: params, got });
+                    }
                 }
             }
             Op::Throw { tag_idx, args } => {
                 let params = self.tag(*tag_idx)?;
                 self.args(args, params)?;
             }
-            Op::Setjmp { buf } => {
+            Op::Setjmp { buf, dest } => {
                 self.expect(buf, &ADDR)?;
+                let t = self.local(*dest)?;
+                if t != Type::I32 {
+                    return Err(VerifyErrorKind::TypeMismatch { expected: vec![Type::I32], got: t });
+                }
             }
             Op::Longjmp { buf, val } => {
                 self.expect(buf, &ADDR)?;
-                self.expect(val, &I32_LIKE)?;
+                self.expect(val, &[Type::I32])?;
             }
             Op::Await { channel, .. } => {
                 self.expr(channel)?;
