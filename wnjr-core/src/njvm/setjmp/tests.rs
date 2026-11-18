@@ -870,3 +870,385 @@ fn bx_full_before() {
     world.free(id).unwrap();
     std::eprintln!("bx_full_before: {r:?}");
 }
+
+#[test]
+fn p1_load_dropped() {
+    let thrower = r#"(func $thr i32.const 16 i32.load drop i32.const 1 i32.const 5 throw $t)"#;
+    let call = "call $thr";
+    let catcher = std::format!(r#"(func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              {} i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)"#, call);
+    let src = std::format!("(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t (param i32 i32)) {} {})", catcher, thrower);
+    let bytes = wat::parse_str(&src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE p1_load_dropped: {r:?}");
+}
+
+#[test]
+fn p2_store_then_const() {
+    let thrower = r#"(func $thr i32.const 16 i32.const 3 i32.store i32.const 1 i32.const 5 throw $t)"#;
+    let call = "call $thr";
+    let catcher = std::format!(r#"(func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              {} i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)"#, call);
+    let src = std::format!("(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t (param i32 i32)) {} {})", catcher, thrower);
+    let bytes = wat::parse_str(&src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE p2_store_then_const: {r:?}");
+}
+
+#[test]
+fn p3_global_get() {
+    let thrower = r#"(func $thr global.get $g i32.const 5 throw $t)"#;
+    let call = "call $thr";
+    let catcher = std::format!(r#"(func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              {} i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)"#, call);
+    let src = std::format!("(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t (param i32 i32)) {} {})", catcher, thrower);
+    let bytes = wat::parse_str(&src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE p3_global_get: {r:?}");
+}
+
+#[test]
+fn p4_load_second_operand() {
+    let thrower = r#"(func $thr i32.const 1 i32.const 16 i32.load throw $t)"#;
+    let call = "call $thr";
+    let catcher = std::format!(r#"(func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              {} i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)"#, call);
+    let src = std::format!("(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t (param i32 i32)) {} {})", catcher, thrower);
+    let bytes = wat::parse_str(&src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE p4_load_second_operand: {r:?}");
+}
+
+#[test]
+fn p5_inline_load() {
+    let thrower = r#"(func $thr nop)"#;
+    let call = r#"i32.const 16 i32.load i32.const 5 throw $t"#;
+    let catcher = std::format!(r#"(func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              {} i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)"#, call);
+    let src = std::format!("(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t (param i32 i32)) {} {})", catcher, thrower);
+    let bytes = wat::parse_str(&src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE p5_inline_load: {r:?}");
+}
+
+#[test]
+fn p6_load_catch_all() {
+    let thrower = r#"(func $thr i32.const 16 i32.load i32.const 5 throw $t)"#;
+    let call = "call $thr";
+    let catcher = std::format!(r#"(func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch_all 0)
+              {} i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)"#, call);
+    let src = std::format!("(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t (param i32 i32)) {} {})", catcher, thrower);
+    let bytes = wat::parse_str(&src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE p6_load_catch_all: {r:?}");
+}
+
+#[test]
+fn p7_memsize() {
+    let thrower = r#"(func $thr memory.size i32.const 5 throw $t)"#;
+    let call = "call $thr";
+    let catcher = std::format!(r#"(func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              {} i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)"#, call);
+    let src = std::format!("(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t (param i32 i32)) {} {})", catcher, thrower);
+    let bytes = wat::parse_str(&src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE p7_memsize: {r:?}");
+}
+
+#[test]
+fn q1_mid_load_inner_pure() {
+    let src = r#"(module (memory 1 1) (tag $t (param i32 i32))
+      (func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              call $thr i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)
+      (func $thr i32.const 16 i32.load drop call $pure) (func $pure i32.const 1 i32.const 5 throw $t))"#;
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE q1_mid_load_inner_pure: {r:?}");
+}
+
+#[test]
+fn q2_mid_pure_inner_load() {
+    let src = r#"(module (memory 1 1) (tag $t (param i32 i32))
+      (func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              call $thr i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)
+      (func $thr call $ld) (func $ld i32.const 16 i32.load i32.const 5 throw $t))"#;
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE q2_mid_pure_inner_load: {r:?}");
+}
+
+#[test]
+fn q3_load_to_local() {
+    let src = r#"(module (memory 1 1) (tag $t (param i32 i32))
+      (func (export "f") (result i32) (local i32 i32 i32 i32)
+        block
+          block (result i32 i32)
+            try_table (catch $t 0)
+              call $thr i32.const 999 return
+            end
+            br 1
+          end
+          local.set 3 local.set 2
+          local.get 3 i32.const 100 i32.add return
+        end
+        unreachable)
+      (func $thr (local i32) i32.const 16 i32.load local.set 0 i32.const 1 i32.const 5 throw $t))"#;
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("bis", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE q3_load_to_local: {r:?}");
+}
+
+#[test]
+fn r0_pure() {
+    let src = r#"(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t)
+      (func $thr throw $t)
+      (func (export "f") (result i32)
+        block
+          try_table (catch $t 0)
+            call $thr
+          end
+          i32.const 0
+          return
+        end
+        i32.const 1))"#;
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("min", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE r0_pure: {r:?}");
+}
+
+#[test]
+fn r1_load() {
+    let src = r#"(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t)
+      (func $thr i32.const 0 i32.load drop throw $t)
+      (func (export "f") (result i32)
+        block
+          try_table (catch $t 0)
+            call $thr
+          end
+          i32.const 0
+          return
+        end
+        i32.const 1))"#;
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("min", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE r1_load: {r:?}");
+}
+
+#[test]
+fn r2_global() {
+    let src = r#"(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t)
+      (func $thr global.get $g drop throw $t)
+      (func (export "f") (result i32)
+        block
+          try_table (catch $t 0)
+            call $thr
+          end
+          i32.const 0
+          return
+        end
+        i32.const 1))"#;
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("min", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE r2_global: {r:?}");
+}
+
+#[test]
+fn r3_memsize() {
+    let src = r#"(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t)
+      (func $thr memory.size drop throw $t)
+      (func (export "f") (result i32)
+        block
+          try_table (catch $t 0)
+            call $thr
+          end
+          i32.const 0
+          return
+        end
+        i32.const 1))"#;
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("min", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE r3_memsize: {r:?}");
+}
+
+#[test]
+fn r4_global_set() {
+    let src = r#"(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t)
+      (func $thr i32.const 1 global.set $g throw $t)
+      (func (export "f") (result i32)
+        block
+          try_table (catch $t 0)
+            call $thr
+          end
+          i32.const 0
+          return
+        end
+        i32.const 1))"#;
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("min", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("inst");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).unwrap();
+    std::eprintln!("PROBE r4_global_set: {r:?}");
+}
