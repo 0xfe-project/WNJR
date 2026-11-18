@@ -1,11 +1,16 @@
 //! NJVM-IR builder: construct functions and modules in memory.
 
+use alloc::string::ToString;
+
 use crate::collections::Vec;
 
 use super::expr::Expr;
-use super::module::{Function, Module};
+use super::module::{
+    DataSegment, ElementSegment, Export, ExportKind, Function, FunctionType, Global, GlobalType,
+    Import, ImportKind, InitExpr, MemoryType, Module, TableType, Tag,
+};
 use super::op::{LabelId, Op};
-use super::types::Type;
+use super::types::{ConstVal, Type};
 
 /// A builder for constructing an NJVM-IR function incrementally.
 ///
@@ -89,9 +94,137 @@ impl ModuleBuilder {
         }
     }
 
-    /// Add a function to the module.
+    /// Add a function type to the module.
+    pub fn add_type(&mut self, ty: FunctionType) -> u32 {
+        let idx = self.module.types.len() as u32;
+        self.module.types.push(ty);
+        idx
+    }
+
+    /// Add an import to the module.
+    pub fn add_import(&mut self, import: Import) {
+        self.module.imports.push(import);
+    }
+
+    /// Convenience: import a function with the given type index.
+    pub fn import_function(&mut self, module: &str, name: &str, type_idx: u32) {
+        self.module.imports.push(Import {
+            module: module.to_string(),
+            name: name.to_string(),
+            kind: ImportKind::Function(type_idx),
+        });
+    }
+
+    /// Convenience: import a shared memory.
+    pub fn import_memory(&mut self, module: &str, name: &str, min: u32, max: Option<u32>) {
+        self.module.imports.push(Import {
+            module: module.to_string(),
+            name: name.to_string(),
+            kind: ImportKind::Memory(MemoryType {
+                min,
+                max,
+                shared: true,
+            }),
+        });
+    }
+
+    /// Convenience: import a mutable i32 global.
+    pub fn import_global_i32_mut(&mut self, module: &str, name: &str) {
+        self.module.imports.push(Import {
+            module: module.to_string(),
+            name: name.to_string(),
+            kind: ImportKind::Global(GlobalType {
+                ty: Type::I32,
+                mutable: true,
+            }),
+        });
+    }
+
+    /// Add a function definition to the module.
     pub fn add_function(&mut self, func: Function) {
         self.module.functions.push(func);
+    }
+
+    /// Add a table to the module.
+    pub fn add_table(&mut self, table: TableType) {
+        self.module.tables.push(table);
+    }
+
+    /// Add an element segment to the module.
+    pub fn add_element(&mut self, elem: ElementSegment) {
+        self.module.elements.push(elem);
+    }
+
+    /// Add a memory to the module.
+    pub fn add_memory(&mut self, memory: MemoryType) {
+        self.module.memories.push(memory);
+    }
+
+    /// Add a global to the module.
+    pub fn add_global(&mut self, global: Global) {
+        self.module.globals.push(global);
+    }
+
+    /// Convenience: add a mutable i32 global initialized to `init_value`.
+    pub fn add_i32_global(&mut self, init_value: i32) -> u32 {
+        let idx = self.module.imported_globals() + self.module.globals.len() as u32;
+        self.module.globals.push(Global {
+            ty: GlobalType {
+                ty: Type::I32,
+                mutable: true,
+            },
+            init: InitExpr::Const(ConstVal::I32(init_value)),
+        });
+        idx
+    }
+
+    /// Add the two conventional mutable i32 globals, `stack_pointer` and
+    /// `tls_base`, record their indices on the module, and return them as
+    /// `(stack_pointer, tls_base)` in the global index space.
+    pub fn add_stack_pointer_and_tls_base(&mut self, stack_top: i32, tls_base: i32) -> (u32, u32) {
+        let sp = self.add_i32_global(stack_top);
+        let tls = self.add_i32_global(tls_base);
+        self.module.stack_pointer = Some(sp);
+        self.module.tls_base = Some(tls);
+        (sp, tls)
+    }
+
+    /// Add an export to the module.
+    pub fn add_export(&mut self, export: Export) {
+        self.module.exports.push(export);
+    }
+
+    /// Convenience: export a function.
+    pub fn export_function(&mut self, name: &str, func_idx: u32) {
+        self.module.exports.push(Export {
+            name: name.to_string(),
+            kind: ExportKind::Function,
+            index: func_idx,
+        });
+    }
+
+    /// Convenience: export a memory.
+    pub fn export_memory(&mut self, name: &str, memory_idx: u32) {
+        self.module.exports.push(Export {
+            name: name.to_string(),
+            kind: ExportKind::Memory,
+            index: memory_idx,
+        });
+    }
+
+    /// Set the start function.
+    pub fn set_start(&mut self, func_idx: u32) {
+        self.module.start = Some(func_idx);
+    }
+
+    /// Add a data segment to the module.
+    pub fn add_data(&mut self, data: DataSegment) {
+        self.module.data.push(data);
+    }
+
+    /// Add a tag to the module.
+    pub fn add_tag(&mut self, tag: Tag) {
+        self.module.tags.push(tag);
     }
 
     /// Finalize and return the constructed module.

@@ -14,8 +14,11 @@ categories = ["wasm", "no-std"]
 tracked_alloc = { package = "wnjr-tracked-alloc", version = "0.7.0", path = "../tools/tracked-alloc" }
 parking_lot = "0.12"
 
+wasm-encoder = { version = "0.246.2", default-features = false }
+
 [dev-dependencies]
 wat = "1.246.2"
+wasmparser = "0.246.2"
 wnjr-wasi = { path = "../wnjr-wasi" }
 
 

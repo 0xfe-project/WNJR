@@ -17,12 +17,16 @@ pub mod computed_goto;
 pub mod expr;
 pub mod module;
 pub mod op;
+pub mod encode;
 pub mod types;
 
 pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use computed_goto::{lower_function, lower_module, ComputedGotoError, Dispatch, Lowered};
 pub use expr::Expr;
-pub use module::{DataSegment, Function, FunctionType, Global, Memory, Module, Tag};
+pub use module::{
+    DataSegment, ElementSegment, Export, ExportKind, Function, FunctionType, Global, GlobalType,
+    Import, ImportKind, InitExpr, MemoryType, Module, SegmentMode, TableType, Tag,
+};
 pub use op::{LabelId, Op};
 pub use types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
 
@@ -180,8 +184,8 @@ mod tests {
         mb.add_function(fb.build());
         let module = mb.build();
         assert_eq!(module.functions.len(), 1);
-        // Placeholder tables are empty in N1.
-        assert!(module.types.is_empty());
+        // In N2, type table is nonempty when functions are added or imported.
+        // N1 tests just check the functions are there.
         assert!(module.globals.is_empty());
     }
 }
