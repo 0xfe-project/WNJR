@@ -199,6 +199,10 @@ fn is_float(t: Type) -> bool {
 /// Types that are one wasm i32: valid as an address, a length, a condition.
 const I32_LIKE: [Type; 3] = [Type::I32, Type::U32, Type::Ptr];
 const ADDR: [Type; 2] = [Type::Ptr, Type::I32];
+/// Addresses of memory accesses (Load/Store/MemoryCopy/MemoryFill). Adds the
+/// 8-byte gc-tagged pointer (#634): an I64/U64 whose low 32 bits are the
+/// memory0 address; N7 strips the tag with i32.wrap_i64 before the access.
+const MEM_ADDR: [Type; 4] = [Type::Ptr, Type::I32, Type::I64, Type::U64];
 const INTS: [Type; 9] =
     [Type::I8, Type::U8, Type::I16, Type::U16, Type::I32, Type::U32, Type::I64, Type::U64, Type::Ptr];
 
@@ -455,7 +459,7 @@ impl FnCx<'_, '_> {
             }
             Op::GotoIndirect { .. } => return Err(VerifyErrorKind::UnloweredComputedGoto),
             Op::Store { ty, ptr, val, .. } => {
-                self.expect(ptr, &ADDR)?;
+                self.expect(ptr, &MEM_ADDR)?;
                 self.expect(val, store_types(*ty))?;
             }
             Op::If { cond, .. } => {
@@ -518,12 +522,12 @@ impl FnCx<'_, '_> {
                 self.expect(val, &[t])?;
             }
             Op::MemoryCopy { dest, src, len } => {
-                self.expect(dest, &ADDR)?;
-                self.expect(src, &ADDR)?;
+                self.expect(dest, &MEM_ADDR)?;
+                self.expect(src, &MEM_ADDR)?;
                 self.expect(len, &I32_LIKE)?;
             }
             Op::MemoryFill { dest, val, len } => {
-                self.expect(dest, &ADDR)?;
+                self.expect(dest, &MEM_ADDR)?;
                 self.expect(val, &I32_LIKE)?;
                 self.expect(len, &I32_LIKE)?;
             }
@@ -578,7 +582,7 @@ impl FnCx<'_, '_> {
                 Ok(t)
             }
             Expr::Load { ty, ptr, .. } => {
-                self.expect(ptr, &ADDR)?;
+                self.expect(ptr, &MEM_ADDR)?;
                 Ok(load_type(*ty))
             }
             Expr::LocalGet(idx) => self.local(*idx),

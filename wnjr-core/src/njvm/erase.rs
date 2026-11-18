@@ -41,6 +41,19 @@
 //! - A function with results always gets a trailing `unreachable` before `end`,
 //!   so a body that falls off the end traps instead of failing validation.
 //!
+//! # N7 lowerings
+//!
+//! - `Switch` -> `br_table` when dense, `eq`/`br_if` chain when sparse (see
+//!   `Cx::switch` for the layout and the threshold). `TypeSwitch` is
+//!   `NotImplemented` (no reference types in NJVM-IR, so nothing consumes it).
+//! - Memory addresses (Load/Store/MemoryCopy/MemoryFill): an `I64`/`U64`
+//!   address is a gc-tagged LP64 pointer (#634) and gets `i32.wrap_i64`
+//!   right before the access; `offset`/`align` go into the memarg unchanged.
+//! - Call/CallIndirect: args left to right, then (indirect) the callee;
+//!   `call_indirect` uses the op's `table_idx` (0 for C) and `type_idx`.
+//! - `Atomic { op: Fence }` -> `atomic.fence`; other atomics are
+//!   `NotImplemented` until `Op::Atomic` carries operands.
+//!
 //! The pass checks types itself and returns an error rather than panicking
 //! on input the N3 verifier would have rejected.
 
@@ -52,7 +65,7 @@ use super::expr::Expr;
 use super::module::{Function, ImportKind, Module};
 use super::op::Op;
 use super::stackify::{stackify, Node, StackifyError};
-use super::types::{BinaryOp, ConstVal, MemType, Type, UnaryOp};
+use super::types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
 
 /// Why a function body could not be lowered. `at` is the index of the
 /// top-level op in `Function::body` (for `NarrowLocal`, `None`).
@@ -72,6 +85,9 @@ pub enum EraseErrorKind {
     Stackify(StackifyError),
     /// An op this straight-line pass does not lower (structured control etc.).
     Unsupported { op: &'static str },
+    /// An op whose lowering is deliberately not written in this version;
+    /// `reason` says why (no consumer yet, operand shape undefined, ...).
+    NotImplemented { op: &'static str, reason: &'static str },
     /// `Expr::LabelAddr` or `Op::GotoIndirect` is still present.
     UnloweredComputedGoto,
     /// A local declared with a narrow type; wasm has no such local type.
@@ -272,6 +288,33 @@ impl Cx<'_, '_> {
         i
     }
 
+    /// A new local of class `vt`, never shared (unlike [`Cx::scratch`]).
+    fn fresh(&mut self, vt: ValType) -> u32 {
+        let i = self.declared + self.extra.len() as u32;
+        self.extra.push(vt);
+        i
+    }
+
+    /// Lower a memory address and leave a memory0 i32 offset on the stack.
+    ///
+    /// gc pointer tagging (#634): chibicc is LP64, so a pointer the frontend
+    /// keeps as a full 8-byte value is an `I64`/`U64` whose high 32 bits are
+    /// the gc tag and whose low 32 bits are the memory0 address. Every access
+    /// strips the tag with `i32.wrap_i64` right before the instruction; the
+    /// `offset`/`align` of the access go into the memarg unchanged. A
+    /// `Ptr`/`I32`/`U32` address is already an untagged memory0 offset.
+    fn addr(&mut self, s: &mut InstructionSink<'_>, e: &Expr) -> Result<(), EraseErrorKind> {
+        let t = self.expr(s, e)?;
+        match t {
+            Type::Ptr | Type::I32 | Type::U32 => Ok(()),
+            Type::I64 | Type::U64 => {
+                s.i32_wrap_i64();
+                Ok(())
+            }
+            _ => Err(EraseErrorKind::ClassMismatch { expected: ValType::I32, got: t }),
+        }
+    }
+
     fn local(&self, idx: u32) -> Result<Type, EraseErrorKind> {
         let p = self.func.params.len();
         let i = idx as usize;
@@ -398,10 +441,7 @@ impl Cx<'_, '_> {
                 Ok(t)
             }
             Expr::Load { ty, ptr, offset, align } => {
-                let pt = self.expr(s, ptr)?;
-                if !matches!(pt, Type::Ptr | Type::I32 | Type::U32) {
-                    return Err(EraseErrorKind::ClassMismatch { expected: ValType::I32, got: pt });
-                }
+                self.addr(s, ptr)?;
                 let m = memarg(*offset, *align);
                 Ok(match ty {
                     MemType::I8 => { s.i32_load8_s(m); Type::I8 }
@@ -440,6 +480,137 @@ impl Cx<'_, '_> {
             }
             Expr::LabelAddr(_) => Err(EraseErrorKind::UnloweredComputedGoto),
         }
+    }
+
+    /// Lower `Op::Switch`. Both strategies share one wasm layout:
+    ///
+    /// ```text
+    /// block                 ;; exit
+    ///   block               ;; default
+    ///     block             ;; arm k-1
+    ///       ...
+    ///         block         ;; arm 0
+    ///           <dispatch>  ;; br j for arm j, br k for default
+    ///         end
+    ///         <arm 0> br (k-0)
+    ///       ...
+    ///     end
+    ///     <arm k-1> br 1
+    ///   end
+    ///   <default>
+    /// end
+    /// ```
+    ///
+    /// Arm j is at depth j from the dispatch, the default at depth k, and after
+    /// arm j the exit is at depth k - j. Arms do not fall through into each
+    /// other (NJVM `Switch` is a multi-way `If`, not a C switch; C fallthrough
+    /// is the frontend's job, with jumps). Duplicate case values: the first
+    /// wins, later arms with the same value are dead and are not emitted.
+    ///
+    /// The scrutinee is evaluated exactly once. Dense dispatch is
+    /// `br_table` on `scrutinee - min`; sparse dispatch is a chain of
+    /// `eq`/`br_if` against a fresh local, in case order.
+    fn switch(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        scrutinee: &Expr,
+        cases: &[(ConstVal, Vec<Op>)],
+        default: &[Op],
+    ) -> Result<(), EraseErrorKind> {
+        /// Dense threshold. `br_table` costs one bounds check and one
+        /// indirect jump whatever the case count, but its table has `span`
+        /// entries; a compare chain costs one compare per case before the hit
+        /// and no table. So: at least 4 distinct cases (below that the chain
+        /// is as fast and smaller; same minimum as LLVM's
+        /// `-min-jump-table-entries=4`), the table at least 25% full (span <= 4
+        /// * cases, bounding the bytes wasted on default slots), and at most
+        /// 4096 slots so one sparse outlier cannot blow up the code.
+        const DENSE_MIN_CASES: usize = 4;
+        const DENSE_MAX_SPAN_PER_CASE: i128 = 4;
+        const DENSE_MAX_SPAN: i128 = 4096;
+
+        let t = self.expr(s, scrutinee)?;
+        let vt = class(t);
+        if !matches!(vt, ValType::I32 | ValType::I64) {
+            return Err(EraseErrorKind::ClassMismatch { expected: ValType::I32, got: t });
+        }
+        // Distinct case values (first wins), as integers in the order of the
+        // scrutinee's signedness, with the index of the arm they select.
+        let mut arms: alloc::vec::Vec<(i128, &[Op])> = alloc::vec::Vec::new();
+        for (v, body) in cases {
+            let n: i128 = match (vt, *v, is_unsigned(t)) {
+                (ValType::I32, ConstVal::I32(x), false) => x as i128,
+                (ValType::I32, ConstVal::I32(x), true) => x as u32 as i128,
+                (ValType::I64, ConstVal::I64(x), false) => x as i128,
+                (ValType::I64, ConstVal::I64(x), true) => x as u64 as i128,
+                _ => return Err(EraseErrorKind::ConstMismatch { ty: t, val: *v }),
+            };
+            if !arms.iter().any(|(m, _)| *m == n) {
+                arms.push((n, body.as_slice()));
+            }
+        }
+        let k = arms.len() as u32;
+        let (min, max) = arms
+            .iter()
+            .fold((i128::MAX, i128::MIN), |(lo, hi), (n, _)| (lo.min(*n), hi.max(*n)));
+        let span = if arms.is_empty() { 0 } else { max - min + 1 };
+        let dense = arms.len() >= DENSE_MIN_CASES
+            && span <= DENSE_MAX_SPAN_PER_CASE * arms.len() as i128
+            && span <= DENSE_MAX_SPAN;
+
+        // The scrutinee is on the stack. Park it in a fresh local: arms may
+        // contain switches of their own, so no shared scratch slot.
+        let tmp = self.fresh(vt);
+        s.local_set(tmp);
+        s.block(BlockType::Empty); // exit
+        s.block(BlockType::Empty); // default
+        for _ in 0..k {
+            s.block(BlockType::Empty);
+        }
+        if dense {
+            // slot -> arm depth; holes go to the default (depth k).
+            let mut table = alloc::vec![k; span as usize];
+            for (j, (n, _)) in arms.iter().enumerate() {
+                table[(n - min) as usize] = j as u32;
+            }
+            s.local_get(tmp);
+            if vt == ValType::I32 {
+                // Wrapping subtract: a value below `min` wraps to a large
+                // unsigned index, which br_table sends to the default.
+                s.i32_const(min as i32).i32_sub();
+            } else {
+                // i64: range-check before narrowing, or a value 2^32 away
+                // from a case would alias it after i32.wrap_i64.
+                s.i64_const(min as i64).i64_sub().local_tee(tmp);
+                s.i64_const(span as i64).i64_ge_u().br_if(k);
+                s.local_get(tmp).i32_wrap_i64();
+            }
+            s.br_table(table, k);
+        } else {
+            for (j, (n, _)) in arms.iter().enumerate() {
+                s.local_get(tmp);
+                if vt == ValType::I32 {
+                    s.i32_const(*n as i32).i32_eq();
+                } else {
+                    s.i64_const(*n as i64).i64_eq();
+                }
+                s.br_if(j as u32);
+            }
+            s.br(k);
+        }
+        for (j, (_, body)) in arms.iter().enumerate() {
+            s.end(); // arm j's block: its branch lands here
+            for op in body.iter() {
+                self.op(s, op)?;
+            }
+            s.br(k - j as u32);
+        }
+        s.end(); // default block
+        for op in default {
+            self.op(s, op)?;
+        }
+        s.end(); // exit
+        Ok(())
     }
 
     fn binary(
@@ -699,10 +870,7 @@ impl Cx<'_, '_> {
             }
             Op::GotoIndirect { .. } => return Err(EraseErrorKind::UnloweredComputedGoto),
             Op::Store { ty, ptr, val, offset, align } => {
-                let pt = self.expr(s, ptr)?;
-                if !matches!(pt, Type::Ptr | Type::I32 | Type::U32) {
-                    return Err(EraseErrorKind::ClassMismatch { expected: ValType::I32, got: pt });
-                }
+                self.addr(s, ptr)?;
                 let m = memarg(*offset, *align);
                 match ty {
                     MemType::I8 | MemType::U8 => {
@@ -772,13 +940,13 @@ impl Cx<'_, '_> {
                 s.global_set(*idx);
             }
             Op::MemoryCopy { dest, src, len } => {
-                self.expect_class(s, dest, ValType::I32)?;
-                self.expect_class(s, src, ValType::I32)?;
+                self.addr(s, dest)?;
+                self.addr(s, src)?;
                 self.expect_class(s, len, ValType::I32)?;
                 s.memory_copy(0, 0);
             }
             Op::MemoryFill { dest, val, len } => {
-                self.expect_class(s, dest, ValType::I32)?;
+                self.addr(s, dest)?;
                 self.expect_class(s, val, ValType::I32)?;
                 self.expect_class(s, len, ValType::I32)?;
                 s.memory_fill(0);
@@ -798,14 +966,27 @@ impl Cx<'_, '_> {
             Op::Block { .. } => return Err(EraseErrorKind::Unsupported { op: "Block" }),
             Op::Loop { .. } => return Err(EraseErrorKind::Unsupported { op: "Loop" }),
             Op::If { .. } => return Err(EraseErrorKind::Unsupported { op: "If" }),
-            Op::Switch { .. } => return Err(EraseErrorKind::Unsupported { op: "Switch" }),
-            Op::TypeSwitch { .. } => return Err(EraseErrorKind::Unsupported { op: "TypeSwitch" }),
+            Op::Switch { scrutinee, cases, default } => self.switch(s, scrutinee, cases, default)?,
+            Op::TypeSwitch { .. } => {
+                return Err(EraseErrorKind::NotImplemented {
+                    op: "TypeSwitch",
+                    reason: "no consumer in this version: NJVM-IR has no reference types, so there is no type tag to dispatch on",
+                })
+            }
             Op::TryTable { .. } => return Err(EraseErrorKind::Unsupported { op: "TryTable" }),
             Op::Setjmp { .. } => return Err(EraseErrorKind::Unsupported { op: "Setjmp" }),
             Op::Longjmp { .. } => return Err(EraseErrorKind::Unsupported { op: "Longjmp" }),
             Op::Await { .. } => return Err(EraseErrorKind::Unsupported { op: "Await" }),
             Op::Yield { .. } => return Err(EraseErrorKind::Unsupported { op: "Yield" }),
-            Op::Atomic { .. } => return Err(EraseErrorKind::Unsupported { op: "Atomic" }),
+            Op::Atomic { op: AtomicOp::Fence, .. } => {
+                s.atomic_fence();
+            }
+            Op::Atomic { .. } => {
+                return Err(EraseErrorKind::NotImplemented {
+                    op: "Atomic",
+                    reason: "only Fence: Op::Atomic carries no pointer/value operands yet, so load/store/rmw/wait/notify have nothing to lower",
+                })
+            }
         }
         Ok(())
     }
@@ -913,3 +1094,5 @@ fn convert(s: &mut InstructionSink<'_>, from: Type, to: Type) {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod lower_tests;
