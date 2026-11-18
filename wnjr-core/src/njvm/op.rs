@@ -1,7 +1,6 @@
 //! NJVM-IR operation (statement/control flow) enum, groups A–H.
 
 use crate::collections::Vec;
-use alloc::boxed::Box;
 
 use super::expr::Expr;
 use super::types::{AtomicOp, ConstVal, MemType, Type};
@@ -44,6 +43,12 @@ pub enum Op {
         targets: Vec<LabelId>,
         default: LabelId,
     },
+
+    /// GNU `goto *target` (chibicc `ND_GOTO_EXPR`). `target` is a label value
+    /// produced by `Expr::LabelAddr`. Pre-lowering marker only:
+    /// `computed_goto::lower_function` turns it into `LocalSet` + `Jmp` to the
+    /// function's dispatch block. Code handed to later passes must not contain it.
+    GotoIndirect { target: Expr },
 
     // ─────────────────────────────────────────────────────────────────────────
     // Group B: expression statements

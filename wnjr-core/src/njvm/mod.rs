@@ -13,12 +13,14 @@
 //! - only reducible CFGs are accepted.
 
 pub mod builder;
+pub mod computed_goto;
 pub mod expr;
 pub mod module;
 pub mod op;
 pub mod types;
 
 pub use builder::{FunctionBuilder, ModuleBuilder};
+pub use computed_goto::{lower_function, lower_module, ComputedGotoError, Dispatch, Lowered};
 pub use expr::Expr;
 pub use module::{DataSegment, Function, FunctionType, Global, Memory, Module, Tag};
 pub use op::{LabelId, Op};

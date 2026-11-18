@@ -6,6 +6,7 @@
 use crate::collections::Vec;
 use alloc::boxed::Box;
 
+use super::op::LabelId;
 use super::types::{BinaryOp, ConstVal, MemType, Type, UnaryOp};
 
 /// A tree-form expression that produces one value.
@@ -70,6 +71,12 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+
+    /// GNU `&&label` (chibicc `ND_LABEL_VAL`): the address of a label in the
+    /// current function, typed `I32`. Pre-lowering marker only:
+    /// `computed_goto::lower_function` replaces it with an `I32` constant (the
+    /// label's number). Code handed to later passes must not contain it.
+    LabelAddr(LabelId),
 }
 
 impl Expr {
