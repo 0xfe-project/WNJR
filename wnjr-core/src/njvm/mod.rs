@@ -8,7 +8,7 @@
 //! Op groups (see `op::Op`): A flat CFG, B expressions, C structured control,
 //! D calls, E exceptions, F coroutines, G memory/locals, H other.
 //!
-//! Constraints that the N3 verifier will enforce (documented here, not checked):
+//! Constraints enforced by the N3 verifier (`verify::verify_module`):
 //! - operand stack is empty at every `Label`; cross-edge values go through locals;
 //! - only reducible CFGs are accepted.
 
@@ -19,6 +19,7 @@ pub mod module;
 pub mod op;
 pub mod encode;
 pub mod types;
+pub mod verify;
 
 pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use computed_goto::{lower_function, lower_module, ComputedGotoError, Dispatch, Lowered};
@@ -29,6 +30,7 @@ pub use module::{
 };
 pub use op::{LabelId, Op};
 pub use types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
+pub use verify::{verify_module, OpName, OpPath, VerifyError, VerifyErrorKind};
 
 #[cfg(test)]
 mod tests {
