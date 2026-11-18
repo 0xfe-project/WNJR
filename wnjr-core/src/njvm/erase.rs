@@ -44,13 +44,14 @@
 //! The pass checks types itself and returns an error rather than panicking
 //! on input the N3 verifier would have rejected.
 
-use wasm_encoder::{Ieee32, Ieee64, InstructionSink, MemArg, ValType};
+use wasm_encoder::{BlockType, Ieee32, Ieee64, InstructionSink, MemArg, ValType};
 
 use crate::collections::Vec;
 
 use super::expr::Expr;
 use super::module::{Function, ImportKind, Module};
 use super::op::Op;
+use super::stackify::{stackify, Node, StackifyError};
 use super::types::{BinaryOp, ConstVal, MemType, Type, UnaryOp};
 
 /// Why a function body could not be lowered. `at` is the index of the
@@ -66,6 +67,9 @@ pub struct EraseError {
 pub enum EraseErrorKind {
     /// The body has `Jmp`/`JmpIf`/`BrTable`; it needs the stackify pass (N6).
     NeedsStackify,
+    /// Stackify (N6) could not restructure the body's flat CFG into
+    /// structured control flow.
+    Stackify(StackifyError),
     /// An op this straight-line pass does not lower (structured control etc.).
     Unsupported { op: &'static str },
     /// `Expr::LabelAddr` or `Op::GotoIndirect` is still present.
@@ -220,9 +224,6 @@ pub fn lower_function(env: &Env<'_>, func: &Function) -> Result<Lowered, EraseEr
             kind: EraseErrorKind::NarrowLocal { idx, ty: t },
         })?);
     }
-    if has_jumps(&func.body) {
-        return Err(EraseError { at: None, kind: EraseErrorKind::NeedsStackify });
-    }
     let mut cx = Cx {
         env,
         func,
@@ -232,7 +233,20 @@ pub fn lower_function(env: &Env<'_>, func: &Function) -> Result<Lowered, EraseEr
         extra: Vec::new(),
     };
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-    {
+    if has_jumps(&func.body) {
+        // N6: restructure the flat CFG into a tree, then emit it.
+        let tree = stackify(&func.body)
+            .map_err(|e| EraseError { at: None, kind: EraseErrorKind::Stackify(e) })?;
+        let mut sink = InstructionSink::new(&mut code);
+        cx.emit_tree(&mut sink, &tree)?;
+        // A result-returning function whose structured body never falls off the
+        // end (every path returns or loops) still needs a terminator so the
+        // implicit function end does not underflow the value stack.
+        if !func.results.is_empty() {
+            sink.unreachable();
+        }
+        sink.end();
+    } else {
         let mut sink = InstructionSink::new(&mut code);
         for (i, op) in func.body.iter().enumerate() {
             cx.op(&mut sink, op).map_err(|kind| EraseError { at: Some(i), kind })?;
@@ -616,6 +630,66 @@ impl Cx<'_, '_> {
         Ok(ty)
     }
 
+    /// Emit a stackified [`Node`] tree. Blocks and loops carry no stack values
+    /// (the IR keeps the operand stack empty at labels), so every construct has
+    /// an empty block type.
+    fn emit_tree(&mut self, s: &mut InstructionSink<'_>, nodes: &[Node]) -> Result<(), EraseError> {
+        for node in nodes {
+            match node {
+                Node::Block { body } => {
+                    s.block(BlockType::Empty);
+                    self.emit_tree(s, body)?;
+                    s.end();
+                }
+                Node::Loop { body } => {
+                    s.loop_(BlockType::Empty);
+                    self.emit_tree(s, body)?;
+                    s.end();
+                }
+                Node::If { cond, then_body, else_body } => {
+                    let c = jmp_cond(self.func, *cond);
+                    self.cond(s, c).map_err(|kind| EraseError { at: Some(*cond), kind })?;
+                    s.if_(BlockType::Empty);
+                    self.emit_tree(s, then_body)?;
+                    if !else_body.is_empty() {
+                        s.else_();
+                        self.emit_tree(s, else_body)?;
+                    }
+                    s.end();
+                }
+                Node::Br { depth } => {
+                    s.br(*depth);
+                }
+                Node::BrIf { cond, depth } => {
+                    let c = jmp_cond(self.func, *cond);
+                    self.cond(s, c).map_err(|kind| EraseError { at: Some(*cond), kind })?;
+                    s.br_if(*depth);
+                }
+                Node::BrTable { index, targets, default } => {
+                    let e = brtable_index(self.func, *index);
+                    // The index selects a target; wasm br_table wants an i32.
+                    self.expect_class(s, e, ValType::I32)
+                        .map_err(|kind| EraseError { at: Some(*index), kind })?;
+                    s.br_table(targets.iter().copied(), *default);
+                }
+                Node::Stmt { idx } => {
+                    let func = self.func;
+                    self.op(s, &func.body[*idx]).map_err(|kind| EraseError { at: Some(*idx), kind })?;
+                }
+                Node::FallOffEnd => {
+                    // Reaching the body end: return for a void function, trap
+                    // otherwise (a non-void function must return a value first).
+                    if self.func.results.is_empty() {
+                        s.return_();
+                    } else {
+                        s.unreachable();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn op(&mut self, s: &mut InstructionSink<'_>, op: &Op) -> Result<(), EraseErrorKind> {
         match op {
             // Only reached when the function has no jumps: an unused label.
@@ -734,6 +808,22 @@ impl Cx<'_, '_> {
             Op::Atomic { .. } => return Err(EraseErrorKind::Unsupported { op: "Atomic" }),
         }
         Ok(())
+    }
+}
+
+/// The condition of the `JmpIf` at body index `idx` (stackify only points there).
+fn jmp_cond(func: &Function, idx: usize) -> &Expr {
+    match &func.body[idx] {
+        Op::JmpIf { cond, .. } => cond,
+        _ => unreachable!("stackify points If/BrIf cond at a JmpIf"),
+    }
+}
+
+/// The index of the `BrTable` at body index `idx`.
+fn brtable_index(func: &Function, idx: usize) -> &Expr {
+    match &func.body[idx] {
+        Op::BrTable { index, .. } => index,
+        _ => unreachable!("stackify points BrTable index at a BrTable"),
     }
 }
 

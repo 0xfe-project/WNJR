@@ -18,6 +18,7 @@ pub mod expr;
 pub mod module;
 pub mod op;
 pub mod encode;
+pub mod stackify;
 pub mod erase;
 pub mod types;
 pub mod verify;
@@ -31,6 +32,7 @@ pub use module::{
 };
 pub use op::{LabelId, Op};
 pub use types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
+pub use stackify::{stackify, max_depth, Node, StackifyError};
 pub use verify::{verify_module, OpName, OpPath, VerifyError, VerifyErrorKind};
 
 #[cfg(test)]
