@@ -75,4 +75,12 @@ pub(crate) mod op {
     pub(crate) const WAIT32: u32 = 46;
     pub(crate) const WAIT64: u32 = 47;
     pub(crate) const NOTIFY: u32 = 48;
+    /// Does the pending exception carry this clause's tag? RET0 = 0 or 1.
+    pub(crate) const EH_MATCH: u32 = 49;
+    /// RET0 = the payload word at the given index of the pending exception.
+    pub(crate) const EH_PAYLOAD: u32 = 50;
+    /// Drop the pending exception: a handler is taking it.
+    pub(crate) const EH_CLEAR: u32 = 51;
+    /// Re-raise the pending exception so an outer handler can take it.
+    pub(crate) const EH_RETHROW: u32 = 52;
 }

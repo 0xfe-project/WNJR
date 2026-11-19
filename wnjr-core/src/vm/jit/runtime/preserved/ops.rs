@@ -244,6 +244,89 @@ fn raise_exception(
     })
 }
 
+/// The pending exception, if a throw is being unwound.
+///
+/// A cross-function throw leaves the exception here instead of in a wasm
+/// result, so a catch dispatcher at the call site reads it back through these
+/// helpers rather than through the callee return lane.
+fn pending_throw(ctx: &NativeContext) -> Option<(TagIdentity, RefValue)> {
+    match ctx.pending_escape {
+        PendingEscape::Throw { exn, tag } => Some((tag, exn)),
+        PendingEscape::None => None,
+    }
+}
+
+/// Does the pending exception carry the tag this catch clause names?
+///
+/// The clause names a module tag index; the exception carries a TagIdentity,
+/// which is minted per instance, so the comparison has to happen here and not
+/// in generated code.
+pub(super) fn do_eh_match(ctx: &mut NativeContext, tag_idx: u32) -> Result<u64, WasmError> {
+    let Some((pending_tag, _)) = pending_throw(ctx) else {
+        return Ok(0);
+    };
+    let clause_tag = current_store(ctx)?
+        .module()
+        .tags
+        .get(tag_idx as usize)
+        .map(|tag| tag.handle)
+        .ok_or_else(|| internal_error("eh_match: tag index out of range"))?;
+    Ok(u64::from(clause_tag == pending_tag))
+}
+
+/// One payload value of the pending exception, as the raw machine word the
+/// handler edge expects.
+///
+/// Payload values are delivered one call at a time: the preserved-helper I/O
+/// area has a single result slot, and this path is cold enough that a second
+/// helper call costs nothing worth designing around.
+pub(super) fn do_eh_payload(ctx: &mut NativeContext, index: u32) -> Result<u64, WasmError> {
+    let Some((_, exn_handle)) = pending_throw(ctx) else {
+        return Err(internal_error("eh_payload: no pending exception"));
+    };
+    let store = current_store(ctx)?;
+    let exn_idx = exn_handle
+        .pooled_index()
+        .ok_or_else(|| internal_error("eh_payload: pending exception has no pool handle"))?;
+    let ref_registry = store.clone_ref_registry();
+    let entry = ref_registry
+        .borrow()
+        .get(exn_idx)
+        .cloned()
+        .ok_or_else(|| internal_error("eh_payload: pending exception is not registered"))?;
+    let RefRegistryEntry::Exn(exn) = entry else {
+        return Err(internal_error("eh_payload: pending escape is not an exception"));
+    };
+    let value = exn
+        .fields
+        .get(index as usize)
+        .ok_or_else(|| internal_error("eh_payload: payload index out of range"))?;
+    let ty = match value {
+        Value::I32(_) => ValueType::I32,
+        Value::I64(_) => ValueType::I64,
+        Value::F32(_) => ValueType::F32,
+        Value::F64(_) => ValueType::F64,
+        Value::Ref(_, ty) => ValueType::Ref(*ty),
+        _ => return Err(internal_error("eh_payload: unsupported payload value")),
+    };
+    value_to_machine_raw_in_store(value, ty, active_gp_unit_bytes(), store)
+}
+
+/// A handler is taking the pending exception.
+pub(super) fn do_eh_clear(ctx: &mut NativeContext) -> Result<(), WasmError> {
+    ctx.pending_escape = PendingEscape::None;
+    Ok(())
+}
+
+/// No clause matched: hand the pending exception back as the error that
+/// unwinds this function, so an outer call site dispatcher sees it.
+pub(super) fn do_eh_rethrow(ctx: &mut NativeContext) -> Result<(), WasmError> {
+    let Some((tag, exn)) = pending_throw(ctx) else {
+        return Err(internal_error("eh_rethrow: no pending exception"));
+    };
+    raise_exception(ctx, tag, exn)
+}
+
 #[inline]
 pub(super) fn memory_mut(ctx: &mut NativeContext, mem_idx: u32) -> Result<&mut MemInst, WasmError> {
     current_store_mut(ctx)?
