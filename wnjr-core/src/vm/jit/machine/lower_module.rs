@@ -400,6 +400,10 @@ fn lower_function(
     let original_block_count = input.ssa.blocks.len();
     let mut original_blocks = OriginalBlocks::new(original_block_count);
     let mut extra_blocks = collections::Vec::new();
+    // Catch blocks can only be completed once every block exists: the payload
+    // has to land in the registers the handler block was given, and those are
+    // chosen when it is lowered.
+    let mut eh_fixups: collections::Vec<EhCatchFixup> = collections::Vec::new();
     let mut extra_block_ids = ExtraBlockAllocator::new(original_block_count as u32);
     let i64_ops: &'static dyn I64Lowering = if gp_reg_width == 4 {
         &Gp32Lowering
@@ -621,6 +625,7 @@ fn lower_function(
                             &mut terminator,
                             &mut extra_blocks,
                             &mut extra_block_ids,
+                            &mut eh_fixups,
                         )?;
                         push_lowered_block(
                             current_block,
@@ -990,6 +995,7 @@ fn lower_function(
     let mut blocks = original_blocks.finish()?;
     blocks.reserve_exact(extra_blocks.len());
     blocks.extend(extra_blocks);
+    finish_eh_dispatch(&mut blocks, &eh_fixups)?;
 
     let entry = MachineBlockId(input.ssa.entry.as_u32());
 
@@ -2865,16 +2871,91 @@ const EH_MAX_PAYLOAD: u16 = 4;
 /// synthesized cluster: per clause one tag test and one catch block that loads
 /// the payload into reserved lanes and jumps to the handler, ending in a
 /// rethrow tail. Returns whether a dispatcher was attached.
+/// One catch block whose payload still has to be delivered.
+struct EhCatchFixup {
+    block: MachineBlockId,
+    handler: MachineBlockId,
+    /// Where the catch block goes when it cannot deliver the handler's values.
+    rethrow: MachineBlockId,
+    payload_arity: u16,
+}
+
+/// Deliver each catch payload into the registers its handler block reads.
+///
+/// Runs once every block exists: a handler's parameter registers are chosen
+/// when that block is lowered, which may happen after the call that needed the
+/// dispatcher.
+fn finish_eh_dispatch(
+    blocks: &mut [MachineBlock],
+    fixups: &[EhCatchFixup],
+) -> Result<(), WasmError> {
+    use crate::vm::jit::machine::machine_ir::{EhHelperOp, MachineEdge, MachineValue};
+
+    for fixup in fixups {
+        let Some(handler) = blocks.get(fixup.handler.as_usize()) else {
+            return Err(WasmError::internal(
+                "exception handler block is missing from the machine program".into(),
+            ));
+        };
+        if handler.params.len() > fixup.payload_arity as usize {
+            // The handler wants values the exception does not carry: the ones
+            // that were already on the stack at the try site. Those are gone
+            // once the frame has unwound, so the exception keeps unwinding
+            // instead of being caught with the wrong arguments.
+            if let Some(block) = blocks.get_mut(fixup.block.as_usize()) {
+                block.terminator = MachineTerminator::Jump(MachineEdge {
+                    target: fixup.rethrow,
+                    args: collections::Vec::new(),
+                });
+            }
+            continue;
+        }
+        // A catch label takes only what its own arity asks for; the rest of the
+        // payload is dropped, exactly as a `br` to that label would drop it.
+        let first_word = fixup.payload_arity as usize - handler.params.len();
+        let param_regs = handler
+            .params
+            .iter()
+            .map(|param| param.reg)
+            .collect::<collections::Vec<_>>();
+
+        let Some(block) = blocks.get_mut(fixup.block.as_usize()) else {
+            return Err(WasmError::internal(
+                "exception catch block is missing from the machine program".into(),
+            ));
+        };
+        let mut ops = collections::Vec::with_capacity(param_regs.len() + block.ops.len());
+        for (index, reg) in param_regs.iter().copied().enumerate() {
+            ops.push(MachineInst {
+                kind: MachineInstKind::EhHelper {
+                    op: EhHelperOp::Payload,
+                    dst: reg,
+                    imm: (first_word + index) as u32,
+                },
+            });
+        }
+        ops.extend(block.ops.drain(..));
+        block.ops = ops;
+        block.terminator = MachineTerminator::Jump(MachineEdge {
+            target: fixup.handler,
+            args: param_regs.into_iter().map(MachineValue::Reg).collect(),
+        });
+    }
+    Ok(())
+}
+
 fn attach_eh_dispatch(
     ssa_block: u32,
     lower: &BlockLowerContext<'_>,
     terminator: &mut MachineTerminator,
     extra_blocks: &mut collections::Vec<MachineBlock>,
     extra_block_ids: &mut ExtraBlockAllocator,
+    eh_fixups: &mut collections::Vec<EhCatchFixup>,
 ) -> Result<bool, WasmError> {
     use crate::vm::jit::machine::machine_ir::{
         EhHelperOp, MachineBranchCond, MachineCompareKind, MachineEdge, MachineInst,
-        MachineInstKind, MachineIntWidth, MachineSign, MachineTrapKind, MachineValue,
+        MachineInstKind, MachineIntWidth, MachineReg, MachineSign, MachineStorageType,
+        MachineTrapKind, MachineValue,
     };
     if !matches!(terminator, MachineTerminator::Call { thrown: None, .. }) {
         return Ok(false);
@@ -2904,18 +2985,11 @@ fn attach_eh_dispatch(
     {
         return Ok(false);
     }
-    let base = lower.regfile().gp_arg_lane_count();
-    if lower.regfile().gp_dynamic_count() < base + 1 + max_arity as usize {
+    // The tag test writes a plain machine word; no backend accepts a reserved
+    // lane as a branch condition or as an edge argument.
+    let Some(flag) = lower.first_free_linear_value_reg(MachineStorageType::GpWord) else {
         return Ok(false);
-    }
-    let flag = lower.reserved_gp_dynamic(base, "exception dispatch match flag")?;
-    let mut payload_lanes = collections::Vec::with_capacity(max_arity as usize);
-    for index in 0..max_arity as usize {
-        payload_lanes.push(lower.reserved_gp_dynamic(
-            base + 1 + index,
-            "exception dispatch payload lane",
-        )?);
-    }
+    };
 
     let mut catch_blocks = collections::Vec::with_capacity(scope.catches.len());
     let mut match_blocks = collections::Vec::with_capacity(scope.catches.len());
@@ -2941,22 +3015,7 @@ fn attach_eh_dispatch(
     let entry = next_target(0);
 
     for (index, clause) in scope.catches.iter().enumerate() {
-        let wanted_words = ssa
-            .blocks
-            .get(clause.handler.as_usize())
-            .map(|block| block.params.len())
-            .unwrap_or(0)
-            .min(clause.payload_arity as usize);
-        let mut ops = collections::Vec::with_capacity(wanted_words + 1);
-        for word in (clause.payload_arity as usize - wanted_words)..clause.payload_arity as usize {
-            ops.push(MachineInst {
-                kind: MachineInstKind::EhHelper {
-                    op: EhHelperOp::Payload,
-                    dst: payload_lanes[word],
-                    imm: word as u32,
-                },
-            });
-        }
+        let mut ops = collections::Vec::with_capacity(1);
         ops.push(MachineInst {
             kind: MachineInstKind::EhHelper {
                 op: EhHelperOp::Clear,
@@ -2964,26 +3023,23 @@ fn attach_eh_dispatch(
                 imm: 0,
             },
         });
-        // A catch label takes only what its own arity asks for; the rest of the
-        // payload is dropped, exactly as a `br` to that label would drop it.
-        let wanted = ssa
-            .blocks
-            .get(clause.handler.as_usize())
-            .map(|block| block.params.len())
-            .unwrap_or(0)
-            .min(clause.payload_arity as usize);
-        let args = (0..wanted)
-            .map(|word| {
-                MachineValue::ReservedReg(payload_lanes[clause.payload_arity as usize - wanted + word])
-            })
-            .collect();
+        // The handler's values are delivered later: its parameter registers
+        // only exist once that block is lowered, and no backend accepts a
+        // reserved lane as an edge argument, so there is nothing to hold them
+        // until then.
+        eh_fixups.push(EhCatchFixup {
+            block: catch_blocks[index],
+            handler: MachineBlockId(clause.handler.as_usize() as u32),
+            rethrow,
+            payload_arity: clause.payload_arity,
+        });
         extra_blocks.push(MachineBlock {
             id: catch_blocks[index],
             params: collections::Vec::new(),
             ops,
             terminator: MachineTerminator::Jump(MachineEdge {
                 target: MachineBlockId(clause.handler.as_usize() as u32),
-                args,
+                args: collections::Vec::new(),
             }),
         });
         if let Some(match_block) = match_blocks[index] {
@@ -3005,7 +3061,7 @@ fn attach_eh_dispatch(
                         width: MachineIntWidth::I64,
                         kind: MachineCompareKind::Ne,
                         sign: MachineSign::Unsigned,
-                        lhs: MachineValue::ReservedReg(flag),
+                        lhs: MachineValue::Reg(flag),
                         rhs: MachineValue::Imm64(0),
                     },
                     then_edge: MachineEdge {
