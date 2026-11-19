@@ -272,6 +272,7 @@ impl<'a> super::backend::Arm64Backend<'a> {
                 args,
                 results,
                 success,
+                thrown,
             } => self.lower_call(target, *frame_delta, args, results, success, fallthrough),
             MachineTerminator::TailCall { target, args } => self.lower_tail_call(target, args),
         }

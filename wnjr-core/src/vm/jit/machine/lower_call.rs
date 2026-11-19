@@ -128,6 +128,7 @@ impl<'a> BlockLowerContext<'a> {
                     target: continuation,
                     args: success_args,
                 },
+                thrown: None,
             },
             continuation_params,
         ))

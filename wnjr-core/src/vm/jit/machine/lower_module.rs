@@ -2554,6 +2554,7 @@ fn lower_indirect_dispatch_cluster(
                     target: continuation,
                     args: result_success_args.clone(),
                 },
+                thrown: None,
             }
         }
         None => MachineTerminator::TailCall {
