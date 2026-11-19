@@ -605,12 +605,22 @@ fn lower_function(
                     {
                         let live_result = inst.result.is_some().then_some(inst.result);
                         let continuation = extra_block_ids.alloc();
-                        let (terminator, continuation_params) = lower.lower_call_internal(
+                        let (mut terminator, continuation_params) = lower.lower_call_internal(
                             *callee,
                             args,
                             *results,
                             live_result,
                             continuation,
+                        )?;
+                        // A call inside a try_table may raise across the call;
+                        // give it a dispatcher so the exception can resume at
+                        // the matching handler instead of escaping.
+                        attach_eh_dispatch(
+                            block.id.as_usize() as u32,
+                            &lower,
+                            &mut terminator,
+                            &mut extra_blocks,
+                            &mut extra_block_ids,
                         )?;
                         push_lowered_block(
                             current_block,
@@ -2837,6 +2847,179 @@ impl OriginalBlocks {
         }
         Ok(self.blocks)
     }
+}
+
+/// Payload words a first-version catch dispatcher will deliver.
+///
+/// The preserved I/O area has a single result slot, so the payload is read one
+/// helper call at a time into reserved GP lanes; four lanes is what the dynamic
+/// bank can spare beside the match flag. Tags carrying more values keep the
+/// pre-existing behaviour for a throw raised across a call.
+const EH_MAX_PAYLOAD: u16 = 4;
+
+/// Attach a catch dispatcher to a call that may raise across the call.
+///
+/// A cross-function throw returns from the callee with status `Thrown`; without
+/// a dispatcher the caller runs its error tail and the exception escapes the
+/// function even when a `try_table` wraps the call. The dispatcher is a small
+/// synthesized cluster: per clause one tag test and one catch block that loads
+/// the payload into reserved lanes and jumps to the handler, ending in a
+/// rethrow tail. Returns whether a dispatcher was attached.
+fn attach_eh_dispatch(
+    ssa_block: u32,
+    lower: &BlockLowerContext<'_>,
+    terminator: &mut MachineTerminator,
+    extra_blocks: &mut collections::Vec<MachineBlock>,
+    extra_block_ids: &mut ExtraBlockAllocator,
+) -> Result<bool, WasmError> {
+    use crate::vm::jit::machine::machine_ir::{
+        EhHelperOp, MachineBranchCond, MachineEdge, MachineInst, MachineInstKind, MachineTrapKind,
+        MachineValue,
+    };
+
+    if !matches!(terminator, MachineTerminator::Call { thrown: None, .. }) {
+        return Ok(false);
+    }
+    let ssa = lower.program();
+    let Some(scope_idx) = ssa
+        .block_try_scope
+        .get(ssa_block as usize)
+        .copied()
+        .flatten()
+    else {
+        return Ok(false);
+    };
+    let Some(scope) = ssa.try_scopes.get(scope_idx as usize) else {
+        return Ok(false);
+    };
+
+    let max_arity = scope
+        .catches
+        .iter()
+        .map(|clause| clause.payload_arity)
+        .max()
+        .unwrap_or(0);
+    if scope.catches.is_empty()
+        || scope.catches.iter().any(|clause| clause.forwards_exn)
+        || max_arity > EH_MAX_PAYLOAD
+    {
+        return Ok(false);
+    }
+    let base = lower.regfile().gp_arg_lane_count();
+    if lower.regfile().gp_dynamic_count() < base + 1 + max_arity as usize {
+        return Ok(false);
+    }
+    let flag = lower.reserved_gp_dynamic(base, "exception dispatch match flag")?;
+    let mut payload_lanes = collections::Vec::with_capacity(max_arity as usize);
+    for index in 0..max_arity as usize {
+        payload_lanes.push(lower.reserved_gp_dynamic(
+            base + 1 + index,
+            "exception dispatch payload lane",
+        )?);
+    }
+
+    let mut catch_blocks = collections::Vec::with_capacity(scope.catches.len());
+    let mut match_blocks = collections::Vec::with_capacity(scope.catches.len());
+    for clause in &scope.catches {
+        catch_blocks.push(extra_block_ids.alloc());
+        match_blocks.push(clause.tag_idx.map(|_| extra_block_ids.alloc()));
+    }
+    let rethrow = extra_block_ids.alloc();
+
+    // Where a failed tag test continues: the next clause that needs a test,
+    // else the next catch-all, else the rethrow tail.
+    let next_target = |from: usize| -> MachineBlockId {
+        for index in from..scope.catches.len() {
+            if let Some(block) = match_blocks[index] {
+                return block;
+            }
+            if scope.catches[index].tag_idx.is_none() {
+                return catch_blocks[index];
+            }
+        }
+        rethrow
+    };
+    let entry = next_target(0);
+
+    for (index, clause) in scope.catches.iter().enumerate() {
+        let mut ops = collections::Vec::with_capacity(clause.payload_arity as usize + 1);
+        for word in 0..clause.payload_arity as usize {
+            ops.push(MachineInst {
+                kind: MachineInstKind::EhHelper {
+                    op: EhHelperOp::Payload,
+                    dst: payload_lanes[word],
+                    imm: word as u32,
+                },
+            });
+        }
+        ops.push(MachineInst {
+            kind: MachineInstKind::EhHelper {
+                op: EhHelperOp::Clear,
+                dst: flag,
+                imm: 0,
+            },
+        });
+        let args = (0..clause.payload_arity as usize)
+            .map(|word| MachineValue::ReservedReg(payload_lanes[word]))
+            .collect();
+        extra_blocks.push(MachineBlock {
+            id: catch_blocks[index],
+            params: collections::Vec::new(),
+            ops,
+            terminator: MachineTerminator::Jump(MachineEdge {
+                target: MachineBlockId(clause.handler.as_usize() as u32),
+                args,
+            }),
+        });
+        if let Some(match_block) = match_blocks[index] {
+            extra_blocks.push(MachineBlock {
+                id: match_block,
+                params: collections::Vec::new(),
+                ops: collections::vec![MachineInst {
+                    kind: MachineInstKind::EhHelper {
+                        op: EhHelperOp::Match,
+                        dst: flag,
+                        imm: clause.tag_idx.unwrap_or(0),
+                    },
+                }],
+                terminator: MachineTerminator::Branch {
+                    cond: MachineBranchCond::Value(MachineValue::ReservedReg(flag)),
+                    then_edge: MachineEdge {
+                        target: catch_blocks[index],
+                        args: collections::Vec::new(),
+                    },
+                    else_edge: MachineEdge {
+                        target: next_target(index + 1),
+                        args: collections::Vec::new(),
+                    },
+                },
+            });
+        }
+    }
+    extra_blocks.push(MachineBlock {
+        id: rethrow,
+        params: collections::Vec::new(),
+        ops: collections::vec![MachineInst {
+            kind: MachineInstKind::EhHelper {
+                op: EhHelperOp::Rethrow,
+                dst: flag,
+                imm: 0,
+            },
+        }],
+        // The helper always fails, which leaves through the function error
+        // tail; this terminator exists only to keep the block well formed.
+        terminator: MachineTerminator::Trap {
+            kind: MachineTrapKind::Unreachable,
+        },
+    });
+
+    if let MachineTerminator::Call { thrown, .. } = terminator {
+        *thrown = Some(MachineEdge {
+            target: entry,
+            args: collections::Vec::new(),
+        });
+    }
+    Ok(true)
 }
 
 struct ExtraBlockAllocator {

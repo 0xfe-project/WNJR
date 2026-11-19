@@ -56,6 +56,28 @@ impl SemanticBuilder {
         idx
     }
 
+    /// Patch one catch clause's handler target in the recorded scope.
+    ///
+    /// A region is recorded under the index of its own TryTable op, which is
+    /// how the caller names it here.
+    fn patch_try_scope_catch_target(
+        &mut self,
+        try_op: SemanticIndex,
+        catch_idx: usize,
+        target: SemanticTarget,
+    ) {
+        let try_op = try_op.as_usize();
+        if let Some(scope) = self
+            .try_scopes
+            .iter_mut()
+            .find(|scope| scope.try_op == try_op)
+        {
+            if let Some(clause) = scope.catches.get_mut(catch_idx) {
+                clause.target = target;
+            }
+        }
+    }
+
     fn patch_target(&mut self, idx: SemanticIndex, target: SemanticTarget) {
         if let Some(op) = self.ops.get_mut(idx.as_usize()) {
             match &mut op.kind {
@@ -788,6 +810,15 @@ impl<'a> DecodeContext<'a> {
                     }
                     PendingFixupSite::TryTableCatch(catch_idx) => {
                         self.builder.patch_try_table_catch_target(
+                            fixup.inst_idx,
+                            catch_idx,
+                            end_target,
+                        );
+                        // The op only feeds encoding. The scope record is what
+                        // the middle end reads, and it needs the same patch or
+                        // a catch whose handler is a forward label arrives at
+                        // rewrite with a pending target and cannot dispatch.
+                        self.builder.patch_try_scope_catch_target(
                             fixup.inst_idx,
                             catch_idx,
                             end_target,
