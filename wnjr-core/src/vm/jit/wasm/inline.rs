@@ -557,6 +557,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            try_scopes: Default::default(),
         }
     }
 

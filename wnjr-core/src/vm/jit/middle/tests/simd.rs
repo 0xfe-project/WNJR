@@ -25,6 +25,7 @@ fn prepare_accepts_v128_locals() {
         local_types: collections::vec![ValueType::V128],
         result_types: collections::Vec::new(),
         op_result_types: BTreeMap::new(),
+        try_scopes: Default::default(),
     };
 
     let prepared = prepare_function(
@@ -58,6 +59,7 @@ fn prepare_accepts_v128_primitives() {
         local_types: collections::Vec::new(),
         result_types: collections::vec![ValueType::V128],
         op_result_types: BTreeMap::new(),
+        try_scopes: Default::default(),
     };
 
     let prepared = prepare_function(

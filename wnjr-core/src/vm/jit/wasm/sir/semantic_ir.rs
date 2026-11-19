@@ -32,6 +32,25 @@ pub(crate) struct SemanticCatchClause {
     pub(crate) target: SemanticTarget,
 }
 
+/// One `try_table` region of a function body, recorded at decode time.
+///
+/// The `TryTable` op itself carries only its catch clauses; it has no end
+/// index, so the body extent is known only while the decoder's control-frame
+/// stack still holds the frame. This record captures that extent for the
+/// middle end, which must decide, per call site, which handler a throw raised
+/// across the call would resume at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SemanticTryScope {
+    /// Semantic index of the `TryTable` op itself.
+    pub(crate) try_op: usize,
+    /// First op index inside the body (the frame's entry target).
+    pub(crate) start: usize,
+    /// One past the last op inside the body (the index of the `End`).
+    pub(crate) end: usize,
+    /// Catch clauses, in source order.
+    pub(crate) catches: collections::Vec<SemanticCatchClause>,
+}
+
 /// One semantic Wasm operation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SemanticOp {
@@ -190,6 +209,9 @@ pub(crate) struct SemanticProgram {
     /// results whose types are not deterministic from the opcode alone
     /// (calls, blocks with multi-value signatures, etc.).
     pub(crate) op_result_types: BTreeMap<usize, collections::Vec<ValueType>>,
+    /// Every `try_table` region in the body, outermost first in program order.
+    /// Empty for functions that contain no `try_table`.
+    pub(crate) try_scopes: collections::Vec<SemanticTryScope>,
 }
 
 #[cfg(any(debug_assertions, test))]
@@ -387,6 +409,7 @@ mod tests {
             local_types: collections::vec![],
             result_types: collections::vec![],
             op_result_types: tracked_alloc::collections::BTreeMap::new(),
+            try_scopes: Default::default(),
         };
 
         let error = semantic
@@ -412,6 +435,7 @@ mod tests {
             local_types: collections::vec![],
             result_types: collections::vec![],
             op_result_types: tracked_alloc::collections::BTreeMap::new(),
+            try_scopes: Default::default(),
         };
 
         let error = semantic
@@ -433,6 +457,7 @@ mod tests {
             local_types: collections::vec![],
             result_types: collections::vec![],
             op_result_types: tracked_alloc::collections::BTreeMap::new(),
+            try_scopes: Default::default(),
         };
 
         let error = semantic
@@ -485,6 +510,7 @@ mod tests {
                 1usize,
                 collections::vec![ValueType::I32],
             )]),
+            try_scopes: Default::default(),
         };
 
         semantic

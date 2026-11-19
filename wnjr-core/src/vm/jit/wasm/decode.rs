@@ -31,13 +31,17 @@ use super::{
     common::{BrTableEntry, SemanticIndex, SemanticTarget},
     context::CompileContext,
     primitive_op::{self, PrimitiveOpKind},
-    semantic_ir::{SemanticCatchClause, SemanticOp, SemanticOpKind, SemanticProgram},
+    semantic_ir::{
+    SemanticCatchClause, SemanticOp, SemanticOpKind, SemanticProgram, SemanticTryScope,
+},
 };
 
 /// Semantic IR builder used by Wasm decode.
 #[derive(Default)]
 struct SemanticBuilder {
     ops: collections::Vec<SemanticOp>,
+    /// Finished `try_table` regions, completed as their `end` is decoded.
+    try_scopes: collections::Vec<SemanticTryScope>,
 }
 
 impl SemanticBuilder {
@@ -119,6 +123,7 @@ impl SemanticBuilder {
             local_types,
             result_types,
             op_result_types,
+            try_scopes: self.try_scopes,
         }
     }
 }
@@ -186,6 +191,14 @@ struct StaticCatchMatch {
     /// must be registered at the given frame depth (from the throw's
     /// control stack position).
     pending_fixup_depth: Option<u32>,
+}
+
+/// A `try_table` whose body is still being decoded.
+#[derive(Clone, Debug)]
+struct PendingTryScope {
+    try_op: usize,
+    start: usize,
+    catches: collections::Vec<SemanticCatchClause>,
 }
 
 #[derive(Clone, Debug)]
@@ -494,6 +507,9 @@ fn simple_inline_conditional_throw_wrapper(
 struct DecodeContext<'a> {
     compile: CompileContext<'a>,
     builder: SemanticBuilder,
+    /// `try_table` bodies currently open, innermost last. Finished regions are
+    /// moved to `builder.try_scopes` as their `end` is decoded.
+    pending_try_scopes: collections::Vec<PendingTryScope>,
     control: collections::Vec<DecodeControlFrame>,
     height: usize,
     max_height: usize,
@@ -511,6 +527,7 @@ impl<'a> DecodeContext<'a> {
         Self {
             compile,
             builder: SemanticBuilder::default(),
+        pending_try_scopes: collections::Vec::new(),
             control: collections::vec![DecodeControlFrame {
                 kind: DecodeBlockKind::Function,
                 start_height: 0,
@@ -738,6 +755,17 @@ impl<'a> DecodeContext<'a> {
         let end_idx = self.push_op(SemanticOpKind::End);
         let end_target = SemanticTarget::new(end_idx.as_usize());
         if let Some(frame) = self.exit_block() {
+            if frame.kind == DecodeBlockKind::TryTable {
+                if let Some(scope) = self.pending_try_scopes.pop() {
+                    debug_assert!(scope.try_op < scope.start);
+                    self.builder.try_scopes.push(SemanticTryScope {
+                        try_op: scope.try_op,
+                        start: scope.start,
+                        end: end_idx.as_usize(),
+                        catches: scope.catches,
+                    });
+                }
+            }
             if frame.kind == DecodeBlockKind::If && frame.if_inst_idx.is_some() {
                 if let Some(if_idx) = frame.if_inst_idx {
                     if self.builder.ops.get(if_idx.as_usize()).is_some_and(|op| {
@@ -1853,10 +1881,14 @@ impl<'a> DecodeContext<'a> {
                 }
 
                 self.pop_typed_values(params as usize);
+                // The op owns the clause list; the scope record keeps its own
+                // copy so the middle end can read the region without going back
+                // through the op.
+                let scope_catches = sem_catches.clone();
                 let idx = self.push_op(SemanticOpKind::TryTable {
                     params,
                     results,
-                    catches: sem_catches,
+                    catches: scope_catches,
                 });
                 self.record_result_types(idx, &result_types);
                 for (catch_idx, clause) in catches.iter().enumerate() {
@@ -1871,6 +1903,11 @@ impl<'a> DecodeContext<'a> {
                 }
 
                 let try_target = SemanticTarget::new(self.current_index().as_usize());
+                self.pending_try_scopes.push(PendingTryScope {
+                    try_op: idx.as_usize(),
+                    start: try_target.index().as_usize(),
+                    catches: sem_catches,
+                });
                 self.enter_block(
                     DecodeBlockKind::TryTable,
                     params,

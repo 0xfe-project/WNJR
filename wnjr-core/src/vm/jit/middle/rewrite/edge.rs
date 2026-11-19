@@ -478,6 +478,8 @@ mod tests {
             const_pool: collections::Vec::new(),
             primitive_pool: collections::Vec::new(),
             call_ops: collections::Vec::new(),
+            try_scopes: Default::default(),
+            block_try_scope: Default::default(),
         };
         let pool_idx = program
             .intern_primitive(PrimitiveOpKind::I32Const { value: 0 })
