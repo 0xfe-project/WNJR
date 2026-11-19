@@ -300,16 +300,14 @@ pub(super) fn do_eh_payload(ctx: &mut NativeContext, index: u32) -> Result<u64, 
     let value = exn
         .fields
         .get(index as usize)
+        .cloned()
         .ok_or_else(|| internal_error("eh_payload: payload index out of range"))?;
-    let ty = match value {
-        Value::I32(_) => ValueType::I32,
-        Value::I64(_) => ValueType::I64,
-        Value::F32(_) => ValueType::F32,
-        Value::F64(_) => ValueType::F64,
-        Value::Ref(_, ty) => ValueType::Ref(*ty),
-        _ => return Err(internal_error("eh_payload: unsupported payload value")),
-    };
-    value_to_machine_raw_in_store(value, ty, active_gp_unit_bytes(), store)
+    drop(ref_registry);
+    Ok(value_to_machine_raw_in_store(
+        value,
+        active_gp_unit_bytes(),
+        current_store_mut(ctx)?,
+    ))
 }
 
 /// A handler is taking the pending exception.
