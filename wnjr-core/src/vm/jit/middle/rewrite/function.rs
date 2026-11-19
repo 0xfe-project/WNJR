@@ -254,7 +254,14 @@ fn resolve_try_scopes(
         let mut catches = collections::Vec::with_capacity(scope.catches.len());
         let mut resolved = true;
         for clause in &scope.catches {
-            let handler = cfg.block_for_semantic_index(clause.target.index().as_usize());
+            let target = clause.target.index().as_usize();
+            // A catch label names where control resumes, which is the block
+            // *after* the labelled construct. When decode patched the clause
+            // with the index of the End op itself, that index starts no block,
+            // so the following op is the handler.
+            let handler = cfg
+                .block_for_semantic_index(target)
+                .or_else(|| cfg.block_for_semantic_index(target.saturating_add(1)));
             let Some(handler) = handler else {
                 resolved = false;
                 break;
@@ -281,7 +288,10 @@ fn resolve_try_scopes(
     for block in &cfg.blocks {
         let mut best: Option<(u16, usize)> = None;
         for (idx, body) in bodies.iter().enumerate() {
-            if body.start > block.range.start || block.range.end > body.end {
+            // The block that opens the region also carries the TryTable op, so
+            // its range starts before the body; only blocks whose ops overlap
+            // the body belong to it.
+            if block.range.start >= body.end || block.range.end <= body.start {
                 continue;
             }
             let width = body.end - body.start;

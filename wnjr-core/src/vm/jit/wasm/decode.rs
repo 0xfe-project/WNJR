@@ -888,6 +888,9 @@ impl<'a> DecodeContext<'a> {
         inst_idx: SemanticIndex,
         site: PendingFixupSite,
     ) {
+        if matches!(site, PendingFixupSite::TryTableCatch(_)) {
+
+        }
         if let Some(frame) = self.frame_at_depth_mut(depth) {
             frame
                 .pending_fixups
