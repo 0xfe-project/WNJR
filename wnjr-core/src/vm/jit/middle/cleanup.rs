@@ -627,6 +627,15 @@ fn remove_unreachable_blocks(program: &mut SsaProgram) -> bool {
 
     let mut reachable = collections::vec![false; program.blocks.len()];
     let mut stack = collections::vec![program.entry.as_usize()];
+    // A catch handler is entered by an exception edge, which only exists once
+    // the machine layer has built the dispatcher. At SSA level nothing points
+    // at it, so without seeding it here the handler's code is dropped as dead
+    // and the dispatcher has nowhere to resume.
+    for scope in &program.try_scopes {
+        for clause in &scope.catches {
+            stack.push(clause.handler.as_usize());
+        }
+    }
     while let Some(block_index) = stack.pop() {
         if block_index >= program.blocks.len() || reachable[block_index] {
             continue;
@@ -942,6 +951,8 @@ fn remove_blocks(program: &mut SsaProgram, removed: &[usize]) {
         next += 1;
     }
 
+    remap_try_metadata(program, &mapping, &removed_mask);
+
     let old_blocks = core::mem::take(&mut program.blocks);
     let old_entries = core::mem::take(&mut program.block_entry_cached_cells);
     let old_entry_reqs = core::mem::take(&mut program.block_entry_cache_requirements);
@@ -1017,6 +1028,45 @@ fn remove_one_block(program: &mut SsaProgram, removed_index: usize) {
     for block in &mut program.blocks {
         remap_terminator_target_after_single_removal(&mut block.terminator, removed_index);
     }
+
+    let mut removed_mask = collections::vec![false; program.blocks.len() + 1];
+    removed_mask[removed_index] = true;
+    let mut mapping = collections::Vec::with_capacity(program.blocks.len() + 1);
+    for (index, is_removed) in removed_mask.iter().copied().enumerate() {
+        if is_removed {
+            mapping.push(SsaTarget::default());
+        } else {
+            let target = if index > removed_index { index - 1 } else { index };
+            mapping.push(SsaTarget(target as u32));
+        }
+    }
+    remap_try_metadata(program, &mapping, &removed_mask);
+}
+
+/// Keep the try metadata in step with block renumbering.
+///
+/// The scopes name handler blocks and `block_try_scope` is indexed by block id,
+/// so both go stale as soon as blocks are compacted.
+fn remap_try_metadata(program: &mut SsaProgram, mapping: &[SsaTarget], removed: &[bool]) {
+    for scope in &mut program.try_scopes {
+        for clause in &mut scope.catches {
+            clause.handler = mapping
+                .get(clause.handler.as_usize())
+                .copied()
+                .unwrap_or_default();
+        }
+    }
+    if program.block_try_scope.is_empty() {
+        return;
+    }
+    let mut next = collections::Vec::with_capacity(program.block_try_scope.len());
+    for (old_index, is_removed) in removed.iter().copied().enumerate() {
+        if is_removed {
+            continue;
+        }
+        next.push(program.block_try_scope.get(old_index).copied().flatten());
+    }
+    program.block_try_scope = next;
 }
 
 fn remap_terminator_targets(term: &mut SsaTerminator, mapping: &[SsaTarget]) {

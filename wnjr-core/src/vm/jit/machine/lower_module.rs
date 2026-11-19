@@ -981,6 +981,12 @@ fn lower_function(
     drop(entry_cache_params);
     drop(explicit_cache);
 
+    // Synthesized blocks (a call's catch dispatcher) are allocated while the
+    // block that owns the call is being lowered, so they can carry ids below a
+    // continuation that is only emitted later. Order by id once everything
+    // exists: the layout passes index blocks by position.
+    extra_blocks.sort_by_key(|block| block.id.as_usize());
+
     let mut blocks = original_blocks.finish()?;
     blocks.reserve_exact(extra_blocks.len());
     blocks.extend(extra_blocks);
@@ -2651,12 +2657,6 @@ fn push_lowered_block(
     if id.as_usize() < original_len {
         original_blocks.push(id, block)?;
     } else {
-        let expected = original_len + continuation_blocks.len();
-        if id.as_usize() != expected {
-            return Err(WasmError::internal(
-                "machine continuation blocks must be appended in id order".into(),
-            ));
-        }
         continuation_blocks.push(block);
     }
     Ok(())
@@ -2873,10 +2873,9 @@ fn attach_eh_dispatch(
     extra_block_ids: &mut ExtraBlockAllocator,
 ) -> Result<bool, WasmError> {
     use crate::vm::jit::machine::machine_ir::{
-        EhHelperOp, MachineBranchCond, MachineEdge, MachineInst, MachineInstKind, MachineTrapKind,
-        MachineValue,
+        EhHelperOp, MachineBranchCond, MachineCompareKind, MachineEdge, MachineInst,
+        MachineInstKind, MachineIntWidth, MachineSign, MachineTrapKind, MachineValue,
     };
-
     if !matches!(terminator, MachineTerminator::Call { thrown: None, .. }) {
         return Ok(false);
     }
@@ -2942,8 +2941,14 @@ fn attach_eh_dispatch(
     let entry = next_target(0);
 
     for (index, clause) in scope.catches.iter().enumerate() {
-        let mut ops = collections::Vec::with_capacity(clause.payload_arity as usize + 1);
-        for word in 0..clause.payload_arity as usize {
+        let wanted_words = ssa
+            .blocks
+            .get(clause.handler.as_usize())
+            .map(|block| block.params.len())
+            .unwrap_or(0)
+            .min(clause.payload_arity as usize);
+        let mut ops = collections::Vec::with_capacity(wanted_words + 1);
+        for word in (clause.payload_arity as usize - wanted_words)..clause.payload_arity as usize {
             ops.push(MachineInst {
                 kind: MachineInstKind::EhHelper {
                     op: EhHelperOp::Payload,
@@ -2959,8 +2964,18 @@ fn attach_eh_dispatch(
                 imm: 0,
             },
         });
-        let args = (0..clause.payload_arity as usize)
-            .map(|word| MachineValue::ReservedReg(payload_lanes[word]))
+        // A catch label takes only what its own arity asks for; the rest of the
+        // payload is dropped, exactly as a `br` to that label would drop it.
+        let wanted = ssa
+            .blocks
+            .get(clause.handler.as_usize())
+            .map(|block| block.params.len())
+            .unwrap_or(0)
+            .min(clause.payload_arity as usize);
+        let args = (0..wanted)
+            .map(|word| {
+                MachineValue::ReservedReg(payload_lanes[clause.payload_arity as usize - wanted + word])
+            })
             .collect();
         extra_blocks.push(MachineBlock {
             id: catch_blocks[index],
@@ -2983,7 +2998,16 @@ fn attach_eh_dispatch(
                     },
                 }],
                 terminator: MachineTerminator::Branch {
-                    cond: MachineBranchCond::Value(MachineValue::ReservedReg(flag)),
+                    // A reserved lane is not a mappable branch register on any
+                    // backend; compare it explicitly so the condition is loaded
+                    // through the ordinary value path.
+                    cond: MachineBranchCond::IntCompare {
+                        width: MachineIntWidth::I64,
+                        kind: MachineCompareKind::Ne,
+                        sign: MachineSign::Unsigned,
+                        lhs: MachineValue::ReservedReg(flag),
+                        rhs: MachineValue::Imm64(0),
+                    },
                     then_edge: MachineEdge {
                         target: catch_blocks[index],
                         args: collections::Vec::new(),

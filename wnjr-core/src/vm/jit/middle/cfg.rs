@@ -148,6 +148,18 @@ fn build_block_ranges(semantic: &SemanticProgram) -> collections::Vec<core::ops:
     leaders[0] = true;
     leaders[len] = true;
 
+    // A catch handler is reached by an exception edge, which no ordinary
+    // successor walk sees. Without a leader of its own the handler's ops sit
+    // inside another block and are pruned as unreachable.
+    for scope in &semantic.try_scopes {
+        for clause in &scope.catches {
+            let target = clause.target.index().as_usize();
+            if target < len {
+                leaders[target] = true;
+            }
+        }
+    }
+
     for (index, op) in semantic.ops.iter().enumerate() {
         if !is_plain_fallthrough(index, semantic.ops.len(), op) {
             for_each_semantic_successor(index, semantic.ops.len(), op, |target| {
@@ -190,6 +202,14 @@ fn retain_reachable_blocks(
     let semantic_to_block = build_semantic_to_block_map(semantic.ops.len(), &block_ranges);
     let mut visited = collections::vec![false; block_ranges.len()];
     let mut pending = collections::vec![0usize];
+    for scope in &semantic.try_scopes {
+        for clause in &scope.catches {
+            let target = clause.target.index().as_usize();
+            if let Some(block) = semantic_to_block.get(target) {
+                pending.push(block.as_usize());
+            }
+        }
+    }
 
     while let Some(block_index) = pending.pop() {
         if visited.get(block_index).copied().unwrap_or(false) {

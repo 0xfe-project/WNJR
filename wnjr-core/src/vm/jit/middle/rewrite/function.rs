@@ -3013,9 +3013,11 @@ mod eh_scope_tests {
         assert_eq!(scopes[1].catches[0].tag_idx, Some(1));
     }
 
-    /// A block that starts before a region or ends after it is not inside it.
+    /// Attribution is per block: the block that opens a region carries the
+    /// TryTable op itself, so it overlaps the body and must be attributed;
+    /// a block wholly after the region must not.
     #[test]
-    fn partially_overlapping_block_is_not_attributed() {
+    fn block_opening_a_region_is_attributed_and_later_blocks_are_not() {
         let cfg = RewriteCfg {
             entry: CfgBlockId(0),
             blocks: collections::vec![block(0, 0, 4), block(1, 4, 8), block(2, 8, 10)],
@@ -3026,6 +3028,9 @@ mod eh_scope_tests {
         let (scopes, block_try_scope) = resolve_try_scopes(&semantic, &cfg);
 
         assert_eq!(scopes.len(), 1);
-        assert_eq!(block_try_scope, collections::vec![None, Some(0), None]);
+        assert_eq!(
+            block_try_scope,
+            collections::vec![Some(0), Some(0), None]
+        );
     }
 }
