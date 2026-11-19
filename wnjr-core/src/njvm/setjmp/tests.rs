@@ -281,24 +281,25 @@ fn one_tag_disjoint_numbers() {
 
 // ── engine EH probe (not NJVM): catch of a throw from a callee ─────────────
 //
-// try.wast/try_table.wast only throw from callees that touch locals/consts.
-// These pin what this lowering depends on: a callee that does anything else
-// before `throw` (a load, global access, even a nested block) must still be
-// caught by the caller's try_table.
+// WNJR catches a throw only when decode can resolve it statically to an
+// enclosing try_table handler and turn it into a branch (decode.rs,
+// DecodeTryCatch). A callee small enough for the inliner (inline.rs,
+// MAX_CALLEE_OPS = 32, straight-line or simple if) lands inside the caller
+// and is caught. A real call is lowered with only a success edge: a nonzero
+// status jumps to the function's error tail (arm64 control.rs lower_call,
+// cbnz C_RET0 -> body_local_error_label), so the try_table never sees it.
+// TryTable itself lowers to a plain fall-through (rewrite/function.rs).
+// try_table.wast passes because every callee it throws from is inlinable.
 
 fn catch_from_callee(thrower: &str) -> Result<Vec<Value>, crate::WasmError> {
     let src = std::format!(
-        r#"(module (memory 1 1) (global $g (mut i32) (i32.const 0)) (tag $t)
-          {thrower}
+        r#"(module (tag $t)
+          (func $thr (param i32) (result i32) {thrower})
           (func (export "f") (result i32)
-            block
-              try_table (catch $t 0)
-                call $thr
-              end
-              i32.const 0
-              return
-            end
-            i32.const 1))"#
+            (block $h
+              (try_table (result i32) (catch $t $h) (call $thr (i32.const 1)))
+              (return))
+            (i32.const 23)))"#
     );
     let bytes = wat::parse_str(&src).expect("parse wat");
     let m = crate::Module::new("eh", &bytes).expect("validate");
@@ -310,19 +311,17 @@ fn catch_from_callee(thrower: &str) -> Result<Vec<Value>, crate::WasmError> {
     r
 }
 
-#[test]
-fn engine_catches_throw_from_pure_callee() {
-    assert_eq!(catch_from_callee("(func $thr throw $t)").expect("caught"), vec![Value::I32(1)]);
-}
+const THROW_IF: &str = "(local.get 0) (i32.const 0) (if (i32.ne) (then (throw $t))) (i32.const 0)";
 
 #[test]
-fn engine_catches_throw_from_callee_that_loads() {
-    let r = catch_from_callee("(func $thr i32.const 0 i32.load drop throw $t)");
-    assert_eq!(r.expect("caught"), vec![Value::I32(1)]);
+fn engine_catches_throw_from_inlined_callee() {
+    assert_eq!(catch_from_callee(THROW_IF).expect("caught"), vec![Value::I32(23)]);
 }
 
+/// Same callee padded past the inliner's size limit, so it stays a real call.
 #[test]
-fn engine_catches_throw_from_callee_with_block() {
-    let r = catch_from_callee("(func $thr (block) throw $t)");
-    assert_eq!(r.expect("caught"), vec![Value::I32(1)]);
+fn engine_catches_throw_from_real_call() {
+    let nops = ["nop"; 40].join(" ");
+    let r = catch_from_callee(&std::format!("{nops} {THROW_IF}"));
+    assert_eq!(r.expect("caught"), vec![Value::I32(23)]);
 }
