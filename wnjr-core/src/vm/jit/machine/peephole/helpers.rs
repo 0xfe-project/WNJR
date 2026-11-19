@@ -785,6 +785,7 @@ mod tests {
                 target: MachineBlockId(1),
                 args: collections::vec![MachineValue::Reg(result), MachineValue::Reg(survivor)],
             },
+            thrown: None,
         };
 
         let mut sources = collections::Vec::new();

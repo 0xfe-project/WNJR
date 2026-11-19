@@ -1305,6 +1305,7 @@ mod tests {
                             MachineValue::Reg(MachineReg(5)),
                         ],
                     ),
+                    thrown: None,
                 },
             ),
             cfg_block(
