@@ -948,6 +948,7 @@ fn visit_inst_source_regs(kind: &MachineInstKind, mut visit: impl FnMut(MachineR
     match kind {
         MachineInstKind::Move { src, .. } => visit_value_reg(src, &mut visit),
         MachineInstKind::FloatConst { .. } => {}
+        MachineInstKind::EhHelper { .. } => {}
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         MachineInstKind::V128Const { .. } => {}
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]

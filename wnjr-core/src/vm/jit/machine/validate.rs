@@ -123,6 +123,9 @@ impl MachineProgram {
     #[cfg(any(debug_assertions, test))]
     fn validate_inst(&self, inst: &MachineInst, config: BackendConfig) -> ValidateResult {
         match &inst.kind {
+            MachineInstKind::EhHelper { dst, .. } => {
+                self.validate_reg(*dst, config)?;
+            }
             MachineInstKind::Move { ty, dst, src, .. } => {
                 self.validate_reg(*dst, config)?;
                 self.validate_value(*src, config)?;

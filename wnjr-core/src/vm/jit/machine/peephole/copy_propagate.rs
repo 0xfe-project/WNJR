@@ -267,6 +267,7 @@ fn rewrite_sources(kind: &mut MachineInstKind, aliases: &[Option<MachineReg>]) {
             rewrite_value(src_hi, aliases);
         }
         MachineInstKind::FloatConst { .. } => {}
+        MachineInstKind::EhHelper { .. } => {}
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
         MachineInstKind::V128Const { .. } => {}
         MachineInstKind::Load { addr, .. } => rewrite_addr(addr, aliases),

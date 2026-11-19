@@ -650,6 +650,9 @@ fn render_machine_function(out: &mut String, func: &MachineFunction) {
 
 fn render_machine_inst(kind: &MachineInstKind) -> String {
     match kind {
+        MachineInstKind::EhHelper { op, dst, imm } => {
+            format!("eh.{op:?} r{} {imm}", dst.0)
+        }
         MachineInstKind::Move {
             owner,
             ty,
