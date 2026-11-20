@@ -2532,6 +2532,59 @@ impl WasiCtx {
         Ok(())
     }
 
+    /// There are no sockets here, so the socket calls answer the way
+    /// sock_shutdown does: not a socket for a descriptor this context owns,
+    /// bad descriptor for anything else.
+    fn not_a_socket(&mut self, fd: i32) -> i32 {
+        self.with_ctx(|ctx| {
+            if (0..=2).contains(&fd) {
+                return if ctx.closed_stdio.contains(&fd) {
+                    ERRNO_BADF
+                } else {
+                    ERRNO_NOTSOCK
+                };
+            }
+            if ctx.fds.contains_key(&fd) {
+                ERRNO_NOTSOCK
+            } else {
+                ERRNO_BADF
+            }
+        })
+    }
+
+    pub(super) fn sock_accept(
+        &mut self,
+        _caller: &mut Caller,
+        args: &[Value],
+        results: &mut [Value],
+    ) -> Result<(), WasmError> {
+        let fd = as_i32(&args[0])?;
+        results[0] = Value::I32(self.not_a_socket(fd));
+        Ok(())
+    }
+
+    pub(super) fn sock_recv(
+        &mut self,
+        _caller: &mut Caller,
+        args: &[Value],
+        results: &mut [Value],
+    ) -> Result<(), WasmError> {
+        let fd = as_i32(&args[0])?;
+        results[0] = Value::I32(self.not_a_socket(fd));
+        Ok(())
+    }
+
+    pub(super) fn sock_send(
+        &mut self,
+        _caller: &mut Caller,
+        args: &[Value],
+        results: &mut [Value],
+    ) -> Result<(), WasmError> {
+        let fd = as_i32(&args[0])?;
+        results[0] = Value::I32(self.not_a_socket(fd));
+        Ok(())
+    }
+
     pub(super) fn sock_shutdown(
         &mut self,
         _caller: &mut Caller,

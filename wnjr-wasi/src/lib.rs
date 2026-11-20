@@ -230,6 +230,13 @@ fn wasi_imports_for(module: &str, context: &Rc<RefCell<WasiCtx>>) -> std::vec::V
         wasi!(proc_exit, [I32], []),
         wasi!(sched_yield, [], [I32]),
         wasi!(sock_shutdown, [I32, I32], [I32]),
+        // The ABI names these three and a C library built against it references
+        // them, so an instance that imports the whole library must be linkable.
+        // This runtime has no sockets: they answer what sock_shutdown does for an
+        // fd that is not one.
+        wasi!(sock_accept, [I32, I32, I32], [I32]),
+        wasi!(sock_recv, [I32, I32, I32, I32, I32, I32], [I32]),
+        wasi!(sock_send, [I32, I32, I32, I32, I32], [I32]),
         wasi!(poll_oneoff, [I32, I32, I32, I32], [I32]),
         wasi!(path_create_directory, [I32, I32, I32], [I32]),
         wasi!(path_filestat_get, [I32, I32, I32, I32, I32], [I32]),
