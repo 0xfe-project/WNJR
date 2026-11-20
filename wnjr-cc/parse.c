@@ -1138,17 +1138,25 @@ static int count_array_init_elements(Token *tok, Type *ty) {
 static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
   tok = skip(tok, "{");
 
+  // A string in braces is still a string initializer: { "abc" } spells the same
+  // thing as "abc", and an array of char is the only kind it can be. chibicc
+  // reads the braces element by element, so the string lands in a single char
+  // and everything becomes zero — musl's vfprintf keeps its digit table as
+  // { "0123456789ABCDEF" }, and its hexadecimal output printed spaces.
+  if (tok->kind == TK_STR && tok->ty->base->size == init->ty->base->size) {
+    string_initializer(rest, tok, init);
+    if (equal(*rest, ","))
+      *rest = (*rest)->next;
+    *rest = skip(*rest, "}");
+    return;
+  }
+
   if (init->is_flexible) {
     int len = count_array_init_elements(tok, init->ty);
     *init = *new_initializer(array_of(init->ty->base, len), false);
   }
 
   bool first = true;
-
-  if (init->is_flexible) {
-    int len = count_array_init_elements(tok, init->ty);
-    *init = *new_initializer(array_of(init->ty->base, len), false);
-  }
 
   for (int i = 0; !consume_end(rest, tok); i++) {
     if (!first)
