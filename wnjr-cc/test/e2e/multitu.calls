@@ -1,0 +1,13 @@
+tu_cross_call 3
+tu_cross_global 4
+tu_static_private 5
+tu_static_call 6
+tu_mutual 7
+tu_tentative 2
+tu_tentative 3
+tu_fnptr_to_other_unit 8
+tu_call_through_pointer 9
+tu_pointer_to_other_unit 11
+tu_other_pointer 0
+tu_string_char 0
+tu_string_char 4

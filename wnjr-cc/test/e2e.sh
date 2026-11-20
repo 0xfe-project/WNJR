@@ -31,7 +31,19 @@ if [ $# -gt 0 ]; then
   cases=""
   for c in "$@"; do cases="$cases $here/e2e/$c.c"; done
 else
-  cases=$(ls "$here"/e2e/*.c)
+  # A file listed in a <case>.units file is part of that case, not a case of its
+  # own.
+  extra_units=""
+  for u in $(cat "$here"/e2e/*.units 2>/dev/null); do extra_units="$extra_units $u"; done
+  cases=""
+  for src in "$here"/e2e/*.c; do
+    base=$(basename "$src")
+    skip=0
+    for u in $extra_units; do
+      [ "$u" = "$base" ] && skip=1
+    done
+    [ $skip -eq 1 ] || cases="$cases $src"
+  done
 fi
 
 make -C "$root/wnjr-cc" >/dev/null || { echo "FAIL: cannot build wnjr-cc"; exit 1; }
@@ -54,8 +66,15 @@ for src in $cases; do
     continue
   fi
 
+  # A case may be several translation units, listed one per line in
+  # <name>.units: they are compiled together into one module, in that order.
+  srcs="$src"
+  if [ -f "$here/e2e/$name.units" ]; then
+    for u in $(cat "$here/e2e/$name.units"); do srcs="$srcs $here/e2e/$u"; done
+  fi
+
   msgpack="$work/$name.msgpack"
-  if ! "$root/wnjr-cc/wnjr-cc" --emit-njvm -o "$msgpack" "$src"; then
+  if ! "$root/wnjr-cc/wnjr-cc" --emit-njvm -o "$msgpack" $srcs; then
     echo "[FAIL] $name: wnjr-cc rejected the source"
     fail=$((fail + 1))
     failed_cases="$failed_cases $name"
@@ -108,7 +127,7 @@ for src in $cases; do
     echo '}'
   } > "$driver"
 
-  if ! "$CC" -O1 -o "$work/$name-native" "$src" "$driver" 2> "$work/$name-cc.log"; then
+  if ! "$CC" -O1 -o "$work/$name-native" $srcs "$driver" 2> "$work/$name-cc.log"; then
     echo "[FAIL] $name: the host compiler rejected the source"
     sed 's/^/        /' "$work/$name-cc.log"
     fail=$((fail + 1))

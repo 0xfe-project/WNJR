@@ -1061,7 +1061,12 @@ static char *format_time(struct tm *tm) {
   return format("\"%02d:%02d:%02d\"", tm->tm_hour, tm->tm_min, tm->tm_sec);
 }
 
+// A translation unit starts from the predefined macros and nothing else: the
+// ones the previous unit defined are its own business, and a header it included
+// must be able to be included again by name.
 void init_macros(void) {
+  macros = (HashMap){};
+
   // Define predefined macros
   define_macro("_LP64", "1");
   define_macro("__C99_MACRO_WITH_VA_ARGS", "1");

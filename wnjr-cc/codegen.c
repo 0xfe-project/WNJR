@@ -23,13 +23,27 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Memory layout: everything with a static extent (globals, string literals,
-// static locals) lives at [GLOBAL_BASE, global_top); the stack grows down from
-// STACK_TOP, which is the end of memory, and must not reach the data area.
+// Memory layout, lowest address first:
+//
+//   [GLOBAL_BASE, data_end)          everything with a static extent: globals,
+//                                    string literals, static locals, and the
+//                                    thread-local block at the front
+//   [stack_base, stack_top)          the stack, growing down from stack_top
+//   [stack_top, MEMORY_END)          the heap, growing up, and what sbrk hands
+//                                    out once this is used up
+//
+// The stack comes before the heap so that the heap is contiguous with what
+// sbrk returns: sbrk grows the memory and hands back the previous end, so a heap
+// with a hole above it would break. The stack has no guard page below it, so an
+// overflow walks into the data area rather than trapping.
 #define MEMORY_PAGES 256
-#define STACK_TOP 0x1000000
+#define MEMORY_END ((uint64_t)MEMORY_PAGES * 65536)
 #define GLOBAL_BASE 0x1000
-#define MIN_STACK 0x40000
+#define STACK_SIZE 0x40000
+#define MIN_HEAP 0x10000
+
+// Where the stack starts and the heap ends, both decided by the data layout.
+static uint32_t stack_top;
 
 // ───────────────────────── state ─────────────────────────
 
@@ -91,6 +105,14 @@ static noreturn void unsupported(Token *tok, const char *what) {
   if (!tok)
     error("wnjr-cc: %s is not supported yet", what);
   error_tok(tok, "wnjr-cc: %s is not supported yet", what);
+}
+
+// The same, for a message about an object rather than a place in the source:
+// a file-scope object has no token, so the message may have to stand alone.
+static noreturn void error_obj(Obj *var, const char *msg) {
+  if (!var->tok)
+    error("wnjr-cc: %s", msg);
+  error_tok(var->tok, "wnjr-cc: %s", msg);
 }
 
 static void gen_stmt(Node *node);
@@ -210,6 +232,103 @@ static int sig_cap;
 // Set when a function address is taken or a call goes through one: the module
 // then needs the function-pointer table and the element segment that fills it.
 static bool indirect_used;
+
+// A program is every translation unit spliced into one object list, and a name
+// may be written in one unit and defined in another. Every question about an
+// object's address or index goes through this table.
+//
+// Two objects share a name when one is the definition and the others declare it,
+// or when each is a file-scope static of a different unit, in which case the name
+// means the one belonging to the unit asking.
+static HashMap *syms;
+
+// The definition a name has in the program, or NULL. Only a definition, an
+// import or an alias answers: a bare declaration is not something to call or to
+// take the address of.
+static Obj *find_symbol(const char *name, int tu) {
+  if (!syms || !name)
+    return NULL;
+  Obj *static_hit = NULL;
+  for (Obj *o = hashmap_get(syms, (char *)name); o; o = o->name_next) {
+    if (o->is_static && o->tu != tu)
+      continue;
+    if (!o->is_definition && !o->import_module && !o->is_alias)
+      continue;
+    // The definition wins over a static of the same name in another unit.
+    if (!o->is_static)
+      return o;
+    if (!static_hit)
+      static_hit = o;
+  }
+  return static_hit;
+}
+
+// The object behind a reference. A reference is written against whatever
+// declaration was in scope, which in a program of several units is usually not
+// the definition.
+static Obj *definition_of(Obj *ref) {
+  if (ref->is_definition || ref->import_module || ref->is_alias)
+    return ref;
+  Obj *def = find_symbol(ref->name, ref->tu);
+  return def ? def : ref;
+}
+
+// C says a tentative definition -- `int x;` at file scope -- gives way to a real
+// one, and that two tentative definitions are one object. parse.c collapses them
+// inside a unit; this does it across units, and reports a name that is really
+// defined twice. A dropped object stops being a definition, so a reference that
+// points at it resolves through the table to the one that stayed.
+static Obj *collapse_definitions(Obj *prog) {
+  HashMap *canon = calloc(1, sizeof(HashMap));
+  for (Obj *var = prog; var; var = var->next) {
+    if (!var->name || !var->is_definition || var->is_static || var->is_alias)
+      continue;
+    Obj *prev = hashmap_get(canon, var->name);
+    if (!prev) {
+      hashmap_put(canon, var->name, var);
+      continue;
+    }
+    if (!prev->is_tentative && !var->is_tentative)
+      error_obj(var,
+                format("%s is defined twice: here and in %s", var->name,
+                       prev->tok ? prev->tok->file->name : "another unit"));
+    // The real definition replaces a tentative one; two tentative ones keep the
+    // first, whose address the program may already have written down.
+    if (!var->is_tentative && prev->is_tentative) {
+      prev->is_definition = false;
+      hashmap_put(canon, var->name, var);
+    } else if (var->is_tentative && !prev->is_tentative) {
+      var->is_definition = false;
+    } else {
+      var->is_definition = false;
+    }
+  }
+
+  Obj head;
+  Obj *cur = &head;
+  for (Obj *var = prog; var;) {
+    Obj *next = var->next;
+    if (var->name && var->is_definition == false && var->is_tentative) {
+      var = next;
+      continue;
+    }
+    cur = cur->next = var;
+    var = next;
+  }
+  cur->next = NULL;
+  return head.next;
+}
+
+static void build_symbols(Obj *prog) {
+  syms = calloc(1, sizeof(HashMap));
+  for (Obj *var = prog; var; var = var->next) {
+    if (!var->name)
+      continue;
+    var->name_next = hashmap_get(syms, var->name);
+    hashmap_put(syms, var->name, var);
+  }
+}
+
 
 // The wasm type of parameter j of a C function type, under this frontend's two
 // conventions: a struct or union return is one hidden address first, and a
@@ -383,15 +502,20 @@ static E *gen_addr(Node *node) {
     if (node->var->is_function) {
       // A C function pointer is an index into table 0, and the element
       // segment puts function i at index i, so the function's own index is
-      // the value to use. An imported function has an index too.
-      if (!node->var->is_definition && !node->var->import_module && !node->var->is_alias)
-        unsupported(node->tok, "the address of a function this file does not define");
+      // the value to use. An imported function has an index too, and one
+      // defined in another translation unit is found by name.
+      Obj *fn = definition_of(node->var);
+      if (!fn->is_definition && !fn->import_module && !fn->is_alias)
+        unsupported(node->tok,
+                    "the address of a function the program does not define");
       indirect_used = true;
-      return e_i32(node->var->offset);
+      return e_i32(fn->offset);
     }
-    if (!node->var->is_definition)
-      unsupported(node->tok, "a reference to a variable this file does not define");
-    return e_i32(node->var->offset);
+    Obj *def = definition_of(node->var);
+    if (!def->is_definition)
+      unsupported(node->tok,
+                  "a reference to a variable the program does not define");
+    return e_i32(def->offset);
   case ND_DEREF:
     return gen_expr(node->lhs);
   case ND_MEMBER: {
@@ -636,12 +760,14 @@ static uint32_t func_index(Obj *fn) {
   if (!fn->is_function)
     error_tok(fn->tok, "wnjr-cc: not a function");
   // A declared but undefined function is callable only when an import attribute
-  // said where it comes from, or when it is another name for a function here.
-  if (!fn->is_definition && !fn->import_module && !fn->is_alias)
+  // said where it comes from, when it is another name for a function here, or
+  // when another unit defines it.
+  Obj *def = definition_of(fn);
+  if (!def->is_definition && !def->import_module && !def->is_alias)
     error_tok(fn->tok,
-              "wnjr-cc: %s is not defined in this file and carries no import attribute",
+              "wnjr-cc: %s is not defined in this program and carries no import attribute",
               fn->name);
-  return (uint32_t)fn->offset;
+  return (uint32_t)def->offset;
 }
 
 // One "..." argument, stored into the caller's buffer at `off`. The callee reads
@@ -1144,6 +1270,13 @@ static E *gen_expr(Node *node) {
     return gen_cond(node);
 
   case ND_CAST: {
+    // A cast to void throws the value away and keeps the side effect of
+    // computing it. Nothing can read the result of such an expression -- C says
+    // it has no value -- so a zero stands in for it and the caller drops that.
+    if (node->ty->kind == TY_VOID) {
+      e_free(gen_expr(node->lhs));
+      return e_i32(0);
+    }
     if (is_aggregate(node->ty)) {
       // C allows a cast to the same struct or union type and nothing wider, and
       // here the value of an aggregate expression is its address, so the cast
@@ -1362,6 +1495,50 @@ static void gen_stmt(Node *node) {
   }
 }
 
+// ───────────────────────── provided symbols ─────────────────────────
+
+// A few names a C source may use are the linker's in a normal toolchain. They
+// belong to the module rather than to any translation unit, and their values are
+// facts about the layout this compiler chose.
+//
+//   __heap_base         the first byte of the heap
+//   __heap_end          the end of the memory as it starts out, which is where
+//                       sbrk continues from
+//   __wasm_call_ctors   runs the C++ static constructors; there are none here,
+//                       so its body is empty and calling it does nothing
+static Obj *heap_base_obj;
+static Obj *heap_end_obj;
+static long data_end;
+
+static Obj *new_provided_object(const char *name) {
+  Obj *o = calloc(1, sizeof(Obj));
+  o->name = (char *)name;
+  o->is_definition = true;
+  o->is_static = true; // not exported: it is not this program's to offer
+  o->align = 1;
+  o->ty = ty_int; // an address; the size is never used, since it is not laid out
+  return o;
+}
+
+// The ones that need a function index have to be in the object list, because that
+// is what the indices are handed out over and what the bodies are emitted from.
+static Obj *new_provided_function(const char *name) {
+  Obj *o = new_provided_object(name);
+  o->is_function = true;
+  o->ty = func_type(ty_void);
+  return o;
+}
+
+static Obj *add_provided_symbols(Obj *prog) {
+  heap_base_obj = new_provided_object("__heap_base");
+  heap_end_obj = new_provided_object("__heap_end");
+  Obj *ctor = new_provided_function("__wasm_call_ctors");
+  ctor->next = heap_base_obj;
+  heap_base_obj->next = heap_end_obj;
+  heap_end_obj->next = prog;
+  return ctor;
+}
+
 // ───────────────────────── module ─────────────────────────
 
 // Every object with a static extent gets one address in the data area. The
@@ -1394,16 +1571,14 @@ static void assign_global_offsets(Obj *prog) {
     if (pass == 0)
       tls_size = top - tls_base;
   }
-  if (top + MIN_STACK > STACK_TOP)
-    error("the data area leaves less than %d bytes of stack below STACK_TOP; "
-          "raise MEMORY_PAGES", MIN_STACK);
-}
+  data_end = top;
 
-static Obj *find_object(Obj *prog, const char *name) {
-  for (Obj *var = prog; var; var = var->next)
-    if (var->name && !strcmp(var->name, name))
-      return var;
-  return NULL;
+  uint32_t base = align_to(top, 16);
+  stack_top = base + STACK_SIZE;
+  if (stack_top + MIN_HEAP > MEMORY_END)
+    error("the data area leaves no room for a stack of %d bytes and a heap of "
+          "%d below the end of memory; raise MEMORY_PAGES",
+          STACK_SIZE, MIN_HEAP);
 }
 
 // A static initialiser may name an object (int *p = &g;). chibicc records that
@@ -1416,22 +1591,17 @@ static void resolve_relocations(Obj *prog) {
     if (var->is_function || !var->is_definition)
       continue;
     for (Relocation *rel = var->rel; rel; rel = rel->next) {
-      // parse.c puts a computed-goto label here as its own name.
-      Obj *target = find_object(prog, *rel->label);
+      // parse.c puts a computed-goto label here as its own name, and a label is
+      // not an object: the program has no symbol for it.
+      Obj *target = find_symbol(*rel->label, var->tu);
       if (!target)
-        unsupported(var->tok, "a label address in a static initialiser");
+        error_obj(var,
+                  format("%s is initialised with %s, which no translation unit "
+                         "defines", var->name, *rel->label));
       // A function's value is its index in the function-pointer table, which
       // is assigned from `offset` when the function indices are handed out.
-      if (target->is_function) {
-        if (!target->is_definition && !target->import_module)
-          unsupported(var->tok, "a pointer to a function this file does not define");
+      if (target->is_function)
         indirect_used = true;
-        uint32_t word = (uint32_t)(target->offset + rel->addend);
-        memcpy(var->init_data + rel->offset, &word, sizeof(word));
-        continue;
-      }
-      if (!target->is_definition)
-        unsupported(var->tok, "a pointer to an object this file does not define");
       uint32_t word = (uint32_t)(target->offset + rel->addend);
       memcpy(var->init_data + rel->offset, &word, sizeof(word));
     }
@@ -1530,7 +1700,9 @@ static void emit_function(Obj *fn) {
     OP(nj_op_store(out, PTR_MEM, frame_addr(fn->va_buf->offset),
                    e_local((uint32_t)va_param, PTR_MEM), 0, 0));
 
-  gen_stmt(fn->body);
+  // A provided function has no body, only an empty one.
+  if (fn->body)
+    gen_stmt(fn->body);
 
   if (fn->ty->return_ty->kind == TY_VOID)
     OP(nj_op_return_void(out));
@@ -1566,7 +1738,14 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   out = m;
   nsigs = 0;
   indirect_used = false;
+  // One object per name, the symbols the linker would provide, then the table
+  // that resolves a name to one of them.
+  prog = collapse_definitions(prog);
+  prog = add_provided_symbols(prog);
   assign_global_offsets(prog);
+  heap_base_obj->offset = (int)stack_top;
+  heap_end_obj->offset = (int)MEMORY_END;
+  build_symbols(prog);
   assign_lvar_offsets(prog);
 
   // Function indices first: a body may call a function defined later. A static
@@ -1618,18 +1797,9 @@ void njvm_emit_module(Obj *prog, Mp *m) {
     for (Obj *fn = prog; fn; fn = fn->next) {
       if (!fn->is_function || !fn->is_alias || fn->offset >= 0)
         continue;
-      Obj *target = NULL;
-      for (Obj *t = prog; t; t = t->next)
-        if (t->is_function && t->name && !strcmp(t->name, fn->alias_target)) {
-          target = t;
-          break;
-        }
-      if (!target)
+      Obj *target = find_symbol(fn->alias_target, fn->tu);
+      if (!target || !target->is_function)
         error_tok(fn->tok, "wnjr-cc: %s is an alias of %s, which is not a function here",
-                  fn->name, fn->alias_target);
-      if (!target->is_definition && !target->import_module && !target->is_alias)
-        error_tok(fn->tok,
-                  "wnjr-cc: %s is an alias of %s, which is not defined in this file",
                   fn->name, fn->alias_target);
       if (target->offset < 0) {
         pending = true;
@@ -1765,7 +1935,7 @@ void njvm_emit_module(Obj *prog, Mp *m) {
     mp_key(out, "init");
     int init = mp_variant(out, "Const");
     int cv = mp_variant(out, "I32");
-    mp_int(out, STACK_TOP);
+    mp_int(out, (int)stack_top);
     mp_end_container(out, cv, 1);
     mp_end_container(out, init, 1);
     mp_end_container(out, g, 2);

@@ -139,6 +139,14 @@ struct Obj {
   bool is_function;
   bool is_definition;
 
+  // Which translation unit of the program this object came from. A file-scope
+  // static sees only its own unit, so its name is only unique there.
+  int tu;
+  // The next object with the same name, in the program-wide symbol table. Two
+  // entries share a name when one is the definition and the other a declaration,
+  // or when each belongs to a different unit and both are static.
+  Obj *name_next;
+
   // Where the host function that stands in for this one is filed, when the
   // declaration carries wasi's import attribute. See parse.c:import_attribute.
   // A function with these set is not defined in this file and its call goes to
@@ -365,7 +373,9 @@ struct Node {
 
 Node *new_cast(Node *expr, Type *ty);
 int64_t const_expr(Token **rest, Token *tok);
-Obj *parse(Token *tok);
+// Parses one translation unit. `tu` numbers it within the program: a file-scope
+// static is private to its unit, so the number is part of what a name means.
+Obj *parse(Token *tok, int tu);
 
 //
 // type.c

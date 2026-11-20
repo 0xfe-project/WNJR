@@ -97,6 +97,9 @@ static Obj *globals;
 
 static Scope *scope = &(Scope){};
 
+// The translation unit being parsed, and the number the next Obj gets.
+static int cur_tu;
+
 // Points to the function object the parser is currently parsing.
 static Obj *current_fn;
 
@@ -330,6 +333,7 @@ static Obj *new_lvar(char *name, Type *ty) {
 
 static Obj *new_gvar(char *name, Type *ty) {
   Obj *var = new_var(name, ty);
+  var->tu = cur_tu;
   var->next = globals;
   var->is_static = true;
   var->is_definition = true;
@@ -3998,7 +4002,11 @@ static void declare_builtin_functions(void) {
 }
 
 // program = (typedef | function-definition | global-variable)*
-Obj *parse(Token *tok) {
+Obj *parse(Token *tok, int tu) {
+  // Each unit has its own scope: a file-scope static of one unit must not be
+  // visible in another, and a struct tag or typedef belongs to its unit.
+  cur_tu = tu;
+  scope = &(Scope){};
   declare_builtin_functions();
   globals = NULL;
 
