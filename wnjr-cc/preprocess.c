@@ -1114,6 +1114,10 @@ void init_macros(void) {
   define_macro("__wasm32__", "1");
   define_macro("__wasi__", "1");
   define_macro("__wasip1__", "1");
+  // A fact about the target, not an option: wasm memory has no mmap, and
+  // interface code in a libc has to be told so before it includes <sys/mman.h>.
+  // Defining it here is why no build recipe has to spell it out.
+  define_macro("HAVE_MMAP", "0");
   define_macro("__ORDER_LITTLE_ENDIAN__", "1234");
   define_macro("__ORDER_BIG_ENDIAN__", "4321");
   define_macro("__ORDER_PDP_ENDIAN__", "3412");

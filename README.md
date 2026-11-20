@@ -66,7 +66,7 @@ own `Makefile`, based on [chibicc](https://github.com/rui314/chibicc) (MIT).
 
 ```bash
 make -C wnjr-cc
-wnjr-cc/wnjr-cc --emit-njvm -o prog.njvm prog.c   # IR as MessagePack
+wnjr-cc/wcc -o prog.njvm prog.c   # IR as MessagePack
 ./target/debug/njvm-run prog.njvm main             # read, lower, run on WNJR
 make -C wnjr-cc test                              # -E and --dump-ast vs chibicc
 wnjr-cc/test/e2e.sh                               # C -> IR -> WNJR vs the host cc

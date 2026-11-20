@@ -24,9 +24,33 @@ bool file_exists(char *path) {
   return !stat(path, &st);
 }
 
+// The headers this compiler reads without being told: its own, then the libc it
+// targets. wcc has one target and one libc, so the layout is a constant, not a
+// set of flags. The libc tree sits beside the compiler's directory, which is
+// what a checkout of this repository already looks like.
 static void add_default_include_paths(char *argv0) {
-  // wnjr-cc-specific include files in ./include relative to argv[0]
-  strarray_push(&include_paths, format("%s/include", dirname(strdup(argv0))));
+  char *dir = dirname(strdup(argv0));
+
+  // wcc's own headers win: they are the ones that agree with this front end
+  // (stddef.h, and the stubs chibicc's suite expects to shadow the libc's).
+  strarray_push(&include_paths, format("%s/include", dir));
+
+  // The libc, in the order its own build reads it: private before public,
+  // musl before cloudlibc. A directory that is not there is skipped, so an
+  // installed compiler with no libc beside it still works.
+  static const char *libc_dirs[] = {
+    "libc-top-half/musl/src/include", "libc-top-half/musl/src/internal",
+    "libc-top-half/musl/arch/wasm32", "libc-top-half/musl/arch/generic",
+    "libc-top-half/musl/include", "libc-top-half/headers/private",
+    "libc-bottom-half/headers/public", "libc-bottom-half/headers/private",
+    "libc-bottom-half/cloudlibc/src", "libc-bottom-half/cloudlibc/src/include",
+    "generated/include", "dlmalloc/include", "include",
+  };
+  for (unsigned i = 0; i < sizeof(libc_dirs) / sizeof(*libc_dirs); i++) {
+    char *path = format("%s/../wnjr-cc-libc/%s", dir, libc_dirs[i]);
+    if (file_exists(path))
+      strarray_push(&include_paths, path);
+  }
 
   // Standard include paths (match chibicc ordering)
   strarray_push(&include_paths, "/usr/local/include");
@@ -177,6 +201,12 @@ static void parse_args(int argc, char **argv) {
 
   if (inputs.len == 0)
     error("no input files");
+  // Emitting the module is what a compiler does; -E and --dump-ast are the two
+  // ways to ask it to stop early instead. So a bare "wcc a.c -o a.bin" needs no
+  // mode word, and --emit-njvm is still accepted for a reader who wants to say
+  // it out loud.
+  if (!opt_E && !opt_dump_ast)
+    opt_emit_njvm = true;
   if ((int)opt_E + (int)opt_dump_ast + (int)opt_emit_njvm != 1)
     error("exactly one of -E, --dump-ast or --emit-njvm is required");
   // -E and --dump-ast show what one file became; there is nothing to show for a

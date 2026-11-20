@@ -13,37 +13,15 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 libc="$root/wnjr-cc-libc"
-cc="$root/wnjr-cc/wnjr-cc"
+cc="$root/wnjr-cc/wcc"
 work=${TMPDIR:-/tmp}/wnjr-cc-libc-parse
 mkdir -p "$work" || exit 1
 
-make -C "$root/wnjr-cc" >/dev/null || { echo "FAIL: cannot build wnjr-cc"; exit 1; }
+make -C "$root/wnjr-cc" >/dev/null || { echo "FAIL: cannot build wcc"; exit 1; }
 
-# The include path wasi-libc's build gives the compiler.
-# musl's own sources come first, in musl's order: a source file includes
-# <features.h> to get the internal one (which defines hidden, weak and the
-# weak_alias machinery and then includes the public one), and it only does that
-# if src/include is searched before include.
-incs=(
-  "-I$libc/libc-top-half/musl/src/include"
-  "-I$libc/libc-top-half/musl/src/internal"
-  "-I$libc/libc-top-half/musl/arch/wasm32"
-  "-I$libc/libc-top-half/musl/arch/generic"
-  "-I$libc/libc-top-half/musl/include"
-  "-I$libc/libc-top-half/headers/private"
-  "-I$libc/libc-bottom-half/headers/public"
-  "-I$libc/libc-bottom-half/headers/private"
-  "-I$libc/libc-bottom-half/cloudlibc/src"
-  "-I$libc/libc-bottom-half/cloudlibc/src/include"
-  "-I$libc/generated/include"
-  "-I$libc/dlmalloc/include"
-  "-I$libc/include"
-)
-
-# Definitions wasi-libc's own build passes on the command line. dlmalloc reads
-# HAVE_MMAP from there and includes <sys/mman.h> when it is on; there is no mmap in
-# WASI, and dlmalloc grows the heap through sbrk instead.
-defs=("-DHAVE_MMAP=0")
+# No include paths and no definitions here: wcc knows the libc it targets, which
+# sits beside it, and it knows the target has no mmap. What is left on the
+# command line is the file.
 
 # Files this frontend will not take, each with the reason it will not. They are
 # listed on every run and counted apart from the pass rate: a file that cannot be
@@ -74,7 +52,7 @@ for src in $(cd "$libc" && find . -name '*.c' | sort); do
   fi
   total=$((total + 1))
   log="$work/${name//\//_}.log"
-  if $cc --dump-ast "${incs[@]}" "${defs[@]}" "$libc/$src" > /dev/null 2> "$log"; then
+  if $cc --dump-ast "$libc/$src" > /dev/null 2> "$log"; then
     pass=$((pass + 1))
     [ $verbose -eq 1 ] && echo "[ok]   $name"
   else

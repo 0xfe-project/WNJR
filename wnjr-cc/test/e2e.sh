@@ -74,7 +74,7 @@ for src in $cases; do
   fi
 
   msgpack="$work/$name.msgpack"
-  if ! "$root/wnjr-cc/wnjr-cc" --emit-njvm -o "$msgpack" $srcs; then
+  if ! "$root/wnjr-cc/wcc" -o "$msgpack" $srcs; then
     echo "[FAIL] $name: wnjr-cc rejected the source"
     fail=$((fail + 1))
     failed_cases="$failed_cases $name"

@@ -28,22 +28,20 @@ esac
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 libc="$root/wnjr-cc-libc"
-cc="$root/wnjr-cc/wnjr-cc"
+cc="$root/wnjr-cc/wcc"
 work=${TMPDIR:-/tmp}/wnjr-cc-self
 mkdir -p "$work" || exit 1
 
 . "$here/libc-units.sh"
-libc_incs "$libc"
 # wnjr-cc's own directory: the TUs include "chibicc.h".
-incs="$incs -I$root/wnjr-cc"
 
-make -C "$root/wnjr-cc" >/dev/null || { echo "FAIL: cannot build wnjr-cc"; exit 1; }
+make -C "$root/wnjr-cc" >/dev/null || { echo "FAIL: cannot build wcc"; exit 1; }
 
 tus=$(echo "$root"/wnjr-cc/*.c)
 
 if [ "$mode" = link ]; then
   libc_units "$libc"
-  if ./wnjr-cc/wnjr-cc --emit-njvm $incs -DHAVE_MMAP=0 -o /dev/null $units $tus > "$work/link.log" 2>&1; then
+  if ./wnjr-cc/wcc -o /dev/null $units $tus > "$work/link.log" 2>&1; then
     echo "link: ok"
     exit 0
   fi
@@ -65,7 +63,7 @@ ok=0; bad=0; failed=""
 for name in $cases; do
   src="$root/wnjr-cc/$name.c"
   if [ ! -f "$src" ]; then echo "[FAIL] $name: no such TU"; bad=$((bad+1)); failed="$failed $name"; continue; fi
-  if ./wnjr-cc/wnjr-cc --emit-njvm $incs -DHAVE_MMAP=0 -o /dev/null "$src" > "$work/$name.log" 2>&1; then
+  if ./wnjr-cc/wcc -o /dev/null "$src" > "$work/$name.log" 2>&1; then
     ok=$((ok+1)); echo "[ok]   $name"
   elif ! grep -Ev "^(wnjr-cc: undefined: |wnjr-cc: [0-9]+ symbol)" "$work/$name.log" | grep -q .; then
     # Only undefined symbols: the front end took the file, the link has not run.

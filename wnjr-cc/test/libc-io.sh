@@ -19,14 +19,13 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 libc="$root/wnjr-cc-libc"
-cc="$root/wnjr-cc/wnjr-cc"
+cc="$root/wnjr-cc/wcc"
 runner="$root/target/debug/njvm-run"
 work=${TMPDIR:-/tmp}/wnjr-cc-libc-io
 rm -rf "$work"; mkdir -p "$work" || exit 1
 
 . "$here/libc-units.sh"
 libc_units "$libc"
-libc_incs "$libc"
 
 make -C "$root/wnjr-cc" >/dev/null || { echo "FAIL: cannot build wnjr-cc"; exit 1; }
 cargo build --offline -q --manifest-path "$root/Cargo.toml" -p wnjr-njvm-e2e --bin njvm-run \
@@ -53,10 +52,7 @@ for name in $cases; do
   want="$here/libc-io/$name.expect"
   if [ ! -f "$src" ]; then echo "[FAIL] $name: no such probe"; fail=$((fail+1)); failed="$failed $name"; continue; fi
   if [ ! -f "$want" ]; then echo "[FAIL] $name: no $name.expect"; fail=$((fail+1)); failed="$failed $name"; continue; fi
-  # -DHAVE_MMAP=0: the same switch chibicc's suite builds with. WASI has no mmap,
-  # and sys/mman.h refuses to be included without the emulation flag, so the
-  # unit that asks about it is told there is none.
-  if ! "$cc" --emit-njvm $incs -DHAVE_MMAP=0 -o "$work/$name.mp" $units "$src" > "$work/$name.compile" 2>&1; then
+  if ! "$cc" -o "$work/$name.mp" $units "$src" > "$work/$name.compile" 2>&1; then
     echo "[FAIL] $name: wnjr-cc rejected the probe"
     sed -e "s|$libc/||g" -e "s|$root/||g" "$work/$name.compile" | head -3 | sed "s/^/        /"
     fail=$((fail+1)); failed="$failed $name"; continue

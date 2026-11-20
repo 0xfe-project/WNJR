@@ -6,8 +6,10 @@
 #
 # Sets, for the caller:
 #   $units  every libc unit that belongs to one program, absolute paths
-#   $incs   the -I flags that reach the tree's headers, in the order the tree
-#           resolves them (private before public, musl before cloudlibc)
+#
+# It sets no include paths: wcc finds the libc beside itself (see
+# add_default_include_paths in main.c), so a caller passes sources and an
+# output, nothing else.
 
 libc_units() {
   libc=$1
@@ -32,15 +34,3 @@ libc-bottom-half/sources/__main_void.c"
   done < <(cd "$libc" && find . -name "*.c" | LC_ALL=C sort)
 }
 
-libc_incs() {
-  libc=$1
-  incs=""
-  for d in libc-top-half/musl/src/include libc-top-half/musl/src/internal \
-           libc-top-half/musl/arch/wasm32 libc-top-half/musl/arch/generic \
-           libc-top-half/musl/include libc-top-half/headers/private \
-           libc-bottom-half/headers/public libc-bottom-half/headers/private \
-           libc-bottom-half/cloudlibc/src libc-bottom-half/cloudlibc/src/include \
-           generated/include dlmalloc/include include; do
-    incs="$incs -I$libc/$d"
-  done
-}

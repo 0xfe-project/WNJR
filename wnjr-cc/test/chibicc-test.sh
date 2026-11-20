@@ -20,7 +20,7 @@ set -u
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 libc="$root/wnjr-cc-libc"
-cc="$root/wnjr-cc/wnjr-cc"
+cc="$root/wnjr-cc/wcc"
 tdir="$root/vendor/chibicc/test"
 runner="$root/target/debug/njvm-run"
 CC=${CC:-cc}
@@ -46,7 +46,6 @@ cargo build --offline -q --manifest-path "$root/Cargo.toml" -p wnjr-njvm-e2e --b
 
 . "$here/libc-units.sh"
 libc_units "$libc"
-libc_incs "$libc"
 
 # A case this frontend cannot take, and why. A skipped case is printed on every
 # run and reported apart, never as a pass.
@@ -78,8 +77,8 @@ for name in $cases; do
   # Compiled from the chibicc tree with a relative path, because a case asserts its
   # own __FILE__ ("test/macro.c"), and chibicc own driver runs it that way. The
   # libc units are absolute and unaffected.
-  if ! (cd "$root/vendor/chibicc" && "$cc" --emit-njvm -I"$tdir" $incs -DHAVE_MMAP=0 \
-         -o "$out.mp" $units "$tdir/common" "test/$name.c") > "$out.compile" 2>&1; then
+  if ! (cd "$root/vendor/chibicc" && "$cc" -I"$tdir" -o "$out.mp" $units "$tdir/common" \
+         "test/$name.c") > "$out.compile" 2>&1; then
     echo "[FAIL] $name: wnjr-cc rejected the source"
     sed -e "s|$libc/||g" -e "s|$root/||g" "$out.compile" | head -3 | sed "s/^/        /"
     fail=$((fail+1)); failed="$failed $name"; continue

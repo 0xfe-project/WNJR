@@ -5,16 +5,16 @@ SRCS = main.c tokenize.c preprocess.c unicode.c strings.c hashmap.c type.c parse
        njvm_mp.c njvm_ir.c codegen.c
 OBJS = $(SRCS:.c=.o)
 
-wnjr-cc: $(OBJS)
+wcc: $(OBJS)
 	$(CC) -o $@ $^
 
 $(OBJS): chibicc.h njvm.h
 
-test: wnjr-cc
+test: wcc
 	cd $(CURDIR) && ./test/test.sh
 	cd $(CURDIR) && ./test/dump-test.sh
 
 clean:
-	rm -f $(OBJS) wnjr-cc
+	rm -f $(OBJS) wcc
 
 .PHONY: test clean
