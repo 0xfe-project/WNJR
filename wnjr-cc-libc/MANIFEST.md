@@ -137,7 +137,7 @@
 编译搜索路径(与 wasi-libc CMake 一致, 把 sysroot 换成 `include` + `generated/include`):
 `include`, `libc-bottom-half/headers/public`, `libc-top-half/musl/include`, `libc-top-half/musl/arch/wasm32`, `libc-top-half/musl/arch/generic`, `generated/include`。各编译单元另有 `-I`(`libc-top-half/musl/src/{include,internal}`, `libc-top-half/headers/private`, `libc-bottom-half/cloudlibc/src` 等), 以 wasi-libc 构建出的 compile_commands 为准。
 
-`wasi/api.h` 按 `__wasip1__` 选 `wasip1.h`; 它的其它分支 include 的 `wasi/wasip2.h` `wasip3.h` `webp2.h` 不在树里(目标只做 wasip1-threads), 这些分支不会被预处理。
+`wasi/api.h` 按 `__wasip1__` 选 `wasip1.h`。它的其它分支 include 的 `wasi/wasip2.h` 和 `wasi/webp2.h` 不在树里, 这些分支在 `__wasip1__` 下不会被预处理。`wasi/wasip3.h` 在树里: `__init_tls.c` 经 `wasi/wasip3_tls.h` 无条件 include 它, 它自己只是个桩, 仅在 `__wasip3__` 下才 include 不在树里的 `__generated_wasip3.h`。
 
 ## 4. 没搬的东西
 
@@ -148,7 +148,7 @@
 | musl/src/stdio/vfscanf.c、strtod 系、printscan 的 nofloat/longdouble 变体 | 不在 printf 闭包 |
 | crt1-reactor.c | 测试是 command 程序 |
 | libc-bottom-half/{clocks,getpid,mman,signal}、fts、emmalloc、dl.c | 不在闭包 |
-| wasip2 / wasip3 / webp2 的源与头 | 目标只做 wasip1-threads |
+| wasip2 / webp2 的头, wasip3 的 `__generated_wasip3.h` 及相关源 | 目标只做 wasip1-threads。例外: `wasip3.h`(桩)与 `wasip3_tls.h` 因被 `__init_tls.c` include 而在树里 |
 | memmove, strcpy, atexit, fflush, pthread_mutex_*, pthread_attr_*, pthread_detach 等 | 闭包里没有谁引用。上一版提交(8c5b39f)凭猜测列了它们, 这版按 nm 闭包和真实链接核对后删除 |
 
 ## 5. setjmp.h
