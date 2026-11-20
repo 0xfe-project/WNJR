@@ -147,6 +147,10 @@ struct Obj {
   char *import_name;
   // The name this function is exported under, when it is not its own.
   char *export_name;
+  // Set for a declaration that carries GCC's alias attribute: this name is
+  // another name for another function of this file, and has the same index.
+  char *alias_target;
+  bool is_alias;
   bool is_static;
 
   // Global variable
@@ -234,6 +238,13 @@ typedef enum {
   ND_ASM,       // "asm"
   ND_CAS,       // Atomic compare-and-swap
   ND_EXCH,      // Atomic exchange
+  ND_TRAP,      // __builtin_trap and __builtin_unreachable
+  ND_CLZ,       // __builtin_clz, __builtin_clzll
+  ND_CTZ,       // __builtin_ctz, __builtin_ctzll
+  ND_POPCOUNT,  // __builtin_popcount, __builtin_popcountll
+  ND_ISNAN,     // __builtin_isnan
+  ND_MEMCPY,    // __builtin_memcpy, __builtin_memmove
+  ND_MEMSET,    // __builtin_memset
 } NodeKind;
 
 // AST node type

@@ -161,10 +161,27 @@ own, which is what musl's `vfprintf` relies on when it copies its argument list 
 walk the format twice and then passes the copy by value to `printf_core`. The
 `__builtin_va_*` spellings musl uses expand to the same four operations.
 
-Not yet: VLAs, bitfields, `_Atomic`, `asm`, the wasm and overflow builtins
-(`__builtin_trap`, `__builtin_clz`, `__builtin_wasm_memory_grow`,
-`__builtin_add_overflow`, …), `__sync_*` atomics, aliases, and a struct or union
-passed through `...`. libc itself is next.
+The builtins a C library actually calls are not a library call. `__builtin_trap`
+and `__builtin_unreachable` are an `unreachable` instruction;
+`__builtin_clz`, `__builtin_ctz` and `__builtin_popcount` (and their `ll` forms)
+are the counts the backend already has; `__builtin_memcpy` and
+`__builtin_memmove` are one `memory.copy`, `__builtin_memset` one `memory.fill`;
+`__builtin_isnan` is `x != x` with the operand read once; `__builtin_expect` is
+its first argument, `__builtin_constant_p` is 0 because there is no optimiser to
+tell, and `__builtin_assume` is a statement that is parsed and dropped.
+
+GCC's `alias` attribute is a real mechanism rather than an annotation: a
+declaration carrying `__attribute__((alias("f")))` takes `f`'s function index, and
+the module exports one function under two names. A call through either name, and a
+function pointer taken through either name, reach the same body. An alias of an
+alias resolves through the chain.
+
+Not yet: VLAs, bitfields, `_Atomic`, `asm`, the wasm builtins
+(`__builtin_wasm_memory_size`, `__builtin_wasm_memory_grow`, the `tls` ones,
+`__builtin_wasm_memory_atomic_wait32`), the overflow builtins
+(`__builtin_add_overflow` and friends), `__sync_*` atomics, the floating-point
+classification builtins other than `isnan`, and a struct or union passed through
+`...`. libc itself is next.
 
 The type table is chibicc's LP64 one, so `long` and a pointer are eight bytes
 wide; only the low 32 bits of a pointer slot are an address, and the upper half

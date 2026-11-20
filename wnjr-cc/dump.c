@@ -18,8 +18,15 @@ static const char *node_names[] = {
   "MEMBER", "ADDR", "DEREF", "NOT", "BITNOT", "LOGAND", "LOGOR", "RETURN",
   "IF", "FOR", "DO", "SWITCH", "CASE", "BLOCK", "GOTO", "GOTO_EXPR", "LABEL",
   "LABEL_VAL", "FUNCALL", "EXPR_STMT", "STMT_EXPR", "VAR", "VLA_PTR", "NUM",
-  "CAST", "MEMZERO", "ASM", "CAS", "EXCH",
+  "CAST", "MEMZERO", "ASM", "CAS", "EXCH", "TRAP", "CLZ", "CTZ", "POPCOUNT",
+  "ISNAN", "MEMCPY", "MEMSET",
 };
+
+// This table is indexed by NodeKind and has to list every kind, in order. There
+// is no assertion for that here on purpose: dump.c is also compiled against
+// vendor chibicc's chibicc.h for test/dump-test.sh, and that header has fewer
+// kinds, so the check cannot be written against ND_LAST. A kind added without a
+// name prints whatever string follows the table.
 
 static const char *type_names[] = {
   "void", "bool", "char", "short", "int", "long", "float", "double",

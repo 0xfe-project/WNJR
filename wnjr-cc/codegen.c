@@ -368,7 +368,7 @@ static E *gen_addr(Node *node) {
       // A C function pointer is an index into table 0, and the element
       // segment puts function i at index i, so the function's own index is
       // the value to use. An imported function has an index too.
-      if (!node->var->is_definition && !node->var->import_module)
+      if (!node->var->is_definition && !node->var->import_module && !node->var->is_alias)
         unsupported(node->tok, "the address of a function this file does not define");
       indirect_used = true;
       return e_i32(node->var->offset);
@@ -529,9 +529,9 @@ static E *gen_cond(Node *node) {
 static uint32_t func_index(Obj *fn) {
   if (!fn->is_function)
     error_tok(fn->tok, "wnjr-cc: not a function");
-  // A declared but undefined function is callable only when an import
-  // attribute said where it comes from.
-  if (!fn->is_definition && !fn->import_module)
+  // A declared but undefined function is callable only when an import attribute
+  // said where it comes from, or when it is another name for a function here.
+  if (!fn->is_definition && !fn->import_module && !fn->is_alias)
     error_tok(fn->tok,
               "wnjr-cc: %s is not defined in this file and carries no import attribute",
               fn->name);
@@ -695,6 +695,63 @@ static E *gen_expr(Node *node) {
 
   case ND_BITNOT:
     return e_unary("Not", ir_ty(node->ty), gen_expr(node->lhs));
+
+  // A trap is an unreachable instruction: the engine stops here with no value,
+  // which is what both spellings mean.
+  case ND_TRAP:
+    OP(nj_op_unreachable(out));
+    return e_i32(0);
+
+  // The IR types a Unary by its operand type, so a 64-bit operand names an I64
+  // unary; the C result is an int either way, so it is converted back.
+  case ND_CLZ:
+  case ND_CTZ:
+  case ND_POPCOUNT: {
+    const char *oty = ir_ty(node->lhs->ty);
+    const char *op = node->kind == ND_CLZ     ? "Clz"
+                     : node->kind == ND_CTZ   ? "Ctz"
+                                              : "Popcnt";
+    E *val = gen_expr(node->lhs);
+    E *r = e_unary(op, oty, val);
+    if (strcmp(oty, "I32"))
+      return e_convert(oty, "I32", r);
+    return r;
+  }
+
+  // x != x is true only for a NaN, and the operand is read once.
+  case ND_ISNAN: {
+    const char *oty = ir_ty(node->lhs->ty);
+    int t = new_temp(oty);
+    OP(nj_op_localset(out, (uint32_t)t, gen_expr(node->lhs)));
+    // A comparison takes operands of one type and yields an i32, which is why
+    // the result type and op_ty are set separately here (as gen_binary does).
+    E *r = e_new(E_BINARY, "I32");
+    r->op = "Ne";
+    r->op_ty = oty;
+    r->a = e_local((uint32_t)t, oty);
+    r->b = e_local((uint32_t)t, oty);
+    return r;
+  }
+
+  case ND_MEMCPY:
+  case ND_MEMSET: {
+    // The destination is evaluated once; its address is also the value, which is
+    // what C's memcpy and memset return.
+    int t = new_temp(PTR_MEM);
+    OP(nj_op_localset(out, (uint32_t)t, gen_expr(node->lhs)));
+    E *src = gen_expr(node->rhs);
+    // A length is a size_t, which is eight bytes wide here, and both engine ops
+    // take a 32-bit count.
+    E *len = gen_expr(node->cond);
+    const char *lty = ir_ty(node->cond->ty);
+    if (strcmp(lty, PTR_MEM))
+      len = e_convert(lty, PTR_MEM, len);
+    if (node->kind == ND_MEMCPY)
+      OP(nj_op_memorycopy(out, e_local((uint32_t)t, PTR_MEM), src, len));
+    else
+      OP(nj_op_memoryfill(out, e_local((uint32_t)t, PTR_MEM), src, len));
+    return e_local((uint32_t)t, PTR_MEM);
+  }
 
   case ND_NOT:
     return e_binary("Eq", "I32", gen_expr(node->lhs), e_i32(0));
@@ -1175,6 +1232,13 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   // Imported functions take the low indices, because that is the order wasm
   // puts the two groups in: import function k is function index k, and the
   // first function this module defines is index nimports.
+  // -1 means "no function index yet". Zero is the default in a calloc'd Obj and
+  // is a legitimate index, so it cannot stand for "unassigned" — an alias reads
+  // its target's index, and reading it too early would silently name function 0.
+  for (Obj *fn = prog; fn; fn = fn->next)
+    if (fn->is_function)
+      fn->offset = -1;
+
   nimports = 0;
   uint32_t nfunc = 0;
   for (Obj *fn = prog; fn; fn = fn->next) {
@@ -1201,6 +1265,37 @@ void njvm_emit_module(Obj *prog, Mp *m) {
     if (!fn->is_function || !fn->is_definition)
       continue;
     fn->offset = (int)nfunc++;
+  }
+
+  // An alias is another name for a function of this module: it takes that
+  // function's index, and the export table names the same index twice. Resolved
+  // by name here, once every definition has its index.
+  for (int pass = 0; pass < 8; pass++) {
+    bool pending = false;
+    for (Obj *fn = prog; fn; fn = fn->next) {
+      if (!fn->is_function || !fn->is_alias || fn->offset >= 0)
+        continue;
+      Obj *target = NULL;
+      for (Obj *t = prog; t; t = t->next)
+        if (t->is_function && t->name && !strcmp(t->name, fn->alias_target)) {
+          target = t;
+          break;
+        }
+      if (!target)
+        error_tok(fn->tok, "wnjr-cc: %s is an alias of %s, which is not a function here",
+                  fn->name, fn->alias_target);
+      if (!target->is_definition && !target->import_module && !target->is_alias)
+        error_tok(fn->tok,
+                  "wnjr-cc: %s is an alias of %s, which is not defined in this file",
+                  fn->name, fn->alias_target);
+      if (target->offset < 0) {
+        pending = true;
+        continue;
+      }
+      fn->offset = target->offset;
+    }
+    if (!pending)
+      break;
   }
 
   // After the function indices: a static initialiser may name a function, and
@@ -1347,7 +1442,9 @@ void njvm_emit_module(Obj *prog, Mp *m) {
     int a = mp_begin_arr(out);
     size_t ne = 0;
     for (Obj *fn = prog; fn; fn = fn->next) {
-      if (!fn->is_function || !fn->is_definition)
+      // An alias has an index and a name but no body of its own, and that name
+      // is the whole point of it.
+      if (!fn->is_function || (!fn->is_definition && !fn->is_alias))
         continue;
       // A static function has no name outside the module, unless an attribute
       // gave it one.

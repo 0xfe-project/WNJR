@@ -303,5 +303,32 @@ void add_type(Node *node) {
       error_tok(node->cas_addr->tok, "pointer expected");
     node->ty = node->lhs->ty->base;
     return;
+  case ND_TRAP:
+    node->ty = ty_void;
+    return;
+  case ND_CLZ:
+  case ND_CTZ:
+  case ND_POPCOUNT:
+    if (!is_integer(node->lhs->ty))
+      error_tok(node->tok, "an integer operand is required");
+    node->ty = ty_int;
+    return;
+  case ND_ISNAN:
+    if (!is_flonum(node->lhs->ty))
+      error_tok(node->tok, "a floating-point operand is required");
+    node->ty = ty_int;
+    return;
+  case ND_MEMCPY:
+  case ND_MEMSET:
+    if (node->lhs->ty->kind != TY_PTR && node->lhs->ty->kind != TY_ARRAY)
+      error_tok(node->lhs->tok, "pointer expected");
+    if (node->kind == ND_MEMCPY &&
+        node->rhs->ty->kind != TY_PTR && node->rhs->ty->kind != TY_ARRAY)
+      error_tok(node->rhs->tok, "pointer expected");
+    if (!is_integer(node->cond->ty))
+      error_tok(node->cond->tok, "an integer length is required");
+    // C's memcpy and memset return the destination, and so does this.
+    node->ty = pointer_to(ty_void);
+    return;
   }
 }

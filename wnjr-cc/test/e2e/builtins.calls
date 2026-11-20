@@ -1,0 +1,7 @@
+clz_inner 1024
+pop_inner 255
+wide_inner 1
+hints_inner 3
+memcpy_inner 5
+memset_inner 0
+memmove_inner 2

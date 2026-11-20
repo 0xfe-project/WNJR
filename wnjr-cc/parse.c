@@ -51,6 +51,8 @@ typedef struct {
   char *import_module;
   char *import_name;
   char *export_name;
+  // The name this declaration is another name for (GCC's alias attribute).
+  char *alias_target;
   bool is_used;
 } VarAttr;
 
@@ -2820,6 +2822,28 @@ static Token *attribute_list(Token *tok, Type *ty, VarAttr *attr) {
         continue;
       }
 
+      // GCC's alias attribute: this declaration is another name for another
+      // function of the same file. It is a real mechanism here — two exports can
+      // name one function — rather than an annotation, so it is recorded and
+      // checked when the function indices are assigned.
+      if (equal(tok, "alias") || equal(tok, "__alias__")) {
+        if (!attr)
+          error_tok(tok, "%s is not allowed here", get_ident(tok));
+        tok = skip(tok->next, "(");
+        if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
+          error_tok(tok, "expected a string literal");
+        if (attr->alias_target)
+          error_tok(tok, "duplicate alias");
+        int len = tok->ty->array_len - 1;
+        char *s = calloc((size_t)len + 1, 1);
+        if (!s)
+          error("out of memory");
+        memcpy(s, tok->str, (size_t)len);
+        attr->alias_target = s;
+        tok = skip(tok->next, ")");
+        continue;
+      }
+
       // __attribute__((used)) is not in that list: it means "keep this definition
       // even though nothing refers to it", which matters here because the encoder
       // exports the definitions that are reachable and nothing else. wasi-libc's
@@ -3346,6 +3370,68 @@ static Node *primary(Token **rest, Token *tok) {
     return new_num(2, start);
   }
 
+  // Builtins that reduce to an operation this backend already has. The spellings
+  // are GCC's and clang's, and wasi-libc's headers use both.
+  if (equal(tok, "__builtin_trap") || equal(tok, "__builtin_unreachable")) {
+    *rest = skip(skip(tok->next, "("), ")");
+    return new_node(ND_TRAP, start);
+  }
+
+  if (equal(tok, "__builtin_expect")) {
+    tok = skip(tok->next, "(");
+    Node *v = assign(&tok, tok);
+    tok = skip(tok, ",");
+    // The expected value is a hint for a branch predictor there is none of here,
+    // so it is parsed and dropped.
+    assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return v;
+  }
+
+  // There is no optimiser to inform and no static analyser to convince: a
+  // constant is a constant when the frontend can fold it, and an assumption is
+  // not something to check at runtime.
+  if (equal(tok, "__builtin_constant_p") || equal(tok, "__builtin_assume")) {
+    tok = skip(tok->next, "(");
+    assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return new_num(0, start);
+  }
+
+  {
+    struct {
+      char *name;
+      NodeKind kind;
+    } unary[] = {
+      {"__builtin_clz", ND_CLZ},       {"__builtin_clzll", ND_CLZ},
+      {"__builtin_ctz", ND_CTZ},       {"__builtin_ctzll", ND_CTZ},
+      {"__builtin_popcount", ND_POPCOUNT},
+      {"__builtin_popcountll", ND_POPCOUNT},
+      {"__builtin_isnan", ND_ISNAN},
+    };
+    for (int i = 0; i < sizeof(unary) / sizeof(*unary); i++) {
+      if (!equal(tok, unary[i].name))
+        continue;
+      Node *arg = assign(&tok, skip(tok->next, "("));
+      *rest = skip(tok, ")");
+      return new_unary(unary[i].kind, arg, start);
+    }
+  }
+
+  if (equal(tok, "__builtin_memcpy") || equal(tok, "__builtin_memmove") ||
+      equal(tok, "__builtin_memset")) {
+    bool fill = equal(tok, "__builtin_memset");
+    Node *node = new_node(fill ? ND_MEMSET : ND_MEMCPY, start);
+    tok = skip(tok->next, "(");
+    node->lhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->rhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->cond = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return node;
+  }
+
   if (equal(tok, "__builtin_compare_and_swap")) {
     Node *node = new_node(ND_CAS, tok);
     tok = skip(tok->next, "(");
@@ -3543,6 +3629,15 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     fn->export_name = attr->export_name;
   }
 
+  if (attr->alias_target) {
+    if (fn->alias_target && strcmp(fn->alias_target, attr->alias_target))
+      error_tok(ty->name_pos, "%s is declared as two different aliases", name_str);
+    if (equal(tok, "{"))
+      error_tok(tok, "%s is an alias and cannot have a body", name_str);
+    fn->alias_target = attr->alias_target;
+    fn->is_alias = true;
+  }
+
   // A file-scope object carries no token of its own, and error_tok dereferences
   // it; the name's token is the useful caret anyway.
   fn->tok = ty->name_pos;
@@ -3551,6 +3646,13 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     fn->is_live = true;
 
   fn->is_root = !(fn->is_static && fn->is_inline);
+
+  // One declaration can hold several function declarators:
+  //   int __overflow(FILE *, int), __uflow(FILE *);
+  // musl's stdio_impl.h writes exactly that, and each name is its own
+  // declaration of the same base type.
+  if (equal(tok, ","))
+    return function(tok->next, basety, attr);
 
   if (consume(&tok, tok, ";"))
     return tok;
@@ -3646,6 +3748,21 @@ static bool is_function(Token *tok) {
 
   Type dummy = {};
   Type *ty = declarator(&tok, tok, &dummy);
+  // What follows the declarator decides whether there is a body, so a trailing
+  // attribute list has to be stepped over: musl writes
+  //   extern __typeof(x) y __attribute__((__alias__("x")));
+  // and reading the attribute as the start of the body reported "expected '{'".
+  while (equal(tok, "__attribute__")) {
+    int depth = 0;
+    for (; tok; tok = tok->next) {
+      if (equal(tok, "("))
+        depth++;
+      else if (equal(tok, ")") && --depth == 0) {
+        tok = tok->next;
+        break;
+      }
+    }
+  }
   return ty->kind == TY_FUNC;
 }
 
