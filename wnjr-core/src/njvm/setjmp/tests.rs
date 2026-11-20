@@ -286,15 +286,13 @@ fn one_tag_disjoint_numbers() {
 
 // ── engine EH probe (not NJVM): catch of a throw from a callee ─────────────
 //
-// WNJR catches a throw only when decode can resolve it statically to an
-// enclosing try_table handler and turn it into a branch (decode.rs,
-// DecodeTryCatch). A callee small enough for the inliner (inline.rs,
-// MAX_CALLEE_OPS = 32, straight-line or simple if) lands inside the caller
-// and is caught. A real call is lowered with only a success edge: a nonzero
-// status jumps to the function's error tail (arm64 control.rs lower_call,
-// cbnz C_RET0 -> body_local_error_label), so the try_table never sees it.
-// TryTable itself lowers to a plain fall-through (rewrite/function.rs).
-// try_table.wast passes because every callee it throws from is inlinable.
+// A callee small enough for the inliner (inline.rs, MAX_CALLEE_OPS = 32,
+// straight-line or simple if) is caught inside the caller by decode's static
+// branch (decode.rs, DecodeTryCatch). A real call gets a dispatcher on its
+// thrown edge instead (machine/lower_module.rs, attach_eh_dispatch): status 2
+// branches to a tag test per clause, then a catch block that delivers the
+// payload, then a rethrow tail for clauses that do not match. Both paths have
+// to reach the same handler with the same values.
 
 fn catch_from_callee(thrower: &str) -> Result<Vec<Value>, crate::WasmError> {
     let src = std::format!(
@@ -329,6 +327,48 @@ fn engine_catches_throw_from_real_call() {
     let nops = ["nop"; 40].join(" ");
     let r = catch_from_callee(&std::format!("{nops} {THROW_IF}"));
     assert_eq!(r.expect("caught"), vec![Value::I32(23)]);
+}
+
+/// The dispatcher tests each clause's tag in order, so a throw that only the
+/// second clause names still lands in that clause.
+#[test]
+fn engine_tests_each_clause_tag_in_order() {
+    let nops = ["nop"; 40].join(" ");
+    let src = std::format!(
+        r#"(module (tag $a) (tag $b)
+          (func $thr (param i32) (result i32) {nops} (throw $a))
+          (func (export "f") (result i32)
+            (block $h
+              (try_table (result i32) (catch $b $h) (catch $a $h) (call $thr (i32.const 1)))
+              (return))
+            (i32.const 23)))"#
+    );
+    assert_eq!(invoke_wat(&src).expect("caught"), vec![Value::I32(23)]);
+}
+
+/// A throw that crosses a call and matches no clause keeps unwinding out of the
+/// function: the host sees an uncaught exception, not a caught one and not a
+/// trap.
+#[test]
+fn engine_rethrows_an_unmatched_throw_across_a_call() {
+    let nops = ["nop"; 40].join(" ");
+    let r = catch_from_callee_other_tag(&nops);
+    let err = r.expect_err("no clause matches, so the throw escapes");
+    assert!(err.is_exception(), "escaped as {err:?}");
+    assert!(err.exception_tag().is_some(), "the tag survives the rethrow");
+}
+
+fn catch_from_callee_other_tag(nops: &str) -> Result<Vec<Value>, crate::WasmError> {
+    let src = std::format!(
+        r#"(module (tag $a) (tag $b)
+          (func $thr (param i32) (result i32) {nops} (throw $b))
+          (func (export "f") (result i32)
+            (block $h
+              (try_table (result i32) (catch $a $h) (call $thr (i32.const 1)))
+              (return))
+            (i32.const 23)))"#
+    );
+    invoke_wat(&src)
 }
 
 /// Run a whole wat module's export "f".
