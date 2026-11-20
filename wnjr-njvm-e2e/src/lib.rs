@@ -239,6 +239,16 @@ pub fn result_kinds(module: &Module, export: &str) -> Result<Vec<Kind>, String> 
 /// what an earlier call wrote — the same thing a C host does when it runs a
 /// translation unit's functions one after another. With `fresh_per_call` every
 /// call gets its own instance instead.
+/// The imports a frontend module may name with `#pragma njvm import`: the wasi
+/// snapshot the CLI gives every module. argv is fixed so that a test reading it
+/// gets the same answer on every run.
+fn wasi_imports() -> std::vec::Vec<wnjr_core::Import> {
+    let ctx = wnjr_wasi::WasiContextBuilder::new()
+        .args(["njvm-run"])
+        .build();
+    wnjr_wasi::wasi_imports_with_config(ctx, None)
+}
+
 pub fn run_wnjr_sequence(
     bytes: &[u8],
     calls: &[(String, Vec<Arg>)],
@@ -252,7 +262,8 @@ pub fn run_wnjr_sequence(
     for (export, args) in calls {
         if live.is_none() {
             let mut world = RuntimeWorld::new();
-            let id = world.instantiate(&engine, parsed.clone(), &[]).map_err(|e| format!("WNJR instantiate: {e:?}"))?;
+            let imports = wasi_imports();
+            let id = world.instantiate(&engine, parsed.clone(), &imports).map_err(|e| format!("WNJR instantiate: {e:?}"))?;
             live = Some((world, id));
         }
         let (world, id) = live.as_mut().expect("instance");

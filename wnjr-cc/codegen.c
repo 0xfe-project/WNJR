@@ -66,6 +66,25 @@ static CaseEnt *cases;
 static int ncases;
 static int case_cap;
 
+// Imported functions, in source order: wasm puts them first in the function
+// index space, so entry k is function index k.
+typedef struct {
+  Obj *fn;
+  const char *module;
+  const char *field;
+  uint32_t type_idx;
+} ImportEnt;
+static ImportEnt *imports;
+static int nimports;
+static int import_cap;
+
+static ImportEnt *find_import(Obj *fn) {
+  for (int i = 0; i < nimports; i++)
+    if (imports[i].fn == fn)
+      return &imports[i];
+  return NULL;
+}
+
 // Ops emitted into the current function body so far.
 static size_t body_len;
 
@@ -340,8 +359,8 @@ static E *gen_addr(Node *node) {
     if (node->var->is_function) {
       // A C function pointer is an index into table 0, and the element
       // segment puts function i at index i, so the function's own index is
-      // the value to use.
-      if (!node->var->is_definition)
+      // the value to use. An imported function has an index too.
+      if (!node->var->is_definition && !find_import(node->var))
         unsupported(node->tok, "the address of a function this file does not define");
       indirect_used = true;
       return e_i32(node->var->offset);
@@ -500,9 +519,14 @@ static E *gen_cond(Node *node) {
 }
 
 static uint32_t func_index(Obj *fn) {
-  if (!fn->is_function || !fn->is_definition)
+  if (!fn->is_function)
+    error_tok(fn->tok, "wnjr-cc: not a function");
+  // A declared but undefined function is callable only when a
+  // `#pragma njvm import` said where it comes from.
+  if (!fn->is_definition && !find_import(fn))
     error_tok(fn->tok,
-              "wnjr-cc: calling a function defined outside this file is not supported yet");
+              "wnjr-cc: %s is not defined in this file and no #pragma njvm import names it",
+              fn->name);
   return (uint32_t)fn->offset;
 }
 
@@ -953,7 +977,7 @@ static void resolve_relocations(Obj *prog) {
       // A function's value is its index in the function-pointer table, which
       // is assigned from `offset` when the function indices are handed out.
       if (target->is_function) {
-        if (!target->is_definition)
+        if (!target->is_definition && !find_import(target))
           unsupported(var->tok, "a pointer to a function this file does not define");
         indirect_used = true;
         uint32_t word = (uint32_t)(target->offset + rel->addend);
@@ -1085,7 +1109,48 @@ void njvm_emit_module(Obj *prog, Mp *m) {
 
   // Function indices first: a body may call a function defined later. A static
   // function is still part of the module; it is only left out of the exports.
+  //
+  // Imported functions take the low indices, because that is the order wasm
+  // puts the two groups in: import function k is function index k, and the
+  // first function this module defines is index nimports.
+  nimports = 0;
   uint32_t nfunc = 0;
+  for (ImportPragma *p = import_pragmas; p; p = p->next) {
+    Obj *fn = NULL;
+    for (Obj *v = prog; v; v = v->next)
+      if (v->is_function && !strcmp(v->name, p->cname))
+        fn = v;
+    if (!fn)
+      error("wnjr-cc: #pragma njvm import names %s, which this file does not declare",
+            p->cname);
+    if (fn->is_definition)
+      error("wnjr-cc: #pragma njvm import names %s, which this file defines", p->cname);
+    if (fn->ty->is_variadic)
+      error_tok(fn->tok,
+                "wnjr-cc: %s is imported and variadic; a wasm import has a fixed "
+                "signature, so the arguments cannot be passed through",
+                fn->name);
+    if (is_aggregate(fn->ty->return_ty))
+      error_tok(fn->tok,
+                "wnjr-cc: %s is imported and returns a struct or union, which this "
+                "frontend passes through a hidden parameter an outside function "
+                "does not know about",
+                fn->name);
+
+    if (nimports == import_cap) {
+      import_cap = import_cap ? import_cap * 2 : 8;
+      imports = realloc(imports, (size_t)import_cap * sizeof *imports);
+      if (!imports)
+        error("out of memory");
+    }
+    ImportEnt *ie = &imports[nimports];
+    ie->fn = fn;
+    ie->module = p->module;
+    ie->field = p->field;
+    ie->type_idx = sig_of(fn->tok, fn->ty);
+    fn->offset = (int)nimports++;
+    nfunc++;
+  }
   for (Obj *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition)
       continue;
@@ -1103,10 +1168,28 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   int mod = mp_begin_map(out);
   size_t fields = 0;
 
+  // The imports themselves: the signature index is a wasm type index, which is
+  // Module.types' index (the encoder seeds its type section from that list).
   mp_key(out, "imports");
   {
     int a = mp_begin_arr(out);
-    mp_end_container(out, a, 0);
+    for (int i = 0; i < nimports; i++) {
+      int im = mp_begin_map(out);
+      size_t nif = 0;
+      mp_key(out, "module");
+      mp_str(out, imports[i].module, strlen(imports[i].module));
+      nif++;
+      mp_key(out, "name");
+      mp_str(out, imports[i].field, strlen(imports[i].field));
+      nif++;
+      mp_key(out, "kind");
+      int kind = mp_variant(out, "Function");
+      mp_uint(out, imports[i].type_idx);
+      mp_end_container(out, kind, 1);
+      nif++;
+      mp_end_container(out, im, nif);
+    }
+    mp_end_container(out, a, (size_t)nimports);
   }
   fields++;
 

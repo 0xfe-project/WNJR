@@ -108,8 +108,25 @@ value has to cross the boundary; assignment is a `memory.copy`. Both struct
 parameters and struct returns are therefore one `i32` each in a function
 pointer's signature, which is why the two features meet cleanly.
 
-Not yet: VLAs, bitfields, `_Atomic`, `asm`, and anything needing libc —
-there are no imports yet.
+A function this file only declares can be bound to an import with a pragma,
+which is the only way C spells "this comes from elsewhere":
+
+```c
+#pragma njvm import(fd_write, wasi_snapshot_preview1, fd_write)
+int fd_write(unsigned int fd, void *iovs, unsigned int n, unsigned int *written);
+```
+
+The pragma carries the C name itself rather than attaching to the declaration
+that follows it, because chibicc's preprocessor drops pragmas before the parser
+runs; the lookup is by name, so the pragma and the declaration can appear in
+either order. Imported functions take the low half of the function index space
+(wasm's own ordering), which is why an import also has a function address and
+can be called through a function pointer. A variadic import is refused: a wasm
+import has a fixed signature, so the arguments have no way across — and that is
+not where `printf` belongs anyway: `printf` is libc, compiled by this frontend
+like any other code, and it reaches the host through `fd_write`.
+
+Not yet: VLAs, bitfields, `_Atomic`, `asm`, and libc itself.
 
 The type table is chibicc's LP64 one, so `long` and a pointer are eight bytes
 wide; only the low 32 bits of a pointer slot are an address, and the upper half

@@ -68,6 +68,7 @@ struct Hideset {
 static HashMap macros;
 static CondIncl *cond_incl;
 static HashMap pragma_once;
+ImportPragma *import_pragmas;
 static int include_next_idx;
 
 static Token *preprocess2(Token *tok);
@@ -83,7 +84,11 @@ static Token *skip_line(Token *tok) {
   if (tok->at_bol)
     return tok;
   warn_tok(tok, "extra token");
-  while (tok->at_bol)
+  // Stop at the first token of the next line. The loop condition used to read
+  // the other way round, which returned immediately and left the rest of the
+  // line in the stream; no caller noticed because every caller skipped from a
+  // token that was already at a line start.
+  while (tok->kind != TK_EOF && !tok->at_bol)
     tok = tok->next;
   return tok;
 }
@@ -966,6 +971,51 @@ static Token *preprocess2(Token *tok) {
     if (equal(tok, "pragma") && equal(tok->next, "once")) {
       hashmap_put(&pragma_once, tok->file->name, (void *)1);
       tok = skip_line(tok->next->next);
+      continue;
+    }
+
+    // `#pragma njvm import(<c-name>, <module>, <field>)` names where a declared
+    // function comes from. Other implementations of `#pragma njvm ...` are
+    // ignored rather than rejected, so a newer frontend can add one.
+    if (equal(tok, "pragma") && equal(tok->next, "njvm")) {
+      Token *p = tok->next->next;
+      // Where the pragma's own tokens end; the rest of the line goes to
+      // skip_line.
+      Token *import_end = p;
+      if (equal(p, "import")) {
+        p = p->next;
+        if (!equal(p, "("))
+          error_tok(p, "expected '(' after #pragma njvm import");
+        char *args[3];
+        for (int i = 0; i < 3; i++) {
+          p = i == 0 ? p->next : p->next->next;
+          if (p->kind != TK_IDENT)
+            error_tok(p, "expected an identifier in #pragma njvm import");
+          char *s = calloc((size_t)p->len + 1, 1);
+          if (!s)
+            error("out of memory");
+          memcpy(s, p->loc, (size_t)p->len);
+          args[i] = s;
+        }
+        if (!equal(p->next, ")"))
+          error_tok(p->next, "expected ')' to close #pragma njvm import");
+        import_end = p->next->next;
+        ImportPragma *ip = calloc(1, sizeof *ip);
+        if (!ip)
+          error("out of memory");
+        ip->cname = args[0];
+        ip->module = args[1];
+        ip->field = args[2];
+        ImportPragma **tail = &import_pragmas;
+        for (; *tail; tail = &(*tail)->next) {
+          if (!strcmp((*tail)->cname, ip->cname))
+            error_tok(tok, "#pragma njvm import names %s twice", ip->cname);
+        }
+        *tail = ip;
+      }
+      // Everything this branch recognised is consumed; anything after it up to
+      // the newline is an extra token worth a warning, which skip_line gives.
+      tok = skip_line(import_end);
       continue;
     }
 

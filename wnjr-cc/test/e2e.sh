@@ -2,11 +2,15 @@
 # End-to-end: C source -> NJVM-IR MessagePack (wnjr-cc) -> reader -> lowering ->
 # WNJR, compared call by call against the host C compiler.
 #
-# There are no expected values in this repo: each case is compiled twice, once
-# by wnjr-cc for WNJR and once by $CC for the host, and the two runs must agree.
+# Each case is compiled twice, once by wnjr-cc for WNJR and once by $CC for the
+# host, and the two runs must agree. A case the host cannot build — one that
+# calls an imported function, so the source is not portable C — carries a file
+# of expected results instead.
 #
-#   test/e2e/<name>.c       the translation unit (no libc)
-#   test/e2e/<name>.calls   one call per line: "<function> [int arg...]"
+#   test/e2e/<name>.c        the translation unit (no libc)
+#   test/e2e/<name>.calls    one call per line: "<function> [int arg...]"
+#   test/e2e/<name>.expect   optional: the output njvm-run must produce, in its
+#                            own format ("<function> <args> -> <value>")
 
 # The driver that gives the expected answers declares every call as
 # int(int, ...), because the call table carries nothing but integers. That
@@ -58,7 +62,14 @@ for src in $cases; do
     continue
   fi
 
-  # The host oracle: a driver generated from the same call table.
+  expect="$here/e2e/$name.expect"
+  native_out="$work/$name-native.out"
+
+  # The host oracle: a driver generated from the same call table. A case with an
+  # .expect file is not portable C and is not built for the host at all.
+  if [ -f "$expect" ]; then
+    native_out="$expect"
+  else
   decls="$work/$name-decls.c"
   body="$work/$name-body.c"
   labels="$work/$name-labels.txt"
@@ -112,6 +123,7 @@ for src in $cases; do
     failed_cases="$failed_cases $name"
     continue
   fi
+  fi
 
   # One instance runs every call in file order, exactly as the C driver does,
   # so a call sees what an earlier call wrote.
@@ -125,12 +137,21 @@ for src in $cases; do
     failed_cases="$failed_cases $name"
     continue
   fi
-  if diff -u "$work/$name-native.out" "$wnjr_out" > "$work/$name.diff"; then
-    n=$(wc -l < "$labels" | tr -d ' ')
-    echo "[PASS] $name: $n/$n calls agree with the host compiler"
+  if diff -u "$native_out" "$wnjr_out" > "$work/$name.diff"; then
+    if [ -f "$expect" ]; then
+      n=$(wc -l < "$expect" | tr -d ' ')
+      echo "[PASS] $name: $n/$n results match $name.expect"
+    else
+      n=$(wc -l < "$labels" | tr -d ' ')
+      echo "[PASS] $name: $n/$n calls agree with the host compiler"
+    fi
     pass=$((pass + 1))
   else
-    echo "[FAIL] $name: differs from the host compiler"
+    if [ -f "$expect" ]; then
+      echo "[FAIL] $name: differs from $name.expect"
+    else
+      echo "[FAIL] $name: differs from the host compiler"
+    fi
     sed 's/^/        /' "$work/$name.diff"
     fail=$((fail + 1))
     failed_cases="$failed_cases $name"
