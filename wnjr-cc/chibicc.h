@@ -161,6 +161,9 @@ struct Obj {
   Node *body;
   Obj *locals;
   Obj *va_area;
+  // Where a variadic function keeps the argument buffer pointer the caller
+  // passed as its last parameter. See include/stdarg.h.
+  Obj *va_buf;
   Obj *alloca_bottom;
   int stack_size;
 
@@ -265,6 +268,10 @@ struct Node {
   Node *args;
   bool pass_by_stack;
   Obj *ret_buffer;
+  // A variadic call marshals its "..." arguments into this local buffer and
+  // passes its address as one more argument. NULL when the call passes nothing
+  // through "...". See parse.c:funcall and codegen.c:gen_call.
+  Obj *va_buf;
 
   // Goto or labeled statement, or labels-as-values
   char *label;

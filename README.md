@@ -144,16 +144,27 @@ Everything else is still an error: an attribute dropped on the floor is a wrong
 program a long way from its cause. `_Static_assert` is checked at file scope and
 inside functions.
 
-`va_list` is a pointer into the save area a variadic call leaves behind, and the
-type belongs to the frontend, so that `<stdarg.h>`'s spelling and wasi-libc's
-`typedef __builtin_va_list va_list` name the same type. The `__builtin_va_*`
-spellings musl's `printf` uses expand to the same four operations.
+A variadic function's `...` arguments travel in memory, because a wasm signature
+is fixed and there is no register file to spill. The caller lays them out in a
+buffer of its own frame — one eight-byte slot each, a wider alignment padding
+first, an address zero-extended into its slot — and passes that buffer's address
+as one more parameter after the declared ones. The callee's prologue saves the
+pointer, and `va_start` builds a `va_list` that reads only that memory path: both
+of the register counters start spent (`gp_offset` 48, `fp_offset` 112) and
+`reg_save_area` is null, so every `va_arg` walks the buffer in order.
+
+`va_list` is a struct, and the type belongs to the frontend, so that
+`<stdarg.h>`'s spelling and wasi-libc's `typedef __builtin_va_list va_list` name
+the same type. It is a struct rather than a pointer because `va_list ap;` has to
+be storage for a cursor: `va_copy` is then a struct copy with a position of its
+own, which is what musl's `vfprintf` relies on when it copies its argument list to
+walk the format twice and then passes the copy by value to `printf_core`. The
+`__builtin_va_*` spellings musl uses expand to the same four operations.
 
 Not yet: VLAs, bitfields, `_Atomic`, `asm`, the wasm and overflow builtins
 (`__builtin_trap`, `__builtin_clz`, `__builtin_wasm_memory_grow`,
-`__builtin_add_overflow`, …), `__sync_*` atomics, aliases, and the calling
-convention for a variadic call: nothing fills the save area yet, so a function
-that reads its `...` arguments runs but reads nothing. libc itself is next.
+`__builtin_add_overflow`, …), `__sync_*` atomics, aliases, and a struct or union
+passed through `...`. libc itself is next.
 
 The type table is chibicc's LP64 one, so `long` and a pointer are eight bytes
 wide; only the low 32 bits of a pointer slot are an address, and the upper half

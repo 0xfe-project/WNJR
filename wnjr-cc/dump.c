@@ -251,6 +251,15 @@ static void dump_obj(Obj *obj) {
     }
     // locals are prepended while parsing, so the list is newest-first.
     for (Obj *l = obj->locals; l; l = l->next) {
+      // __va_buf__ holds the address of the caller's argument buffer and
+      // __va_args__ is that buffer at a call site. Both are this frontend's own
+      // machinery — chibicc passes variadic arguments in registers and va_arg
+      // walks the save area — so printing them would make every variadic
+      // function differ from chibicc's dump for a reason that is not about the C
+      // being parsed.
+      if (l->name &&
+          (!strcmp(l->name, "__va_buf__") || !strcmp(l->name, "__va_args__")))
+        continue;
       indent(1);
       dump_var_header(l, "local");
       fprintf(out, "\n");

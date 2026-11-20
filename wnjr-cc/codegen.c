@@ -195,6 +195,17 @@ static int sig_cap;
 // then needs the function-pointer table and the element segment that fills it.
 static bool indirect_used;
 
+// The wasm type of parameter j of a C function type, under this frontend's two
+// conventions: a struct or union return is one hidden address first, and a
+// variadic function takes the caller's argument buffer last.
+static const char *param_ir_type(Type *fnty, bool sret, int j) {
+  int idx = sret ? 1 : 0;
+  for (Type *p = fnty->params; p; p = p->next, idx++)
+    if (idx == j)
+      return is_aggregate(p) ? PTR_MEM : ir_ty(p);
+  return PTR_MEM;
+}
+
 // The index in `Module::types` of this function type, adding it if new.
 static uint32_t sig_of(Token *tok, Type *fnty) {
   if (!fnty || fnty->kind != TY_FUNC)
@@ -210,6 +221,10 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
       unsupported(tok, "a parameter of this type through a function pointer");
     n++;
   }
+  // A variadic callee takes the argument buffer's address as one more
+  // parameter, so that its signature matches what gen_call passes.
+  if (fnty->is_variadic)
+    n++;
   const char *result = NULL;
   if (!sret && fnty->return_ty->kind != TY_VOID) {
     if (!is_scalar(fnty->return_ty))
@@ -224,9 +239,8 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
     if (result && strcmp(result, s->result))
       continue;
     bool same = true;
-    Type *p = fnty->params;
-    for (int j = 0; j < n && same; j++, p = p->next)
-      if (strcmp(s->params[j], ir_ty(p)))
+    for (int j = 0; j < n && same; j++)
+      if (strcmp(s->params[j], param_ir_type(fnty, sret, j)))
         same = false;
     if (same)
       return (uint32_t)k;
@@ -249,6 +263,8 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
     s->params[i++] = PTR_MEM;
   for (Type *p = fnty->params; p; p = p->next)
     s->params[i++] = is_aggregate(p) ? PTR_MEM : ir_ty(p);
+  if (fnty->is_variadic)
+    s->params[i++] = PTR_MEM;
   return (uint32_t)nsigs++;
 }
 
@@ -522,6 +538,21 @@ static uint32_t func_index(Obj *fn) {
   return (uint32_t)fn->offset;
 }
 
+// One "..." argument, stored into the caller's buffer at `off`. The callee reads
+// it back with va_arg, which walks the same slots in the same order: a slot is
+// rounded to eight bytes, and a wider alignment pads before it.
+static void store_va_arg(Obj *vb, int off, Type *ty, E *val) {
+  E *addr = e_addr(frame_addr(vb->offset), off);
+  // An address — a pointer, or an array that decayed to one — is 32 bits wide in
+  // a 64-bit slot, and va_arg reads the whole slot as a pointer, so the upper
+  // half has to be a defined zero.
+  if (!strcmp(ir_ty(ty), PTR_MEM)) {
+    OP(nj_op_store(out, "I64", addr, e_convert(PTR_MEM, "I64", val), 0, 0));
+    return;
+  }
+  OP(nj_op_store(out, mem_ty(ty), addr, val, 0, 0));
+}
+
 static E *gen_call(Node *node) {
   Node *callee = node->lhs;
   // A direct call names a function of this translation unit; anything else is
@@ -550,6 +581,14 @@ static E *gen_call(Node *node) {
   E **args = calloc((size_t)nargs + 1, sizeof(E *));
   if (!args)
     error("out of memory");
+  // A variadic callee's "..." arguments are not parameters: the caller lays them
+  // out in a buffer of its own frame and passes that buffer's address as the
+  // last argument (parse.c:funcall made the buffer a local).
+  bool variadic = node->func_ty && node->func_ty->is_variadic;
+  Obj *vb = variadic ? node->va_buf : NULL;
+  Type *declared = node->func_ty ? node->func_ty->params : NULL;
+  int slot = 0;
+
   int i = 0;
   if (rb)
     args[i++] = e_i32(rb->offset);
@@ -560,8 +599,23 @@ static E *gen_call(Node *node) {
     // value of the expression is already that address.
     if (!is_scalar(arg->ty) && !is_aggregate(arg->ty))
       unsupported(arg->tok, "a variable-length array argument");
-    args[i++] = gen_expr(arg);
+    E *val = gen_expr(arg);
+    if (declared) {
+      args[i++] = val;
+      declared = declared->next;
+      continue;
+    }
+    // Everything from here on goes through "...".
+    if (!vb)
+      unsupported(arg->tok, "an argument with no parameter to travel in");
+    int align = arg->ty->align < 8 ? 8 : arg->ty->align;
+    slot = align_to(slot, align);
+    store_va_arg(vb, slot, arg->ty, val);
+    slot += align_to(arg->ty->size, 8);
+    e_free(val);
   }
+  if (variadic)
+    args[i++] = vb ? frame_addr(vb->offset) : e_i32(0);
   size_t narg = (size_t)i;
 
   // The arguments are evaluated before the callee (erase.rs documents that
@@ -1024,8 +1078,21 @@ static void emit_function(Obj *fn) {
     add_local(PTR_MEM);
     arg_base = 1;
   }
-  for (Obj *p = fn->params; p; p = p->next)
+  // chibicc keeps a local for the hidden return-buffer pointer at the head of
+  // fn->params when the aggregate is wider than 16 bytes. The parameter itself is
+  // wasm parameter 0 (added above), so counting the local again would give the
+  // function one more parameter than any caller passes.
+  Obj *first_param = fn->params;
+  if (sret && fn->ty->return_ty->size > 16 && first_param)
+    first_param = first_param->next;
+  for (Obj *p = first_param; p; p = p->next)
     add_local(is_aggregate(p->ty) ? PTR_MEM : ir_ty(p->ty));
+  // A variadic function's last wasm parameter is the address of the caller's
+  // argument buffer; a wasm signature is fixed, so the "..." arguments cannot
+  // be parameters of their own.
+  int va_param = -1;
+  if (fn->ty->is_variadic)
+    va_param = add_local(PTR_MEM);
   nparams = nlocals;
   fp_local = new_temp("I32");
 
@@ -1045,7 +1112,7 @@ static void emit_function(Obj *fn) {
     OP(nj_op_localset(out, (uint32_t)fp_local, e_global((uint32_t)sp_global, "I32")));
   }
   int i = arg_base;
-  for (Obj *p = fn->params; p; p = p->next) {
+  for (Obj *p = first_param; p; p = p->next) {
     if (is_aggregate(p->ty)) {
       // The caller passed the address of its own object; C says the callee
       // gets a copy, so the copy happens here. That is also why &param is a
@@ -1059,6 +1126,9 @@ static void emit_function(Obj *fn) {
     }
     i++;
   }
+  if (va_param >= 0)
+    OP(nj_op_store(out, PTR_MEM, frame_addr(fn->va_buf->offset),
+                   e_local((uint32_t)va_param, PTR_MEM), 0, 0));
 
   gen_stmt(fn->body);
 

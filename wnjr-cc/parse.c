@@ -1596,7 +1596,11 @@ static Type *builtin_va_list_type(void) {
   elem->size = align_to(cur->offset + cur->ty->size, 8);
   elem->align = 8;
 
-  ty = pointer_to(elem);
+  // The type is the struct, not a pointer to it: "va_list ap;" has to be
+  // storage for a cursor, so that va_copy is a struct copy with an independent
+  // position. musl's vfprintf copies its va_list to walk the format twice, and
+  // a pointer would make both copies share one position.
+  ty = elem;
   return ty;
 }
 
@@ -3176,6 +3180,37 @@ static Node *funcall(Token **rest, Token *tok, Node *fn) {
   // to allocate a space for the return value.
   if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION)
     node->ret_buffer = new_lvar("", node->ty);
+
+  // The "..." arguments travel in memory: the caller lays them out in a buffer
+  // it owns and passes the address as one more trailing parameter. The buffer
+  // is a local of this function, so it lives in this frame, and codegen.c lays
+  // the arguments out in it. The size below is an upper bound (one slot of at
+  // most 16 bytes plus at most 8 bytes of alignment per argument) because the
+  // exact layout rule belongs next to the stores that use it.
+  if (ty->is_variadic) {
+    int nextra = 0;
+    int bytes = 16;
+    Type *p = ty->params;
+    for (Node *arg = node->args; arg; arg = arg->next) {
+      if (p) {
+        p = p->next;
+        continue;
+      }
+      // An array decays to its address here, as it does everywhere else; a
+      // struct or union through "..." has no convention yet.
+      if (arg->ty->kind == TY_STRUCT || arg->ty->kind == TY_UNION ||
+          arg->ty->kind == TY_VLA)
+        error_tok(arg->tok, "a struct, union or variable-length array passed through \"...\"");
+      nextra++;
+      bytes += 16 + align_to(arg->ty->size, 8);
+    }
+    if (nextra) {
+      node->va_buf = new_lvar("__va_args__", array_of(ty_char, bytes));
+      // Slots are read back at their natural alignment, and a long double wants
+      // 16. A char array is aligned to 1 on its own.
+      node->va_buf->align = 16;
+    }
+  }
   return node;
 }
 
@@ -3533,8 +3568,13 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
 
   fn->params = locals;
 
-  if (ty->is_variadic)
+  if (ty->is_variadic) {
     fn->va_area = new_lvar("__va_area__", array_of(ty_char, 136));
+    // The caller marshals its "..." arguments into a buffer it owns and passes
+    // the address as one more trailing parameter, because a wasm signature is
+    // fixed. That pointer lands here in the prologue, and va_start reads it.
+    fn->va_buf = new_lvar("__va_buf__", pointer_to(ty_char));
+  }
   fn->alloca_bottom = new_lvar("__alloca_size__", pointer_to(ty_char));
 
   tok = skip(tok, "{");
