@@ -1,4 +1,4 @@
-// wnjr-cc: C front-end for WNJR (tokenize/preprocess only)
+// wnjr-cc: C front-end for WNJR (modes: -E, --dump-ast)
 // Based on chibicc by Rui Ueyama (MIT license, see LICENSE)
 
 #include "chibicc.h"
@@ -9,9 +9,11 @@ bool opt_fpic;
 char *base_file;
 
 static char *opt_o;
+static bool opt_E;
+static bool opt_dump_ast;
 
 static void usage(int status) {
-  fprintf(stderr, "wnjr-cc -E <file>\n");
+  fprintf(stderr, "wnjr-cc (-E | --dump-ast) [-o <path>] [-I<dir>] [-D<m>] <file>\n");
   exit(status);
 }
 
@@ -83,8 +85,15 @@ static void parse_args(int argc, char **argv) {
       continue;
     }
 
-    if (!strcmp(argv[i], "-E"))
-      continue; // always on
+    if (!strcmp(argv[i], "-E")) {
+      opt_E = true;
+      continue;
+    }
+
+    if (!strcmp(argv[i], "--dump-ast")) {
+      opt_dump_ast = true;
+      continue;
+    }
 
     if (!strcmp(argv[i], "-I")) {
       if (i + 1 >= argc)
@@ -137,6 +146,8 @@ static void parse_args(int argc, char **argv) {
 
   if (!input_path)
     error("no input files");
+  if (opt_E == opt_dump_ast)
+    error("exactly one of -E or --dump-ast is required");
 }
 
 int main(int argc, char **argv) {
@@ -149,11 +160,22 @@ int main(int argc, char **argv) {
   add_default_include_paths(argv[0]);
 
   Token *tok = tokenize_file(input_path);
+  if (!tok)
+    error("%s: cannot open file: %s", input_path, strerror(errno));
   tok = preprocess(tok);
 
   if (opt_o && !freopen(opt_o, "w", stdout))
     error("cannot open output file: %s: %s", opt_o, strerror(errno));
 
-  print_tokens(tok);
+  if (opt_E) {
+    print_tokens(tok);
+    return 0;
+  }
+
+  Obj *prog = parse(tok);
+  FILE *out = open_file(opt_o);
+  dump_ast(prog, out);
+  if (out != stdout)
+    fclose(out);
   return 0;
 }

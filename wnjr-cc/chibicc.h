@@ -119,7 +119,183 @@ void undef_macro(char *name);
 Token *preprocess(Token *tok);
 
 //
-// type.c (minimal subset needed by tokenize/preprocess)
+// parse.c
+//
+
+// Variable or function
+typedef struct Obj Obj;
+struct Obj {
+  Obj *next;
+  char *name;    // Variable name
+  Type *ty;      // Type
+  Token *tok;    // representative token
+  bool is_local; // local or global/function
+  int align;     // alignment
+
+  // Local variable
+  int offset;
+
+  // Global variable or function
+  bool is_function;
+  bool is_definition;
+  bool is_static;
+
+  // Global variable
+  bool is_tentative;
+  bool is_tls;
+  char *init_data;
+  Relocation *rel;
+
+  // Function
+  bool is_inline;
+  Obj *params;
+  Node *body;
+  Obj *locals;
+  Obj *va_area;
+  Obj *alloca_bottom;
+  int stack_size;
+
+  // Static inline function
+  bool is_live;
+  bool is_root;
+  StringArray refs;
+};
+
+// Global variable can be initialized either by a constant expression
+// or a pointer to another global variable. This struct represents the
+// latter.
+typedef struct Relocation Relocation;
+struct Relocation {
+  Relocation *next;
+  int offset;
+  char **label;
+  long addend;
+};
+
+// AST node
+typedef enum {
+  ND_NULL_EXPR, // Do nothing
+  ND_ADD,       // +
+  ND_SUB,       // -
+  ND_MUL,       // *
+  ND_DIV,       // /
+  ND_NEG,       // unary -
+  ND_MOD,       // %
+  ND_BITAND,    // &
+  ND_BITOR,     // |
+  ND_BITXOR,    // ^
+  ND_SHL,       // <<
+  ND_SHR,       // >>
+  ND_EQ,        // ==
+  ND_NE,        // !=
+  ND_LT,        // <
+  ND_LE,        // <=
+  ND_ASSIGN,    // =
+  ND_COND,      // ?:
+  ND_COMMA,     // ,
+  ND_MEMBER,    // . (struct member access)
+  ND_ADDR,      // unary &
+  ND_DEREF,     // unary *
+  ND_NOT,       // !
+  ND_BITNOT,    // ~
+  ND_LOGAND,    // &&
+  ND_LOGOR,     // ||
+  ND_RETURN,    // "return"
+  ND_IF,        // "if"
+  ND_FOR,       // "for" or "while"
+  ND_DO,        // "do"
+  ND_SWITCH,    // "switch"
+  ND_CASE,      // "case"
+  ND_BLOCK,     // { ... }
+  ND_GOTO,      // "goto"
+  ND_GOTO_EXPR, // "goto" labels-as-values
+  ND_LABEL,     // Labeled statement
+  ND_LABEL_VAL, // [GNU] Labels-as-values
+  ND_FUNCALL,   // Function call
+  ND_EXPR_STMT, // Expression statement
+  ND_STMT_EXPR, // Statement expression
+  ND_VAR,       // Variable
+  ND_VLA_PTR,   // VLA designator
+  ND_NUM,       // Integer
+  ND_CAST,      // Type cast
+  ND_MEMZERO,   // Zero-clear a stack variable
+  ND_ASM,       // "asm"
+  ND_CAS,       // Atomic compare-and-swap
+  ND_EXCH,      // Atomic exchange
+} NodeKind;
+
+// AST node type
+struct Node {
+  NodeKind kind; // Node kind
+  Node *next;    // Next node
+  Type *ty;      // Type, e.g. int or pointer to int
+  Token *tok;    // Representative token
+
+  Node *lhs;     // Left-hand side
+  Node *rhs;     // Right-hand side
+
+  // "if" or "for" statement
+  Node *cond;
+  Node *then;
+  Node *els;
+  Node *init;
+  Node *inc;
+
+  // "break" and "continue" labels
+  char *brk_label;
+  char *cont_label;
+
+  // Block or statement expression
+  Node *body;
+
+  // Struct member access
+  Member *member;
+
+  // Function call
+  Type *func_ty;
+  Node *args;
+  bool pass_by_stack;
+  Obj *ret_buffer;
+
+  // Goto or labeled statement, or labels-as-values
+  char *label;
+  char *unique_label;
+  Node *goto_next;
+
+  // Switch
+  Node *case_next;
+  Node *default_case;
+
+  // Case
+  long begin;
+  long end;
+
+  // "asm" string literal
+  char *asm_str;
+
+  // Atomic compare-and-swap
+  Node *cas_addr;
+  Node *cas_old;
+  Node *cas_new;
+
+  // Atomic op= operators
+  Obj *atomic_addr;
+  Node *atomic_expr;
+
+  // Variable
+  Obj *var;
+
+  // Numeric literal
+  int64_t val;
+  long double fval;
+};
+
+Node *new_cast(Node *expr, Type *ty);
+int64_t const_expr(Token **rest, Token *tok);
+Obj *parse(Token *tok);
+
+//
+// type.c
 //
 
 typedef enum {
@@ -168,7 +344,7 @@ struct Type {
 
   // Variable-length array
   Node *vla_len; // # of elements
-  void *vla_size; // sizeof() value (changed from Obj* to void* for minimal header)
+  Obj *vla_size; // sizeof() value
 
   // Struct
   Member *members;
@@ -180,6 +356,22 @@ struct Type {
   Type *params;
   bool is_variadic;
   Type *next;
+};
+
+// Struct member
+struct Member {
+  Member *next;
+  Type *ty;
+  Token *tok; // for error message
+  Token *name;
+  int idx;
+  int align;
+  int offset;
+
+  // Bitfield
+  bool is_bitfield;
+  int bit_offset;
+  int bit_width;
 };
 
 extern Type *ty_void;
@@ -201,13 +393,28 @@ extern Type *ty_ldouble;
 
 bool is_integer(Type *ty);
 bool is_flonum(Type *ty);
+bool is_numeric(Type *ty);
+bool is_compatible(Type *t1, Type *t2);
+Type *copy_type(Type *ty);
+Type *pointer_to(Type *base);
+Type *func_type(Type *return_ty);
 Type *array_of(Type *base, int size);
+Type *vla_of(Type *base, Node *expr);
+Type *enum_type(void);
+Type *struct_type(void);
+void add_type(Node *node);
 
 //
-// parse.c (stub for preprocessor; only needed if preprocess sees #if)
+// align.c (wnjr-cc: align_to lived in codegen.c, which is not ported)
 //
 
-int64_t const_expr(Token **rest, Token *tok);
+int align_to(int n, int align);
+
+//
+// dump.c (wnjr-cc: --dump-ast)
+//
+
+void dump_ast(Obj *prog, FILE *out);
 
 //
 // unicode.c
