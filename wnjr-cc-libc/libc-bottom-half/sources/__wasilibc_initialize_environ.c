@@ -44,13 +44,21 @@ void __wasilibc_initialize_environ(void) {
 #if defined(__wasip1__)
   // Get the sizes of the arrays we'll have to create to copy in the
   // environment.
-  size_t environ_count;
-  size_t environ_buf_size;
+  //
+  // These are __wasi_size_t, which is four bytes: that is the width of a
+  // length on the other side of the import, and the host writes exactly that
+  // much. Reading into a size_t here leaves its upper half whatever the stack
+  // held, and an unterminated length makes a malloc the size of the address
+  // space. Widen after the call, never before it.
+  __wasi_size_t environ_count_abi = 0;
+  __wasi_size_t environ_buf_size_abi = 0;
   __wasi_errno_t err =
-      __wasi_environ_sizes_get(&environ_count, &environ_buf_size);
+      __wasi_environ_sizes_get(&environ_count_abi, &environ_buf_size_abi);
   if (err != __WASI_ERRNO_SUCCESS) {
     goto oserr;
   }
+  size_t environ_count = environ_count_abi;
+  size_t environ_buf_size = environ_buf_size_abi;
   if (environ_count == 0) {
     __wasilibc_environ = empty_environ;
     return;
@@ -78,9 +86,22 @@ void __wasilibc_initialize_environ(void) {
 
   // Fill the environment chars, and the `__wasilibc_environ` array with
   // pointers into those chars.
-  // TODO: Remove the casts on `environ_ptrs` and `environ_buf` once the witx is
-  // updated with char8 support.
-  err = __wasi_environ_get((uint8_t **)environ_ptrs, (uint8_t *)environ_buf);
+  //
+  // The pointers come back four bytes each, packed, because an address is four
+  // bytes on the other side. Handing the host a char** would interleave them
+  // with the halves of the pointer slots here, so collect them at their own
+  // width and widen.
+  uint32_t *environ_ptrs_abi = calloc(num_ptrs, sizeof(uint32_t));
+  if (environ_ptrs_abi == NULL) {
+    free(environ_buf);
+    free(environ_ptrs);
+    goto software;
+  }
+  err = __wasi_environ_get((uint8_t **)environ_ptrs_abi, (uint8_t *)environ_buf);
+  if (err == __WASI_ERRNO_SUCCESS)
+    for (size_t i = 0; i < environ_count; i++)
+      environ_ptrs[i] = (char *)(uintptr_t)environ_ptrs_abi[i];
+  free(environ_ptrs_abi);
   if (err != __WASI_ERRNO_SUCCESS) {
     free(environ_buf);
     free(environ_ptrs);
