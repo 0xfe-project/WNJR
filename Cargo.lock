@@ -659,6 +659,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wnjr-njvm-e2e"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wnjr-core",
+ "wnjr-njvm-io",
+]
+
+[[package]]
 name = "wnjr-njvm-io"
 version = "0.7.0"
 dependencies = [
