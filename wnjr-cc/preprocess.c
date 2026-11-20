@@ -1109,6 +1109,35 @@ void init_macros(void) {
   define_macro("__ORDER_PDP_ENDIAN__", "3412");
   define_macro("__BYTE_ORDER__", "1234");
 
+  // The limits, which <bits/alltypes.h> derives its own from (__LONG_MAX is
+  // __LONG_MAX__ there). A compiler that leaves them out makes every header that
+  // uses one expand it to its own name and fail as an undefined variable.
+  define_macro("__CHAR_BIT__", "8");
+  define_macro("__SCHAR_MAX__", "127");
+  define_macro("__SHRT_MAX__", "32767");
+  define_macro("__INT_MAX__", "2147483647");
+  define_macro("__LONG_MAX__", "9223372036854775807L");
+  define_macro("__LONG_LONG_MAX__", "9223372036854775807LL");
+  define_macro("__WCHAR_MAX__", "4294967295U");
+  define_macro("__WCHAR_MIN__", "0U");
+  define_macro("__WINT_MAX__", "4294967295U");
+  define_macro("__WINT_MIN__", "0U");
+  define_macro("__SIZE_MAX__", "18446744073709551615UL");
+  define_macro("__PTRDIFF_MAX__", "9223372036854775807L");
+  define_macro("__INTMAX_MAX__", "9223372036854775807L");
+  define_macro("__UINTMAX_MAX__", "18446744073709551615UL");
+  define_macro("__INTPTR_MAX__", "9223372036854775807L");
+  define_macro("__UINTPTR_MAX__", "18446744073709551615UL");
+  define_macro("__INTMAX_TYPE__", "long");
+  define_macro("__UINTMAX_TYPE__", "unsigned long");
+  define_macro("__INTPTR_TYPE__", "long");
+  define_macro("__UINTPTR_TYPE__", "unsigned long");
+  define_macro("__PTRDIFF_TYPE__", "long");
+  define_macro("__WCHAR_TYPE__", "unsigned int");
+  define_macro("__WINT_TYPE__", "unsigned int");
+  define_macro("__CHAR16_TYPE__", "unsigned short");
+  define_macro("__CHAR32_TYPE__", "unsigned int");
+
   add_builtin("__FILE__", file_macro);
   add_builtin("__LINE__", line_macro);
   add_builtin("__COUNTER__", counter_macro);

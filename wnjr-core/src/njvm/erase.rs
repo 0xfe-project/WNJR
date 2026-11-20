@@ -113,6 +113,10 @@ pub enum EraseErrorKind {
     ArityMismatch { expected: usize, got: usize },
     /// A call used as an expression must have exactly one result.
     CallResultArity { results: usize },
+    /// An atomic op missing an operand it needs, or carrying one it does not.
+    AtomicShape { op: AtomicOp },
+    /// An access width wasm has no atomic instruction for.
+    AtomicWidth { width: u8 },
 }
 
 impl core::fmt::Display for EraseError {
@@ -305,6 +309,147 @@ impl Cx<'_, '_> {
         i
     }
 
+    /// One atomic op: operands in wasm's order, result into `dest`.
+    ///
+    /// The width picks both the instruction and the value class: up to four
+    /// bytes is an i32 access, eight is an i64 one. wasm has no signed narrow
+    /// atomic, only the `_u` forms, so a narrow access yields an unsigned value;
+    /// the frontend normalizes it the way it does for a `Load`.
+    #[allow(clippy::too_many_arguments)]
+    fn atomic(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        op: AtomicOp,
+        width: u8,
+        offset: u32,
+        ptr: Option<&Expr>,
+        val: Option<&Expr>,
+        replacement: Option<&Expr>,
+        dest: Option<u32>,
+    ) -> Result<(), EraseErrorKind> {
+        if op == AtomicOp::Fence {
+            if ptr.is_some() || val.is_some() || replacement.is_some() || dest.is_some() {
+                return Err(EraseErrorKind::AtomicShape { op });
+            }
+            s.atomic_fence();
+            return Ok(());
+        }
+
+        let ptr = ptr.ok_or(EraseErrorKind::AtomicShape { op })?;
+        // align is the exponent: a 4-byte access aligns to 4.
+        let m = memarg(offset, (width as u32).trailing_zeros());
+        let vt = match width {
+            1 | 2 | 4 => ValType::I32,
+            8 => ValType::I64,
+            _ => return Err(EraseErrorKind::AtomicWidth { width }),
+        };
+
+        // Address first, then the op's own operand, because wasm pops the last
+        // pushed operand first.
+        self.addr(s, ptr)?;
+        match (op, width) {
+            // A load takes only the address; a store also takes the value.
+            (AtomicOp::Load, _) => {}
+            (AtomicOp::Store, _) => {
+                let v = val.ok_or(EraseErrorKind::AtomicShape { op })?;
+                self.expect_class(s, v, vt)?;
+            }
+            (AtomicOp::Add, _)
+            | (AtomicOp::Sub, _)
+            | (AtomicOp::And, _)
+            | (AtomicOp::Or, _)
+            | (AtomicOp::Xor, _)
+            | (AtomicOp::Xchg, _)
+            | (AtomicOp::Notify, _) => {
+                let v = val.ok_or(EraseErrorKind::AtomicShape { op })?;
+                self.expect_class(s, v, vt)?;
+            }
+            (AtomicOp::Cmpxchg, _) => {
+                let e = val.ok_or(EraseErrorKind::AtomicShape { op })?;
+                self.expect_class(s, e, vt)?;
+                let r = replacement.ok_or(EraseErrorKind::AtomicShape { op })?;
+                self.expect_class(s, r, vt)?;
+            }
+            (AtomicOp::Wait, _) => {
+                let e = val.ok_or(EraseErrorKind::AtomicShape { op })?;
+                self.expect_class(s, e, vt)?;
+                // The timeout is an i64 nanosecond count in both waits.
+                let t = replacement.ok_or(EraseErrorKind::AtomicShape { op })?;
+                self.expect_class(s, t, ValType::I64)?;
+            }
+            (AtomicOp::Fence, _) => unreachable!("fence returned above"),
+        }
+
+        match (op, width) {
+            (AtomicOp::Load, 1) => { s.i32_atomic_load8_u(m); }
+            (AtomicOp::Load, 2) => { s.i32_atomic_load16_u(m); }
+            (AtomicOp::Load, 4) => { s.i32_atomic_load(m); }
+            (AtomicOp::Load, 8) => { s.i64_atomic_load(m); }
+            (AtomicOp::Store, 1) => { s.i32_atomic_store8(m); }
+            (AtomicOp::Store, 2) => { s.i32_atomic_store16(m); }
+            (AtomicOp::Store, 4) => { s.i32_atomic_store(m); }
+            (AtomicOp::Store, 8) => { s.i64_atomic_store(m); }
+            (AtomicOp::Add, 1) => { s.i32_atomic_rmw8_add_u(m); }
+            (AtomicOp::Add, 2) => { s.i32_atomic_rmw16_add_u(m); }
+            (AtomicOp::Add, 4) => { s.i32_atomic_rmw_add(m); }
+            (AtomicOp::Add, 8) => { s.i64_atomic_rmw_add(m); }
+            (AtomicOp::Sub, 1) => { s.i32_atomic_rmw8_sub_u(m); }
+            (AtomicOp::Sub, 2) => { s.i32_atomic_rmw16_sub_u(m); }
+            (AtomicOp::Sub, 4) => { s.i32_atomic_rmw_sub(m); }
+            (AtomicOp::Sub, 8) => { s.i64_atomic_rmw_sub(m); }
+            (AtomicOp::And, 1) => { s.i32_atomic_rmw8_and_u(m); }
+            (AtomicOp::And, 2) => { s.i32_atomic_rmw16_and_u(m); }
+            (AtomicOp::And, 4) => { s.i32_atomic_rmw_and(m); }
+            (AtomicOp::And, 8) => { s.i64_atomic_rmw_and(m); }
+            (AtomicOp::Or, 1) => { s.i32_atomic_rmw8_or_u(m); }
+            (AtomicOp::Or, 2) => { s.i32_atomic_rmw16_or_u(m); }
+            (AtomicOp::Or, 4) => { s.i32_atomic_rmw_or(m); }
+            (AtomicOp::Or, 8) => { s.i64_atomic_rmw_or(m); }
+            (AtomicOp::Xor, 1) => { s.i32_atomic_rmw8_xor_u(m); }
+            (AtomicOp::Xor, 2) => { s.i32_atomic_rmw16_xor_u(m); }
+            (AtomicOp::Xor, 4) => { s.i32_atomic_rmw_xor(m); }
+            (AtomicOp::Xor, 8) => { s.i64_atomic_rmw_xor(m); }
+            (AtomicOp::Xchg, 1) => { s.i32_atomic_rmw8_xchg_u(m); }
+            (AtomicOp::Xchg, 2) => { s.i32_atomic_rmw16_xchg_u(m); }
+            (AtomicOp::Xchg, 4) => { s.i32_atomic_rmw_xchg(m); }
+            (AtomicOp::Xchg, 8) => { s.i64_atomic_rmw_xchg(m); }
+            (AtomicOp::Cmpxchg, 1) => { s.i32_atomic_rmw8_cmpxchg_u(m); }
+            (AtomicOp::Cmpxchg, 2) => { s.i32_atomic_rmw16_cmpxchg_u(m); }
+            (AtomicOp::Cmpxchg, 4) => { s.i32_atomic_rmw_cmpxchg(m); }
+            (AtomicOp::Cmpxchg, 8) => { s.i64_atomic_rmw_cmpxchg(m); }
+            (AtomicOp::Wait, 4) => { s.memory_atomic_wait32(m); }
+            (AtomicOp::Wait, 8) => { s.memory_atomic_wait64(m); }
+            (AtomicOp::Notify, 4) => { s.memory_atomic_notify(m); }
+            (AtomicOp::Notify, 8) => return Err(EraseErrorKind::AtomicWidth { width }),
+            (AtomicOp::Fence, _) => unreachable!("fence returned above"),
+            // The combinations wasm does not have: a 64-bit operand with a
+            // narrower access (i64.atomic.rmw8.*.u). NJVM-IR keeps width and
+            // value class separate, so these are expressible but have no
+            // frontend and no instruction here yet.
+            (op, width) => {
+                let _ = op;
+                return Err(EraseErrorKind::AtomicWidth { width });
+            }
+        }
+
+        if op == AtomicOp::Store {
+            return Ok(());
+        }
+        match dest {
+            Some(d) => {
+                let have = self.local(d)?;
+                if class(have) != vt {
+                    return Err(EraseErrorKind::ClassMismatch { expected: vt, got: have });
+                }
+                s.local_set(d);
+            }
+            None => {
+                s.drop();
+            }
+        }
+        Ok(())
+    }
+
     /// Lower a memory address and leave a memory0 i32 offset on the stack.
     ///
     /// gc pointer tagging (#634): chibicc is LP64, so a pointer the frontend
@@ -479,6 +624,15 @@ impl Cx<'_, '_> {
                 self.expect(s, val, t)?;
                 s.local_tee(*idx);
                 Ok(t)
+            }
+            Expr::MemorySize => {
+                s.memory_size(0);
+                Ok(Type::I32)
+            }
+            Expr::MemoryGrow { delta } => {
+                self.expect_class(s, delta, ValType::I32)?;
+                s.memory_grow(0);
+                Ok(Type::I32)
             }
             Expr::Call { func_idx, args } => {
                 let r = self.call(s, *func_idx, args)?;
@@ -1097,15 +1251,16 @@ impl Cx<'_, '_> {
             Op::Longjmp { .. } => return Err(EraseErrorKind::Unsupported { op: "Longjmp" }),
             Op::Await { .. } => return Err(EraseErrorKind::Unsupported { op: "Await" }),
             Op::Yield { .. } => return Err(EraseErrorKind::Unsupported { op: "Yield" }),
-            Op::Atomic { op: AtomicOp::Fence, .. } => {
-                s.atomic_fence();
-            }
-            Op::Atomic { .. } => {
-                return Err(EraseErrorKind::NotImplemented {
-                    op: "Atomic",
-                    reason: "only Fence: Op::Atomic carries no pointer/value operands yet, so load/store/rmw/wait/notify have nothing to lower",
-                })
-            }
+            Op::Atomic { op, width, offset, ptr, val, replacement, dest } => self.atomic(
+                s,
+                *op,
+                *width,
+                *offset,
+                ptr.as_ref(),
+                val.as_ref(),
+                replacement.as_ref(),
+                *dest,
+            )?,
         }
         Ok(())
     }

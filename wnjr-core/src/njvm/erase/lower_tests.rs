@@ -392,7 +392,7 @@ fn trivial_memory_grow_size_nop_drop_fence() {
         Op::Nop,
         Op::MemoryGrow { delta: c(Type::I32, 1) },
         Op::MemorySize,
-        Op::Atomic { op: AtomicOp::Fence, width: 0, offset: 0 },
+        Op::Atomic { op: AtomicOp::Fence, width: 0, offset: 0, ptr: None, val: None, replacement: None, dest: None },
         Op::Store { ty: MemType::I32, ptr: c(Type::Ptr, 70000), val: c(Type::I32, 4242), offset: 0, align: 2 },
         Op::Drop { val: c(Type::I32, 1) },
         ret(Expr::Load { ty: MemType::I32, ptr: Box::new(c(Type::Ptr, 70000)), offset: 0, align: 2 }),
@@ -410,10 +410,128 @@ fn trivial_return_unreachable() {
     assert!(run_many(&m, "f", &[vec![]])[0].is_err());
 }
 
+fn atomic(op: AtomicOp, width: u8, ptr: Option<Expr>, val: Option<Expr>, replacement: Option<Expr>, dest: Option<u32>) -> Op {
+    Op::Atomic { op, width, offset: 0, ptr, val, replacement, dest }
+}
+
+fn lget(idx: u32) -> Expr {
+    Expr::LocalGet(idx)
+}
+
+const SLOT: i32 = 1024;
+
 #[test]
-fn atomic_rmw_is_not_implemented() {
-    let body = vec![Op::Atomic { op: AtomicOp::Add, width: 4, offset: 0 }];
-    let m = one_fn(vec![], vec![], vec![], body, 1);
+fn atomic_rmw_and_cmpxchg_yield_the_old_value() {
+    // A store, then an add, then a compare-exchange that succeeds: each yields
+    // what the slot held before it, and the slot itself is only reachable
+    // through the atomics.
+    let body = vec![
+        atomic(AtomicOp::Store, 4, Some(c(Type::Ptr, SLOT)), Some(c(Type::I32, 10)), None, None),
+        atomic(AtomicOp::Add, 4, Some(c(Type::Ptr, SLOT)), Some(c(Type::I32, 5)), None, Some(0)),
+        atomic(
+            AtomicOp::Cmpxchg,
+            4,
+            Some(c(Type::Ptr, SLOT)),
+            Some(c(Type::I32, 15)),
+            Some(c(Type::I32, 40)),
+            Some(1),
+        ),
+        ret(bin(BinaryOp::Add, Type::I32, lget(0), lget(1))),
+    ];
+    let m = one_fn(vec![], vec![Type::I32], vec![Type::I32, Type::I32], body, 1);
+    // 10 (the value before the add) + 15 (the value before the exchange).
+    assert_eq!(ok_i32(&run_many(&m, "f", &[vec![]])[0]), 25);
+}
+
+#[test]
+fn atomic_cmpxchg_that_does_not_match_leaves_the_slot() {
+    // The same program with an expected value that is not there: the slot keeps
+    // its value and the old value still comes back, so the sum differs.
+    let body = vec![
+        atomic(AtomicOp::Store, 4, Some(c(Type::Ptr, SLOT)), Some(c(Type::I32, 10)), None, None),
+        atomic(AtomicOp::Add, 4, Some(c(Type::Ptr, SLOT)), Some(c(Type::I32, 5)), None, Some(0)),
+        atomic(
+            AtomicOp::Cmpxchg,
+            4,
+            Some(c(Type::Ptr, SLOT)),
+            Some(c(Type::I32, 99)),
+            Some(c(Type::I32, 40)),
+            Some(1),
+        ),
+        ret(bin(BinaryOp::Add, Type::I32, lget(0), lget(1))),
+    ];
+    let m = one_fn(vec![], vec![Type::I32], vec![Type::I32, Type::I32], body, 1);
+    // 10 + 15 again: the failed exchange returns what was there, not the desired
+    // value.
+    assert_eq!(ok_i32(&run_many(&m, "f", &[vec![]])[0]), 25);
+
+    // And the slot is untouched by the failed exchange: exchange for real and
+    // check the value the exchange replaced.
+    let body = vec![
+        atomic(AtomicOp::Store, 4, Some(c(Type::Ptr, SLOT)), Some(c(Type::I32, 10)), None, None),
+        atomic(
+            AtomicOp::Cmpxchg,
+            4,
+            Some(c(Type::Ptr, SLOT)),
+            Some(c(Type::I32, 99)),
+            Some(c(Type::I32, 40)),
+            Some(0),
+        ),
+        atomic(AtomicOp::Load, 4, Some(c(Type::Ptr, SLOT)), None, None, Some(1)),
+        ret(bin(BinaryOp::Mul, Type::I32, lget(0), lget(1))),
+    ];
+    let m = one_fn(vec![], vec![Type::I32], vec![Type::I32, Type::I32], body, 1);
+    // The exchange failed (10 was there, 99 was expected) and the slot is still
+    // 10: 10 * 10.
+    assert_eq!(ok_i32(&run_many(&m, "f", &[vec![]])[0]), 100);
+}
+
+#[test]
+fn atomic_narrow_width_touches_one_byte_only() {
+    // A 1-byte exchange must not disturb the three bytes after it.
+    let body = vec![
+        atomic(AtomicOp::Store, 4, Some(c(Type::Ptr, SLOT)), Some(c(Type::I32, 0x11223344)), None, None),
+        atomic(AtomicOp::Xchg, 1, Some(c(Type::Ptr, SLOT)), Some(c(Type::I32, 0xff)), None, Some(0)),
+        atomic(AtomicOp::Load, 4, Some(c(Type::Ptr, SLOT)), None, None, Some(1)),
+        // The byte exchanged away (0x44) plus the word that is left.
+        ret(bin(
+            BinaryOp::Add,
+            Type::I32,
+            lget(0),
+            bin(BinaryOp::Shr, Type::I32, lget(1), c(Type::I32, 8)),
+        )),
+    ];
+    let m = one_fn(vec![], vec![Type::I32], vec![Type::I32, Type::I32], body, 1);
+    // 0x44 + 0x112233 = 0x112277.
+    assert_eq!(ok_i32(&run_many(&m, "f", &[vec![]])[0]), 0x112277);
+}
+
+#[test]
+fn atomic_operand_shape_is_checked() {
+    // An add with no value to add is a shape error, not a silent zero.
+    let body = vec![
+        atomic(AtomicOp::Add, 4, Some(c(Type::Ptr, SLOT)), None, None, Some(0)),
+        ret(c(Type::I32, 0)),
+    ];
+    let m = one_fn(vec![], vec![Type::I32], vec![Type::I32], body, 1);
     let err = lower_function(&Env::new(&m), &m.functions[0]).unwrap_err();
-    assert!(matches!(err.kind, EraseErrorKind::NotImplemented { op: "Atomic", .. }), "{err:?}");
+    assert!(matches!(err.kind, EraseErrorKind::AtomicShape { op: AtomicOp::Add }), "{err:?}");
+
+    // A store with no value has nothing to write.
+    let body = vec![
+        atomic(AtomicOp::Store, 4, Some(c(Type::Ptr, SLOT)), None, None, None),
+        ret(c(Type::I32, 0)),
+    ];
+    let m = one_fn(vec![], vec![Type::I32], vec![], body, 1);
+    let err = lower_function(&Env::new(&m), &m.functions[0]).unwrap_err();
+    assert!(matches!(err.kind, EraseErrorKind::AtomicShape { op: AtomicOp::Store }), "{err:?}");
+
+    // A width wasm has no instruction for is its own error.
+    let body = vec![
+        atomic(AtomicOp::Add, 3, Some(c(Type::Ptr, SLOT)), Some(c(Type::I32, 1)), None, Some(0)),
+        ret(c(Type::I32, 0)),
+    ];
+    let m = one_fn(vec![], vec![Type::I32], vec![Type::I32], body, 1);
+    let err = lower_function(&Env::new(&m), &m.functions[0]).unwrap_err();
+    assert!(matches!(err.kind, EraseErrorKind::AtomicWidth { width: 3 }), "{err:?}");
 }

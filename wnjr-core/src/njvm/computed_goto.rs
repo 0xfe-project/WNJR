@@ -428,6 +428,8 @@ fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             walk_expr(else_val, f);
         }
         Expr::Load { ptr, .. } => walk_expr(ptr, f),
+        Expr::MemoryGrow { delta } => walk_expr(delta, f),
+        Expr::MemorySize => {}
         Expr::Call { args, .. } => args.iter().for_each(|a| walk_expr(a, f)),
         Expr::CallIndirect { callee, args, .. } => {
             walk_expr(callee, f);
@@ -451,6 +453,8 @@ fn walk_expr_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             walk_expr_mut(else_val, f);
         }
         Expr::Load { ptr, .. } => walk_expr_mut(ptr, f),
+        Expr::MemoryGrow { delta } => walk_expr_mut(delta, f),
+        Expr::MemorySize => {}
         Expr::Call { args, .. } => args.iter_mut().for_each(|a| walk_expr_mut(a, f)),
         Expr::CallIndirect { callee, args, .. } => {
             walk_expr_mut(callee, f);

@@ -193,12 +193,30 @@ pub enum Op {
     /// Grow memory by `delta` pages, returning the old size or −1 on failure.
     MemoryGrow { delta: Expr },
 
-    /// Atomic memory operation. Full operand shape (pointer, value, ordering)
-    /// is defined in N2; N1 keeps op, width, and offset per the IR sketch.
+    /// Atomic memory operation.
+    ///
+    /// Operands are in wasm's order: the address first, then whatever the op
+    /// consumes. A compare-exchange takes the expected value in `val` and the
+    /// replacement in `replacement`; a notify takes the waiter count in `val`;
+    /// a fence takes nothing at all, which is why `ptr` is optional.
+    ///
+    /// The result goes to `dest` rather than staying on an expression stack:
+    /// the IR has no value stack, so a frontend that wants the old value reads
+    /// it back with `Expr::LocalGet(dest)`. `None` discards it.
     Atomic {
         op: AtomicOp,
+        /// Access width in bytes: 1, 2, 4 or 8. What the value operand's type
+        /// is follows from it — i32 up to 4 bytes, i64 at 8.
         width: u8,
         offset: u32,
+        /// Address. `None` only for `Fence`.
+        ptr: Option<Expr>,
+        /// The op's value operand (see above).
+        val: Option<Expr>,
+        /// The replacement of a compare-exchange.
+        replacement: Option<Expr>,
+        /// Local that receives the result.
+        dest: Option<u32>,
     },
 
     // ─────────────────────────────────────────────────────────────────────────

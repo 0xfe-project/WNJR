@@ -319,8 +319,23 @@ impl Printer {
                 self.line(format_args!("memory.grow"));
                 self.exprs(&[delta]);
             }
-            Op::Atomic { op, width, offset } => {
-                self.line(format_args!("atomic {} width={width} offset={offset}", atomic(*op)));
+            Op::Atomic { op, width, offset, ptr, val, replacement, dest } => {
+                let d = match dest {
+                    Some(d) => format!(" -> local {d}"),
+                    None => String::new(),
+                };
+                self.line(format_args!(
+                    "atomic {} width={width} offset={offset}{d} has=({},{},{})",
+                    atomic(*op),
+                    ptr.is_some(),
+                    val.is_some(),
+                    replacement.is_some()
+                ));
+                let mut ops: Vec<&Expr> = Vec::new();
+                ops.extend(ptr);
+                ops.extend(val);
+                ops.extend(replacement);
+                self.exprs(&ops);
             }
             Op::Const { ty: t, val } => self.line(format_args!("const {} {}", ty(*t), constval(val))),
             Op::Drop { val } => {
@@ -334,6 +349,11 @@ impl Printer {
     fn expr(&mut self, e: &Expr) {
         match e {
             Expr::Const { ty: t, val } => self.line(format_args!("const {} {}", ty(*t), constval(val))),
+            Expr::MemorySize => self.line(format_args!("memory.size")),
+            Expr::MemoryGrow { delta } => {
+                self.line(format_args!("memory.grow"));
+                self.exprs(&[delta]);
+            }
             Expr::Binary { op, lhs, rhs, ty: t } => {
                 self.line(format_args!("{} {}", binop(*op), ty(*t)));
                 self.exprs(&[lhs, rhs]);

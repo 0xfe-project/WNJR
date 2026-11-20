@@ -90,6 +90,17 @@ E *e_load(const char *memty, E *ptr, uint32_t offset, uint32_t align) {
   return e;
 }
 
+E *e_memsize(void) {
+  return e_alloc(E_MEMSIZE, "I32");
+}
+
+E *e_memgrow(E *delta) {
+  // memory.grow yields the previous page count, or -1.
+  E *e = e_alloc(E_MEMGROW, "I32");
+  e->a = delta;
+  return e;
+}
+
 void e_free(E *e) {
   if (!e)
     return;
@@ -225,6 +236,20 @@ void nj_emit_expr(Mp *m, const E *e) {
     mp_uint(m, e->align);
     n++;
     mp_end_container(m, f, n);
+    mp_end_container(m, mk, 1);
+    return;
+  }
+  case E_MEMSIZE: {
+    // MemorySize is a fieldless variant.
+    mp_variant_unit(m, "MemorySize");
+    return;
+  }
+  case E_MEMGROW: {
+    int mk = mp_variant(m, "MemoryGrow");
+    int f = mp_begin_map(m);
+    mp_key(m, "delta");
+    nj_emit_expr(m, e->a);
+    mp_end_container(m, f, 1);
     mp_end_container(m, mk, 1);
     return;
   }
@@ -399,6 +424,49 @@ void nj_op_memoryfill(Mp *m, const E *dest, const E *val, const E *len) {
   n++;
   mp_key(m, "len");
   nj_emit_expr(m, len);
+  n++;
+  op_end(m, mk, fields, n);
+}
+
+void nj_op_atomic(Mp *m, const char *op, uint32_t width, uint32_t offset, const E *ptr,
+                  const E *val, const E *replacement, int32_t dest) {
+  int fields;
+  int mk = op_variant(m, "Atomic", &fields);
+  size_t n = 0;
+  mp_key(m, "op");
+  mp_variant_unit(m, op);
+  n++;
+  mp_key(m, "width");
+  mp_uint(m, width);
+  n++;
+  mp_key(m, "offset");
+  mp_uint(m, offset);
+  n++;
+  // An absent operand is an explicit nil, which is the None of the IR's
+  // Option fields; so is an absent destination.
+  mp_key(m, "ptr");
+  if (ptr)
+    nj_emit_expr(m, ptr);
+  else
+    mp_nil(m);
+  n++;
+  mp_key(m, "val");
+  if (val)
+    nj_emit_expr(m, val);
+  else
+    mp_nil(m);
+  n++;
+  mp_key(m, "replacement");
+  if (replacement)
+    nj_emit_expr(m, replacement);
+  else
+    mp_nil(m);
+  n++;
+  mp_key(m, "dest");
+  if (dest < 0)
+    mp_nil(m);
+  else
+    mp_uint(m, (uint64_t)dest);
   n++;
   op_end(m, mk, fields, n);
 }

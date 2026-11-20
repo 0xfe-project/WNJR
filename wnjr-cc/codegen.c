@@ -497,6 +497,39 @@ static E *gen_logical(Node *node) {
   return e_local(t, "I32");
 }
 
+// The access width of an atomic on the object `ptr` points at, in bytes. wasm's
+// atomics exist for 1, 2, 4 and 8 bytes and nothing else.
+static int atomic_width(Node *ptr) {
+  if (ptr->ty->kind != TY_PTR)
+    unsupported(ptr->tok, "an atomic needs a pointer");
+  Type *base = ptr->ty->base;
+  if (!base)
+    unsupported(ptr->tok, "an atomic on a pointer to nothing");
+  int size = base->size;
+  if (size == 1 || size == 2 || size == 4 || size == 8)
+    return size;
+  if (size == 0)
+    unsupported(ptr->tok, "an atomic on a zero-sized value");
+  unsupported(ptr->tok, "an atomic on a value of a width wasm has no atomic for");
+  return 0;
+}
+
+// wasm's narrow atomics exist only in their unsigned form (i32.atomic.rmw16.add_u),
+// so a load or a read-modify-write of a signed 1- or 2-byte object comes back
+// zero-extended. The C value is the sign-extended one, and the two-step convert
+// is how the IR says so: to the narrow signed type, which normalizes, then to
+// the i32 a local holds.
+static E *narrow_atomic_result(E *v, Type *cty) {
+  if (cty->size != 1 && cty->size != 2)
+    return v;
+  if (cty->is_unsigned)
+    return v;
+  const char *narrow = cty->size == 1 ? "I8" : "I16";
+  // Narrow to the signed type (the normalize step), then back out to the i32 a
+  // local can hold.
+  return e_convert(narrow, ir_ty(cty), e_convert("I32", narrow, v));
+}
+
 // The IR type a value of C type `ty` is carried in. Narrow integers travel as
 // i32, so this is the type a temp for that C type should have.
 static const char *value_ty(Type *ty) {
@@ -751,6 +784,93 @@ static E *gen_expr(Node *node) {
     else
       OP(nj_op_memoryfill(out, e_local((uint32_t)t, PTR_MEM), src, len));
     return e_local((uint32_t)t, PTR_MEM);
+  }
+
+  // Atomic builtins. The value lives in memory and nowhere else, so each of
+  // these is one NJVM-IR atomic op; the result, when there is one, goes to a
+  // temp local and is read back from there.
+  case ND_ATOMIC_CAS:
+  case ND_ATOMIC_CAS_BOOL: {
+    int w = atomic_width(node->lhs);
+    const char *vty = w == 8 ? "I64" : "I32";
+    // The address, the expected value and the replacement are each evaluated
+    // once, in that order, before the op.
+    E *addr = gen_expr(node->lhs);
+    int expected = new_temp(vty);
+    OP(nj_op_localset(out, (uint32_t)expected, as_type(gen_expr(node->rhs), vty)));
+    E *replacement = as_type(gen_expr(node->cond), vty);
+    int old = new_temp(vty);
+    OP(nj_op_atomic(out, "Cmpxchg", (uint32_t)w, 0, addr, e_local((uint32_t)expected, vty),
+                    replacement, old));
+    if (node->kind == ND_ATOMIC_CAS)
+      return narrow_atomic_result(as_type(e_local((uint32_t)old, vty), ir_ty(node->ty)),
+                                  node->lhs->ty->base);
+    // __sync_bool_compare_and_swap: true when the exchange happened, that is,
+    // when the value that was there is the one the caller expected.
+    int ok = new_temp("I32");
+    OP(nj_op_localset(out, (uint32_t)ok,
+                      e_binary("Eq", "I32", e_local((uint32_t)old, vty),
+                               e_local((uint32_t)expected, vty))));
+    return e_local((uint32_t)ok, "I32");
+  }
+
+  case ND_ATOMIC_RMW: {
+    int w = atomic_width(node->lhs);
+    const char *vty = w == 8 ? "I64" : "I32";
+    E *addr = gen_expr(node->lhs);
+    bool store = !strcmp(node->atomic_op, "Store");
+    E *val = store ? e_new(E_CONST_I32, vty) : as_type(gen_expr(node->rhs), vty);
+    if (store) {
+      // __sync_lock_release(p) stores zero and yields nothing.
+      val->val = 0;
+      OP(nj_op_atomic(out, "Store", (uint32_t)w, 0, addr, val, NULL, -1));
+      return e_new(E_CONST_I32, "I32");
+    }
+    int old = new_temp(vty);
+    OP(nj_op_atomic(out, node->atomic_op, (uint32_t)w, 0, addr, val, NULL, old));
+    return narrow_atomic_result(as_type(e_local((uint32_t)old, vty), ir_ty(node->ty)),
+                                node->lhs->ty->base);
+  }
+
+  case ND_ATOMIC_WAIT: {
+    // The width follows the expected value's type: wait32 for a 4-byte one,
+    // wait64 for an 8-byte one. A timeout is a nanosecond count and both wasm
+    // instructions take an i64.
+    E *addr = gen_expr(node->lhs);
+    E *expected = gen_expr(node->rhs);
+    int w = node->rhs->ty->size;
+    const char *vty = w == 8 ? "I64" : "I32";
+    expected = as_type(expected, vty);
+    E *timeout = as_type(gen_expr(node->cond), "I64");
+    int r = new_temp("I32");
+    OP(nj_op_atomic(out, "Wait", (uint32_t)w, 0, addr, expected, timeout, r));
+    return e_local((uint32_t)r, "I32");
+  }
+
+  case ND_ATOMIC_NOTIFY: {
+    E *addr = gen_expr(node->lhs);
+    E *count = as_type(gen_expr(node->rhs), "I32");
+    int r = new_temp("I32");
+    OP(nj_op_atomic(out, "Notify", 4, 0, addr, count, NULL, r));
+    return e_local((uint32_t)r, "I32");
+  }
+
+  case ND_ATOMIC_FENCE:
+    OP(nj_op_atomic(out, "Fence", 0, 0, NULL, NULL, NULL, -1));
+    return e_new(E_CONST_I32, "I32");
+
+  case ND_MEMORY_SIZE: {
+    // memory.size yields an i32 page count; the C type is the eight-byte long.
+    int t = new_temp("I32");
+    OP(nj_op_localset(out, (uint32_t)t, e_memsize()));
+    return e_convert("I32", ir_ty(node->ty), e_local((uint32_t)t, "I32"));
+  }
+
+  case ND_MEMORY_GROW: {
+    E *delta = as_type(gen_expr(node->lhs), "I32");
+    int t = new_temp("I32");
+    OP(nj_op_localset(out, (uint32_t)t, e_memgrow(delta)));
+    return e_convert("I32", ir_ty(node->ty), e_local((uint32_t)t, "I32"));
   }
 
   case ND_NOT:

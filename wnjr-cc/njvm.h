@@ -76,6 +76,8 @@ typedef enum {
   E_LOAD,       // Load { ty, ptr, offset, align }
   E_SELECT,     // Select { cond, then_val, else_val }
   E_LABELADDR,  // LabelAddr(idx): pre-lowering `&&label` marker
+  E_MEMSIZE,    // MemorySize
+  E_MEMGROW,    // MemoryGrow { delta: a }
 } EKind;
 
 struct E {
@@ -113,6 +115,8 @@ E *e_binary(const char *op, const char *ty, E *a, E *b);
 E *e_unary(const char *op, const char *ty, E *a);
 E *e_convert(const char *from, const char *to, E *a);
 E *e_load(const char *memty, E *ptr, uint32_t offset, uint32_t align);
+E *e_memsize(void);
+E *e_memgrow(E *delta);
 void e_free(E *e);
 
 void nj_emit_expr(Mp *m, const E *e);
@@ -132,6 +136,12 @@ void nj_op_memorycopy(Mp *m, const E *dest, const E *src, const E *len);
 void nj_op_memoryfill(Mp *m, const E *dest, const E *val, const E *len);
 void nj_op_memorygrow(Mp *m, const E *delta);
 void nj_op_memorysize(Mp *m);
+// Op::Atomic { op, width, offset, ptr, val, replacement, dest }. `op` is one of
+// "Load", "Store", "Add", "Sub", "And", "Or", "Xor", "Xchg", "Cmpxchg", "Wait",
+// "Notify", "Fence"; `width` is the access size in bytes; any of ptr/val/
+// replacement may be NULL, and `dest` is -1 when the result is discarded.
+void nj_op_atomic(Mp *m, const char *op, uint32_t width, uint32_t offset, const E *ptr,
+                  const E *val, const E *replacement, int32_t dest);
 // Op::Call (result discarded).
 void nj_op_call(Mp *m, uint32_t func, E *const *args, size_t nargs);
 void nj_op_return(Mp *m, const E *val);

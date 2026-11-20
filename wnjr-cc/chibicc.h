@@ -245,6 +245,14 @@ typedef enum {
   ND_ISNAN,     // __builtin_isnan
   ND_MEMCPY,    // __builtin_memcpy, __builtin_memmove
   ND_MEMSET,    // __builtin_memset
+  ND_ATOMIC_CAS,      // __sync_val_compare_and_swap: yields the old value
+  ND_ATOMIC_CAS_BOOL, // __sync_bool_compare_and_swap: yields 0 or 1
+  ND_ATOMIC_RMW,      // __sync_fetch_and_*, __sync_lock_release
+  ND_ATOMIC_WAIT,     // __builtin_wasm_memory_atomic_wait32/64
+  ND_ATOMIC_NOTIFY,   // __builtin_wasm_memory_atomic_notify
+  ND_ATOMIC_FENCE,    // __sync_synchronize
+  ND_MEMORY_SIZE,     // __builtin_wasm_memory_size(0)
+  ND_MEMORY_GROW,     // __builtin_wasm_memory_grow(0, n)
 } NodeKind;
 
 // AST node type
@@ -301,6 +309,9 @@ struct Node {
   char *asm_str;
 
   // Atomic compare-and-swap
+  // ND_ATOMIC_RMW: which read-modify-write ("Add", "Sub", "And", "Or", "Xor",
+  // "Xchg", "Store"). The GNU builtins differ only in this name.
+  const char *atomic_op;
   Node *cas_addr;
   Node *cas_old;
   Node *cas_new;

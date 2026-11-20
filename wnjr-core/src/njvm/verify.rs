@@ -44,7 +44,7 @@ use crate::collections::{vec, Vec};
 use super::expr::Expr;
 use super::module::{FunctionType, Function, ImportKind, Module};
 use super::op::{LabelId, Op};
-use super::types::{BinaryOp, ConstVal, MemType, Type, UnaryOp};
+use super::types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
 
 /// A position in a function body; see the module docs.
 pub type OpPath = Vec<usize>;
@@ -113,6 +113,11 @@ pub enum VerifyErrorKind {
     /// A pre-lowering computed-goto marker (`Expr::LabelAddr` or
     /// `Op::GotoIndirect`) is still present; run `computed_goto::lower_module` first.
     UnloweredComputedGoto,
+    /// An atomic op is missing an operand it needs, or carries one it does not.
+    AtomicShape { op: AtomicOp },
+    /// An atomic access width no wasm instruction has (or does not match the
+    /// width of the value operand).
+    AtomicWidth { width: u8 },
 }
 
 impl core::fmt::Display for VerifyError {
@@ -193,6 +198,11 @@ impl<'m> Env<'m> {
 
 fn is_int(t: Type) -> bool {
     !is_float(t)
+}
+
+/// Whether a type is one wasm i64: the value class of an 8-byte atomic.
+fn is_wide_int(t: Type) -> bool {
+    matches!(t, Type::I64 | Type::U64)
 }
 
 fn is_float(t: Type) -> bool {
@@ -548,8 +558,64 @@ impl FnCx<'_, '_> {
             Op::MemoryGrow { delta } => {
                 self.expect(delta, &I32_LIKE)?;
             }
-            // Operand shape is not defined yet (see `Op::Atomic`); nothing to check.
-            Op::Atomic { .. } => {}
+            Op::Atomic { op, width, ptr, val, replacement, dest, .. } => {
+                // The shape table: which operands each atomic op takes. A load
+                // and a read-modify-write yield a value, a store does not, a
+                // fence takes nothing at all.
+                // A store is the one op with no result at all, so a
+                // destination on it is meaningless rather than merely discarded.
+                if *op == AtomicOp::Store && dest.is_some() {
+                    return Err(VerifyErrorKind::AtomicShape { op: *op });
+                }
+                let want_val = !matches!(op, AtomicOp::Load | AtomicOp::Fence);
+                // A compare-exchange carries the replacement there; a wait
+                // carries its timeout, which is an i64 nanosecond count.
+                let want_repl = matches!(op, AtomicOp::Cmpxchg | AtomicOp::Wait);
+                // Whether the result is kept is the op's own business: a
+                // discard is what dest None means. What has to match is the
+                // inputs. A store additionally has no result to give.
+                let has = [ptr.is_some(), val.is_some(), replacement.is_some()];
+                let want = [*op != AtomicOp::Fence, want_val, want_repl];
+                if has != want {
+                    return Err(VerifyErrorKind::AtomicShape { op: *op });
+                }
+                if let Some(p) = ptr {
+                    self.expect(p, &MEM_ADDR)?;
+                }
+                // 1, 2 and 4 bytes are an i32 access; 8 is an i64 one.
+                let want_ty = if *width == 8 { Type::I64 } else { Type::I32 };
+                if *op != AtomicOp::Fence && !matches!(width, 1 | 2 | 4 | 8) {
+                    return Err(VerifyErrorKind::AtomicWidth { width: *width });
+                }
+                // The value operand has the access width's class; a
+                // compare-exchange's replacement matches it, while a wait's
+                // timeout is eight bytes whatever the access width is.
+                for e in [val].into_iter().flatten() {
+                    let got = self.expect(e, &INTS)?;
+                    if is_wide_int(got) != is_wide_int(want_ty) {
+                        return Err(VerifyErrorKind::AtomicWidth { width: *width });
+                    }
+                }
+                if let Some(r) = replacement {
+                    let got = self.expect(r, &INTS)?;
+                    let want_wide = *op != AtomicOp::Wait && is_wide_int(want_ty) || *op == AtomicOp::Wait;
+                    if is_wide_int(got) != want_wide {
+                        return Err(VerifyErrorKind::AtomicWidth { width: *width });
+                    }
+                }
+                if let Some(d) = dest {
+                    let t = self.local(*d)?;
+                    // A wait yields 0/1/2 and a notify yields the number of
+                    // waiters woken: both are i32 whatever the access width.
+                    if *op == AtomicOp::Wait || *op == AtomicOp::Notify {
+                        if !is_int(t) {
+                            return Err(VerifyErrorKind::AtomicShape { op: *op });
+                        }
+                    } else if is_wide_int(t) != is_wide_int(want_ty) {
+                        return Err(VerifyErrorKind::AtomicWidth { width: *width });
+                    }
+                }
+            }
             Op::Const { ty, val } => {
                 if !const_fits(*ty, *val) {
                     return Err(VerifyErrorKind::ConstMismatch { ty: *ty, val: *val });
@@ -604,6 +670,11 @@ impl FnCx<'_, '_> {
             Expr::LocalTee { idx, val } => {
                 let t = self.local(*idx)?;
                 self.expect(val, &[t])
+            }
+            Expr::MemorySize => Ok(Type::I32),
+            Expr::MemoryGrow { delta } => {
+                self.expect(delta, &INTS)?;
+                Ok(Type::I32)
             }
             Expr::Call { func_idx, args } => single(self.call(*func_idx, args)?),
             Expr::CallIndirect { type_idx, table_idx, callee, args } => {

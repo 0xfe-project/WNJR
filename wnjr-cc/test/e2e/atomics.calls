@@ -1,0 +1,22 @@
+reset
+cas_int 7 11
+cas_int 7 13
+cas_bool 11 21
+cas_bool 11 22
+cas_long 100 250
+cas_char 3 9
+cas_char 9 1
+cas_short -4 -9
+fetch_add 5
+fetch_sub 2
+fetch_and 12
+fetch_or 3
+fetch_xor 255
+fetch_add_long 23
+long_state
+test_and_set 99
+release_and_read
+guarded_increment 100
+guarded_increment 1
+reset
+series 10

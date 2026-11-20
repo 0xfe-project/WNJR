@@ -318,6 +318,62 @@ void add_type(Node *node) {
       error_tok(node->tok, "a floating-point operand is required");
     node->ty = ty_int;
     return;
+  case ND_ATOMIC_CAS:
+    add_type(node->lhs);
+    add_type(node->rhs);
+    add_type(node->cond);
+    if (node->lhs->ty->kind != TY_PTR)
+      error_tok(node->lhs->tok, "pointer expected");
+    // The old value comes back, so the value of the builtin is the pointee type.
+    node->ty = node->lhs->ty->base;
+    return;
+  case ND_ATOMIC_CAS_BOOL:
+    add_type(node->lhs);
+    add_type(node->rhs);
+    add_type(node->cond);
+    if (node->lhs->ty->kind != TY_PTR)
+      error_tok(node->lhs->tok, "pointer expected");
+    node->ty = ty_int;
+    return;
+  case ND_ATOMIC_RMW:
+    add_type(node->lhs);
+    if (node->rhs)
+      add_type(node->rhs);
+    if (node->lhs->ty->kind != TY_PTR)
+      error_tok(node->lhs->tok, "pointer expected");
+    // __sync_lock_release writes and yields nothing; a read-modify-write yields
+    // the value the location held before it.
+    node->ty = node->rhs ? node->lhs->ty->base : ty_void;
+    return;
+  case ND_ATOMIC_WAIT:
+    add_type(node->lhs);
+    add_type(node->rhs);
+    add_type(node->cond);
+    if (node->lhs->ty->kind != TY_PTR)
+      error_tok(node->lhs->tok, "pointer expected");
+    node->ty = ty_int;
+    return;
+  case ND_ATOMIC_NOTIFY:
+    add_type(node->lhs);
+    add_type(node->rhs);
+    if (node->lhs->ty->kind != TY_PTR)
+      error_tok(node->lhs->tok, "pointer expected");
+    node->ty = ty_int;
+    return;
+  case ND_ATOMIC_FENCE:
+    node->ty = ty_void;
+    return;
+  case ND_MEMORY_SIZE:
+    // memory.size yields an i32 page count, and C multiplies it by a page size,
+    // so it is carried as the eight-byte long this frontend uses for size_t.
+    node->ty = ty_long;
+    return;
+  case ND_MEMORY_GROW:
+    add_type(node->lhs);
+    if (!is_integer(node->lhs->ty))
+      error_tok(node->lhs->tok, "an integer page count is required");
+    node->ty = ty_long;
+    return;
   case ND_MEMCPY:
   case ND_MEMSET:
     if (node->lhs->ty->kind != TY_PTR && node->lhs->ty->kind != TY_ARRAY)

@@ -62,6 +62,19 @@ pub enum Expr {
     /// `LocalTee`: write `val` into local `idx` and yield the value (group G).
     LocalTee { idx: u32, val: Box<Expr> },
 
+    /// `memory.size` for memory 0: the current size in 64 KiB pages, as `I32`.
+    ///
+    /// A value producer rather than an `Op` because C writes it inside a larger
+    /// expression (`__builtin_wasm_memory_size(0) * PAGESIZE`); the statement
+    /// form is `Op::Drop` of this.
+    MemorySize,
+
+    /// `memory.grow` for memory 0: grow by `delta` pages, yielding the previous
+    /// size, or −1 when the growth failed.
+    ///
+    /// An effect in an `Expr`, like `Call`.
+    MemoryGrow { delta: Box<Expr> },
+
     /// Direct call used as an expression yielding its (single) result value.
     Call { func_idx: u32, args: Vec<Expr> },
 

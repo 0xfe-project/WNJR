@@ -1,0 +1,9 @@
+pages_positive -> 1
+grow_one -> 2
+grow_zero -> 1
+wait32_mismatch -> 1
+wait32_timeout -> 2
+wait64_mismatch -> 1
+wait64_timeout -> 2
+notify_none -> 0
+page_writable -> 1

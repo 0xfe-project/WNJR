@@ -40,6 +40,8 @@ pub fn walk_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             walk_expr(else_val, f);
         }
         Expr::Load { ptr, .. } => walk_expr(ptr, f),
+        Expr::MemoryGrow { delta } => walk_expr(delta, f),
+        Expr::MemorySize => {}
         Expr::Call { args, .. } => walk_all(args, f),
         Expr::CallIndirect { callee, args, .. } => {
             walk_expr(callee, f);
@@ -146,6 +148,10 @@ pub fn commute_pure_operands(module: &Module) -> Module {
             Expr::Unary { val, .. } | Expr::Convert { val, .. } => pure(val),
             Expr::Select { cond, then_val, else_val } => pure(cond) && pure(then_val) && pure(else_val),
             Expr::Load { ptr, .. } => pure(ptr),
+            // Both read or write the memory size, so neither is safe to
+            // reorder against another access.
+            Expr::MemorySize => true,
+            Expr::MemoryGrow { .. } => false,
             Expr::LocalTee { .. } | Expr::Call { .. } | Expr::CallIndirect { .. } | Expr::LabelAddr(_) => false,
         }
     }

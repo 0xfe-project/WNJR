@@ -123,6 +123,7 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr);
 static Type *typename(Token **rest, Token *tok);
 static Type *enum_specifier(Token **rest, Token *tok);
 static Type *typeof_specifier(Token **rest, Token *tok);
+static bool is_typeof_kw(Token *tok);
 static Type *type_suffix(Token **rest, Token *tok, Type *ty);
 static Type *declarator(Token **rest, Token *tok, Type *ty);
 static Node *declaration(Token **rest, Token *tok, Type *basety, VarAttr *attr);
@@ -164,7 +165,7 @@ static Node *funcall(Token **rest, Token *tok, Node *node);
 static Node *unary(Token **rest, Token *tok);
 static Node *primary(Token **rest, Token *tok);
 static Token *parse_typedef(Token *tok, Type *basety);
-static bool is_function(Token *tok);
+static bool is_function(Token *tok, Type *basety);
 static Token *function(Token *tok, Type *basety, VarAttr *attr);
 static Token *global_variable(Token *tok, Type *basety, VarAttr *attr);
 
@@ -493,7 +494,7 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
     // Handle user-defined types.
     Type *ty2 = find_typedef(tok);
     if (equal(tok, "struct") || equal(tok, "union") || equal(tok, "enum") ||
-        equal(tok, "typeof") || ty2) {
+        is_typeof_kw(tok) || ty2) {
       if (counter)
         break;
 
@@ -503,7 +504,7 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
         ty = union_decl(&tok, tok->next);
       } else if (equal(tok, "enum")) {
         ty = enum_specifier(&tok, tok->next);
-      } else if (equal(tok, "typeof")) {
+      } else if (is_typeof_kw(tok)) {
         ty = typeof_specifier(&tok, tok->next);
       } else {
         ty = ty2;
@@ -824,6 +825,12 @@ static Type *enum_specifier(Token **rest, Token *tok) {
   if (tag)
     push_tag_scope(tag, ty);
   return ty;
+}
+
+// GCC spells typeof three ways and musl's headers use the short underscored
+// one, __typeof, in their macro definitions.
+static bool is_typeof_kw(Token *tok) {
+  return equal(tok, "typeof") || equal(tok, "__typeof__") || equal(tok, "__typeof");
 }
 
 // typeof-specifier = "(" (expr | typename) ")"
@@ -1614,7 +1621,8 @@ static bool is_typename(Token *tok) {
       "void", "_Bool", "char", "short", "int", "long", "struct", "union",
       "typedef", "enum", "static", "extern", "_Alignas", "signed", "unsigned",
       "const", "volatile", "auto", "register", "restrict", "__restrict",
-      "__restrict__", "_Noreturn", "float", "double", "typeof", "inline",
+      "__restrict__", "_Noreturn", "float", "double", "typeof", "__typeof__",
+      "__typeof", "inline",
       "_Thread_local", "__thread", "_Atomic", "__builtin_va_list",
     };
 
@@ -1894,7 +1902,7 @@ static Node *compound_stmt(Token **rest, Token *tok) {
         continue;
       }
 
-      if (is_function(tok)) {
+      if (is_function(tok, basety)) {
         tok = function(tok, basety, &attr);
         continue;
       }
@@ -3444,6 +3452,101 @@ static Node *primary(Token **rest, Token *tok) {
     return node;
   }
 
+  // The GNU __sync builtins, which is what musl's atomic_arch.h uses. They are
+  // spelled as calls but are operations: each one becomes an NJVM-IR atomic, and
+  // the memory is the only place the value lives, so there is no fallback.
+  {
+    struct {
+      char *name;
+      char *op;
+    } rmw[] = {
+      {"__sync_fetch_and_add", "Add"}, {"__sync_fetch_and_sub", "Sub"},
+      {"__sync_fetch_and_and", "And"}, {"__sync_fetch_and_or", "Or"},
+      {"__sync_fetch_and_xor", "Xor"}, {"__sync_lock_test_and_set", "Xchg"},
+      {"__sync_lock_release", "Store"},
+    };
+    for (int i = 0; i < sizeof(rmw) / sizeof(*rmw); i++) {
+      if (!equal(tok, rmw[i].name))
+        continue;
+      Node *node = new_node(ND_ATOMIC_RMW, start);
+      node->atomic_op = rmw[i].op;
+      tok = skip(tok->next, "(");
+      node->lhs = assign(&tok, tok);
+      // __sync_lock_release(p) takes only the address; it stores zero.
+      if (strcmp(rmw[i].op, "Store")) {
+        tok = skip(tok, ",");
+        node->rhs = assign(&tok, tok);
+      }
+      *rest = skip(tok, ")");
+      return node;
+    }
+  }
+
+  if (equal(tok, "__sync_val_compare_and_swap") ||
+      equal(tok, "__sync_bool_compare_and_swap")) {
+    bool want_bool = equal(tok, "__sync_bool_compare_and_swap");
+    Node *node = new_node(want_bool ? ND_ATOMIC_CAS_BOOL : ND_ATOMIC_CAS, start);
+    tok = skip(tok->next, "(");
+    node->lhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->rhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->cond = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return node;
+  }
+
+  if (equal(tok, "__sync_synchronize")) {
+    *rest = skip(skip(tok->next, "("), ")");
+    return new_node(ND_ATOMIC_FENCE, start);
+  }
+
+  if (equal(tok, "__builtin_wasm_memory_size")) {
+    Node *node = new_node(ND_MEMORY_SIZE, start);
+    tok = skip(tok->next, "(");
+    // NJVM-IR has one memory, so the index is required to be that one.
+    Node *idx = assign(&tok, tok);
+    if (idx->kind != ND_NUM || idx->val != 0)
+      error_tok(idx->tok, "only memory 0 exists");
+    *rest = skip(tok, ")");
+    return node;
+  }
+
+  if (equal(tok, "__builtin_wasm_memory_grow")) {
+    Node *node = new_node(ND_MEMORY_GROW, start);
+    tok = skip(tok->next, "(");
+    Node *idx = assign(&tok, tok);
+    if (idx->kind != ND_NUM || idx->val != 0)
+      error_tok(idx->tok, "only memory 0 exists");
+    tok = skip(tok, ",");
+    node->lhs = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return node;
+  }
+
+  if (equal(tok, "__builtin_wasm_memory_atomic_wait32") ||
+      equal(tok, "__builtin_wasm_memory_atomic_wait64")) {
+    Node *node = new_node(ND_ATOMIC_WAIT, start);
+    tok = skip(tok->next, "(");
+    node->lhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->rhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->cond = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return node;
+  }
+
+  if (equal(tok, "__builtin_wasm_memory_atomic_notify")) {
+    Node *node = new_node(ND_ATOMIC_NOTIFY, start);
+    tok = skip(tok->next, "(");
+    node->lhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->rhs = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return node;
+  }
+
   if (equal(tok, "__builtin_atomic_exchange")) {
     Node *node = new_node(ND_EXCH, tok);
     tok = skip(tok->next, "(");
@@ -3742,12 +3845,16 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
 
 // Lookahead tokens and returns true if a given token is a start
 // of a function definition or declaration.
-static bool is_function(Token *tok) {
+static bool is_function(Token *tok, Type *basety) {
   if (equal(tok, ";"))
     return false;
 
+  // The declarator is parsed with the declaration's own base type, because a
+  // base type can already be a function type: musl's weak_alias expands to
+  // `extern __typeof(f) g __attribute__((__alias__("f")))`, and a declarator on a
+  // function base type is a function declaration even with no `(` after the name.
   Type dummy = {};
-  Type *ty = declarator(&tok, tok, &dummy);
+  Type *ty = declarator(&tok, tok, basety ? basety : &dummy);
   // What follows the declarator decides whether there is a body, so a trailing
   // attribute list has to be stepped over: musl writes
   //   extern __typeof(x) y __attribute__((__alias__("x")));
@@ -3818,7 +3925,7 @@ Obj *parse(Token *tok) {
     }
 
     // Function
-    if (is_function(tok)) {
+    if (is_function(tok, basety)) {
       tok = function(tok, basety, &attr);
       continue;
     }
