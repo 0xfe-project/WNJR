@@ -1,0 +1,15 @@
+[package]
+name = "wnjr-njvm-e2e"
+publish = false
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+description = "NJVM-IR end-to-end differential harness: WNJR vs bun, with and without a pass list"
+license = "Apache-2.0"
+
+[dependencies]
+wnjr-core = { path = "../wnjr-core" }
+serde_json = "1.0"
+
+[dev-dependencies]
+wnjr-njvm-io = { path = "../wnjr-njvm-io" }
