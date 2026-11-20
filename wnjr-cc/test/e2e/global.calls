@@ -1,0 +1,24 @@
+read_init
+bump_init
+bump_init
+read_zero
+write_zero 42
+read_zero
+sum_arr
+grow_arr 10
+sum_arr
+str_lit_len
+gstr_len
+gptr_len
+via_addr
+pair_sum
+pair_set 5
+float_bits
+double_bits
+counter
+counter
+counter_twice
+name_len 0
+name_len 1
+name_len 2
+name_len 9

@@ -83,10 +83,18 @@ by `njvm/computed_goto.rs`. The interchange format is documented in
 Implemented today: integer and floating-point arithmetic, comparisons,
 conversions, pointers, arrays, structs and unions (as memory), `if`/`for`/
 `while`/`do`, `switch` (including `case 1 ... 5`), `goto`, computed goto,
-recursion, and calls to functions defined in the same translation unit.
-Not yet: globals and string literals (no data segments), struct arguments and
-returns by value, function pointers, VLAs, bitfields, `_Atomic`, `asm`, and
-anything needing libc — there are no imports yet.
+recursion, calls to functions defined in the same translation unit, and every
+object with a static extent — globals (initialised, zero-initialised, with
+pointer initialisers such as `char *p = s + 1`), string literals, static
+locals, and arrays of pointers to string literals — each placed in a data
+segment. Not yet: struct arguments and returns by value, function pointers,
+VLAs, bitfields, `_Atomic`, `asm`, and anything needing libc — there are no
+imports yet.
+
+The type table is chibicc's LP64 one, so `long` and a pointer are eight bytes
+wide; only the low 32 bits of a pointer slot are an address, and the upper half
+is reserved for the GC tag of the tagged-pointer model. Codegen reads every
+width from that table, so moving to ILP32 would be a change to `type.c` alone.
 
 ## WebAssembly compatibility
 

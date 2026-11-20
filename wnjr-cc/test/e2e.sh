@@ -101,28 +101,18 @@ for src in $cases; do
   fi
   "$work/$name-native" > "$work/$name-native.out"
 
+  # One instance runs every call in file order, exactly as the C driver does,
+  # so a call sees what an earlier call wrote.
   wnjr_out="$work/$name-wnjr.out"
-  : > "$wnjr_out"
-  while IFS= read -r line; do
-    case "$line" in ''|'#'*) continue ;; esac
-    set -- $line
-    fn=$1
-    shift
-    label="$fn"
-    args=""
-    for a in "$@"; do
-      label="$label $a"
-      args="$args $a"
-    done
-    # shellcheck disable=SC2086
-    got=$("$runner" "$msgpack" "$fn" $args 2> "$work/$name-run.err")
-    code=$?
-    if [ $code -ne 0 ]; then
-      got="failure: $(head -1 "$work/$name-run.err")"
-    fi
-    echo "$label -> $got" >> "$wnjr_out"
-  done < "$calls"
-
+  "$runner" "$msgpack" --batch "$calls" > "$wnjr_out" 2> "$work/$name-run.err"
+  code=$?
+  if [ $code -ne 0 ] && [ $code -ne 3 ]; then
+    echo "[FAIL] $name: njvm-run failed"
+    head -3 "$work/$name-run.err" | sed 's/^/        /'
+    fail=$((fail + 1))
+    failed_cases="$failed_cases $name"
+    continue
+  fi
   if diff -u "$work/$name-native.out" "$wnjr_out" > "$work/$name.diff"; then
     n=$(wc -l < "$labels" | tr -d ' ')
     echo "[PASS] $name: $n/$n calls agree with the host compiler"

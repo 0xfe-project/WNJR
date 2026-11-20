@@ -23,11 +23,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Memory layout: the frame grows down from STACK_TOP, globals would live below
-// it (GLOBAL_BASE), so the stack may use [GLOBAL_BASE, STACK_TOP).
-#define MEMORY_PAGES 16
-#define STACK_TOP 0x100000
+// Memory layout: everything with a static extent (globals, string literals,
+// static locals) lives at [GLOBAL_BASE, global_top); the stack grows down from
+// STACK_TOP, which is the end of memory, and must not reach the data area.
+#define MEMORY_PAGES 256
+#define STACK_TOP 0x1000000
 #define GLOBAL_BASE 0x1000
+#define MIN_STACK 0x40000
 
 // ───────────────────────── state ─────────────────────────
 
@@ -91,7 +93,13 @@ static bool is_scalar(Type *ty) {
   return !is_aggregate(ty) && ty->kind != TY_VOID;
 }
 
-// The NJVM-IR type of a C scalar. Pointers are I32: a wasm32 address.
+// Pointers occupy eight bytes in chibicc's LP64 layout (type.c), but only the
+// low 32 bits are an address today, so a pointer is read and written as an i32
+// word and the upper half is left alone. #634 puts the GC tag in that upper
+// half; when it lands this becomes "I64" and nothing else in this file moves.
+#define PTR_MEM "I32"
+
+// The NJVM-IR type of a C scalar. A pointer is an i32: a wasm32 address.
 static const char *ir_ty(Type *ty) {
   switch (ty->kind) {
   case TY_FLOAT:
@@ -102,7 +110,7 @@ static const char *ir_ty(Type *ty) {
   case TY_PTR:
   case TY_ARRAY:
   case TY_FUNC:
-    return "I32";
+    return PTR_MEM;
   case TY_STRUCT:
   case TY_UNION:
   case TY_VLA:
@@ -124,7 +132,7 @@ static const char *mem_ty(Type *ty) {
   case TY_ARRAY:
   case TY_FUNC:
     // NJVM-IR has no pointer MemType; an address is an i32 word.
-    return "I32";
+    return PTR_MEM;
   default:
     break;
   }
@@ -240,9 +248,13 @@ static E *to_temp(E *e) {
 static E *gen_addr(Node *node) {
   switch (node->kind) {
   case ND_VAR:
-    if (!node->var->is_local)
-      unsupported(node->tok, "a reference to a global variable");
-    return frame_addr(node->var->offset);
+    if (node->var->is_local)
+      return frame_addr(node->var->offset);
+    if (node->var->is_function)
+      unsupported(node->tok, "a function address (function pointers)");
+    if (!node->var->is_definition)
+      unsupported(node->tok, "a reference to a variable this file does not define");
+    return e_i32(node->var->offset);
   case ND_DEREF:
     return gen_expr(node->lhs);
   case ND_MEMBER: {
@@ -717,6 +729,55 @@ static void gen_stmt(Node *node) {
 
 // ───────────────────────── module ─────────────────────────
 
+// Every object with a static extent gets one address in the data area, in
+// definition order. One that is never initialised writes no data segment:
+// memory starts zeroed, which is what C asks for.
+static void assign_global_offsets(Obj *prog) {
+  int top = GLOBAL_BASE;
+  for (Obj *var = prog; var; var = var->next) {
+    if (var->is_function || !var->is_definition)
+      continue;
+    int align = var->align < 1 ? 1 : var->align;
+    top = align_to(top, align);
+    var->offset = top;
+    top += var->ty->size;
+  }
+  if (top + MIN_STACK > STACK_TOP)
+    error("the data area leaves less than %d bytes of stack below STACK_TOP; "
+          "raise MEMORY_PAGES", MIN_STACK);
+}
+
+static Obj *find_object(Obj *prog, const char *name) {
+  for (Obj *var = prog; var; var = var->next)
+    if (var->name && !strcmp(var->name, name))
+      return var;
+  return NULL;
+}
+
+// A static initialiser may name an object (int *p = &g;). chibicc records that
+// as a relocation with the address left zero; every data address is known by
+// now, so the pointer word is written in place. The word is four bytes wide
+// because an address is an i32: chibicc's layout reserves eight bytes for a
+// pointer and the upper half simply stays zero.
+static void resolve_relocations(Obj *prog) {
+  for (Obj *var = prog; var; var = var->next) {
+    if (var->is_function || !var->is_definition)
+      continue;
+    for (Relocation *rel = var->rel; rel; rel = rel->next) {
+      // parse.c puts a computed-goto label here as its own name.
+      Obj *target = find_object(prog, *rel->label);
+      if (!target)
+        unsupported(var->tok, "a label address in a static initialiser");
+      if (target->is_function)
+        unsupported(var->tok, "a function address (function pointers)");
+      if (!target->is_definition)
+        unsupported(var->tok, "a pointer to an object this file does not define");
+      uint32_t word = (uint32_t)(target->offset + rel->addend);
+      memcpy(var->init_data + rel->offset, &word, sizeof(word));
+    }
+  }
+}
+
 static void assign_lvar_offsets(Obj *prog) {
   for (Obj *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition)
@@ -811,6 +872,8 @@ static void emit_function(Obj *fn) {
 
 void njvm_emit_module(Obj *prog, Mp *m) {
   out = m;
+  assign_global_offsets(prog);
+  resolve_relocations(prog);
   assign_lvar_offsets(prog);
 
   // Function indices first: a body may call a function defined later. A static
@@ -945,7 +1008,33 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   mp_key(out, "data");
   {
     int a = mp_begin_arr(out);
-    mp_end_container(out, a, 0);
+    size_t nseg = 0;
+    for (Obj *var = prog; var; var = var->next) {
+      if (var->is_function || !var->is_definition || !var->init_data)
+        continue;
+      int seg = mp_begin_map(out);
+      mp_key(out, "mode");
+      int mode = mp_variant(out, "Active");
+      int act = mp_begin_map(out);
+      mp_key(out, "index");
+      mp_uint(out, 0);
+      mp_key(out, "offset");
+      int off = mp_variant(out, "Const");
+      int cv = mp_variant(out, "I32");
+      mp_int(out, var->offset);
+      mp_end_container(out, cv, 1);
+      mp_end_container(out, off, 1);
+      mp_end_container(out, act, 2);
+      mp_end_container(out, mode, 1);
+      mp_key(out, "bytes");
+      int bytes = mp_begin_arr(out);
+      for (int i = 0; i < var->ty->size; i++)
+        mp_uint(out, (unsigned char)var->init_data[i]);
+      mp_end_container(out, bytes, (size_t)var->ty->size);
+      mp_end_container(out, seg, 2);
+      nseg++;
+    }
+    mp_end_container(out, a, nseg);
   }
   fields++;
 
@@ -959,5 +1048,4 @@ void njvm_emit_module(Obj *prog, Mp *m) {
 
   mp_end_container(out, mod, fields);
   mp_end_container(out, env, 2);
-  (void)GLOBAL_BASE;
 }

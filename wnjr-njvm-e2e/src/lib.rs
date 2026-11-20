@@ -235,13 +235,21 @@ pub fn result_kinds(module: &Module, export: &str) -> Result<Vec<Kind>, String> 
 
 /// Run `export` on WNJR once per input, each on a fresh instance. `Err`
 /// means the bytes did not load (parse, validate or instantiate failed).
-pub fn run_wnjr(bytes: &[u8], export: &str, inputs: &[Vec<Arg>], stateless: bool) -> Result<Vec<Outcome>, String> {
+/// Call each `(export, args)` in order on one instance, so that a call sees
+/// what an earlier call wrote — the same thing a C host does when it runs a
+/// translation unit's functions one after another. With `fresh_per_call` every
+/// call gets its own instance instead.
+pub fn run_wnjr_sequence(
+    bytes: &[u8],
+    calls: &[(String, Vec<Arg>)],
+    fresh_per_call: bool,
+) -> Result<Vec<Outcome>, String> {
     let engine = Engine::new(Config::new()).map_err(|e| format!("engine: {e:?}"))?;
     let mut out = Vec::new();
-    // Parse, validate and decode once; every input gets its own instance.
+    // Parse, validate and decode once; the instance is reused across calls.
     let parsed = WasmModule::new("njvm-e2e", bytes).map_err(|e| format!("WNJR Module::new: {e:?}"))?;
     let mut live: Option<(RuntimeWorld, _)> = None;
-    for args in inputs {
+    for (export, args) in calls {
         if live.is_none() {
             let mut world = RuntimeWorld::new();
             let id = world.instantiate(&engine, parsed.clone(), &[]).map_err(|e| format!("WNJR instantiate: {e:?}"))?;
@@ -254,7 +262,7 @@ pub fn run_wnjr(bytes: &[u8], export: &str, inputs: &[Vec<Arg>], stateless: bool
             Err(e) if e.is_trap() || e.is_exception() => Outcome::Trap,
             Err(e) => return Err(format!("WNJR invoke {export}: {e:?}")),
         };
-        if !stateless || r == Outcome::Trap {
+        if fresh_per_call || r == Outcome::Trap {
             let (mut world, id) = live.take().expect("instance");
             let _ = world.free(id);
         }
@@ -266,6 +274,16 @@ pub fn run_wnjr(bytes: &[u8], export: &str, inputs: &[Vec<Arg>], stateless: bool
     Ok(out)
 }
 
+pub fn run_wnjr(bytes: &[u8], export: &str, inputs: &[Vec<Arg>], stateless: bool) -> Result<Vec<Outcome>, String> {
+    // `stateless` is the case's own flag, and it reads backwards: the bun runner
+    // builds a fresh instance per input for every case (bun/runner.js: "so memory
+    // and globals start identical on every host"), so a case that is *not*
+    // stateless is one whose calls must each start from a clean instance. A
+    // stateless case may reuse one instance, which no case asks for yet — it
+    // would stop matching bun.
+    let calls: Vec<(String, Vec<Arg>)> = inputs.iter().map(|a| (export.to_string(), a.clone())).collect();
+    run_wnjr_sequence(bytes, &calls, !stateless)
+}
 /// One module to run on a host.
 pub struct Job {
     pub bytes: Vec<u8>,
