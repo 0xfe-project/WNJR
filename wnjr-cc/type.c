@@ -318,6 +318,10 @@ void add_type(Node *node) {
       error_tok(node->tok, "a floating-point operand is required");
     node->ty = ty_int;
     return;
+  case ND_TLS:
+    // The base is an address; the other two are sizes.
+    node->ty = node->fclass == TLS_BASE ? pointer_to(ty_void) : ty_ulong;
+    return;
   case ND_FLOAT_TEST:
     if (!is_flonum(node->lhs->ty))
       error_tok(node->tok, "a floating-point operand is required");

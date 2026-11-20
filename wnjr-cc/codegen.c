@@ -121,6 +121,15 @@ static bool is_addr_value(Type *ty) {
 // half; when it lands this becomes "I64" and nothing else in this file moves.
 #define PTR_MEM "I32"
 
+// Where the thread-local block is. There is one execution context in this
+// runtime, so there is one TLS block, laid out with the globals and never copied:
+// the three __builtin_wasm_tls_* intrinsics report these numbers, and a runtime
+// with threads would use them to give each thread its own copy of the initial
+// data. Filled in by assign_global_offsets.
+static int tls_base;
+static int tls_size;
+static int tls_align = 1;
+
 // The NJVM-IR type of a C scalar. A pointer is an i32: a wasm32 address.
 //
 // The signedness of a 4- or 8-byte integer is part of the type, because the IR
@@ -491,6 +500,37 @@ static bool is_comparison(NodeKind kind) {
   return kind == ND_EQ || kind == ND_NE || kind == ND_LT || kind == ND_LE;
 }
 
+// A comparison takes operands of one type and yields an i32, so its result type
+// and its operand type are different; e_binary() sets both from one type, which
+// is right for arithmetic and wrong here.
+static E *cmp_(const char *op, const char *oty, E *a, E *b) {
+  E *r = e_new(E_BINARY, "I32");
+  r->op = op;
+  r->op_ty = oty;
+  r->a = a;
+  r->b = b;
+  return r;
+}
+
+static E *and_(E *a, E *b) { return e_binary("And", "I32", a, b); }
+static E *or_(E *a, E *b) { return e_binary("Or", "I32", a, b); }
+
+// cond ? then : else, as control flow rather than a select. wasm evaluates both
+// arms of a select, and the arm this guards is a division that traps on exactly
+// the value the condition excludes.
+static E *guarded(const char *ty, E *cond, E *then_val, E *else_val) {
+  int t = new_temp(ty);
+  uint32_t l_else = fresh_label();
+  uint32_t l_end = fresh_label();
+  OP(nj_op_jmpif(out, e_binary("Eq", "I32", cond, e_i32(0)), l_else));
+  OP(nj_op_localset(out, (uint32_t)t, then_val));
+  OP(nj_op_jmp(out, l_end));
+  OP(nj_op_label(out, l_else));
+  OP(nj_op_localset(out, (uint32_t)t, else_val));
+  OP(nj_op_label(out, l_end));
+  return e_local((uint32_t)t, ty);
+}
+
 static E *gen_binary(Node *node) {
   E *a = gen_expr(node->lhs);
   E *b = gen_expr(node->rhs);
@@ -800,6 +840,135 @@ static E *gen_expr(Node *node) {
     r->a = e_local((uint32_t)t, oty);
     r->b = e_local((uint32_t)t, oty);
     return r;
+  }
+
+  // The C99 classification family, as comparisons the IR already has: no new
+  // instruction is needed for any of them. The operand is read once into a temp
+  // local, and every use of it is a separate read of that local: e_free() walks
+  // a tree and frees every node in it, so one node reached twice would be freed
+  // twice.
+  case ND_TLS: {
+    // The block is laid out with the globals, so all three are known here.
+    int64_t v = node->fclass == TLS_BASE   ? tls_base
+                : node->fclass == TLS_SIZE ? tls_size
+                                           : tls_align;
+    if (node->ty->size == 8)
+      return as_type(e_i64(v), ir_ty(node->ty));
+    return as_type(e_i32((int32_t)v), ir_ty(node->ty));
+  }
+
+  case ND_FLOAT_TEST: {
+    const char *oty = ir_ty(node->lhs->ty);
+    bool f32 = !strcmp(oty, "F32");
+    int t = new_temp(oty);
+    OP(nj_op_localset(out, (uint32_t)t, gen_expr(node->lhs)));
+#define V e_local((uint32_t)t, oty)
+    // Constants are made per use, like any other node: the tree is freed by
+    // ownership, so one node in two places is one node freed twice.
+#define ZERO (f32 ? e_f32(0) : e_f64(0))
+#define ONE (f32 ? e_f32(0x3f800000u) : e_f64(0x3ff0000000000000ull))
+#define INF (f32 ? e_f32(0x7f800000u) : e_f64(0x7ff0000000000000ull))
+#define NINF (f32 ? e_f32(0xff800000u) : e_f64(0xfff0000000000000ull))
+#define FMIN (f32 ? e_f32(0x00800000u) : e_f64(0x0010000000000000ull))
+#define NFMIN (f32 ? e_f32(0x80800000u) : e_f64(0x8010000000000000ull))
+
+    switch (node->fclass) {
+    case FC_ISINF:
+      return or_(cmp_("Eq", oty, V, INF), cmp_("Eq", oty, V, NINF));
+    case FC_ISFINITE:
+      // x - x is zero exactly when x is neither infinite nor a NaN.
+      return cmp_("Eq", oty, e_binary("Sub", oty, V, V), ZERO);
+    case FC_ISNORMAL:
+      // Not zero and not subnormal: |x| is at least the smallest normal number.
+      // The finite half of the definition is the same subtraction as above.
+      return and_(or_(cmp_("Ge", oty, V, FMIN), cmp_("Le", oty, V, NFMIN)),
+                  cmp_("Eq", oty, e_binary("Sub", oty, V, V), ZERO));
+    case FC_SIGNBIT:
+      // The sign bit is not readable from the value, but only a negative number
+      // satisfies either x < 0 or (x is a zero and one over it is negative). The
+      // first clause is what makes -inf work and the second what makes -0 work.
+      return or_(cmp_("Lt", oty, V, ZERO),
+                 and_(cmp_("Eq", oty, V, ZERO),
+                      cmp_("Lt", oty, e_binary("Div", oty, ONE, V), ZERO)));
+    default:
+      error("internal error: unknown floating-point test %d", node->fclass);
+      return e_i32(0);
+    }
+#undef V
+#undef ZERO
+#undef ONE
+#undef INF
+#undef NINF
+#undef FMIN
+#undef NFMIN
+  }
+
+  case ND_FLOAT_CMP: {
+    const char *oty = ir_ty(node->lhs->ty);
+    int a = new_temp(oty), b = new_temp(oty);
+    OP(nj_op_localset(out, (uint32_t)a, gen_expr(node->lhs)));
+    OP(nj_op_localset(out, (uint32_t)b, gen_expr(node->rhs)));
+#define X e_local((uint32_t)a, oty)
+#define Y e_local((uint32_t)b, oty)
+    if (node->fclass == FC_ISUNORDERED)
+      return or_(cmp_("Ne", oty, X, X), cmp_("Ne", oty, Y, Y));
+    // islessgreater: both comparisons are false when either operand is a NaN,
+    // which is the C answer for an unordered pair.
+    return or_(cmp_("Lt", oty, X, Y), cmp_("Gt", oty, X, Y));
+#undef X
+#undef Y
+  }
+
+  // __builtin_{add,sub,mul}_overflow writes the wrapped result and answers
+  // whether it wrapped. Each operand is read once into a temp, and a check that
+  // needs a division is guarded, because a division traps on the value its own
+  // condition excludes.
+  case ND_OVERFLOW: {
+    Type *ty = node->lhs->ty;
+    const char *ity = ir_ty(ty);
+    bool sgn = !ty->is_unsigned;
+    bool wide = ty->size == 8;
+    E *addr = to_temp(gen_expr(node->cas_addr));
+    int a = new_temp(ity), b = new_temp(ity);
+    OP(nj_op_localset(out, (uint32_t)a, as_type(gen_expr(node->lhs), ity)));
+    OP(nj_op_localset(out, (uint32_t)b, as_type(gen_expr(node->rhs), ity)));
+    const char *op = node->fclass == OVF_ADD   ? "Add"
+                     : node->fclass == OVF_SUB ? "Sub"
+                                               : "Mul";
+#define A e_local((uint32_t)a, ity)
+#define B e_local((uint32_t)b, ity)
+#define RES e_binary(op, ity, A, B)
+#define IZERO as_type(wide ? e_i64(0) : e_i32(0), ity)
+    OP(nj_op_store(out, mem_ty(ty), addr, store_value(RES, mem_ty(ty)), 0, 0));
+    e_free(addr);
+
+    if (!sgn && node->fclass == OVF_ADD)
+      return cmp_("Lt", ity, RES, A); // a sum that wrapped is below an operand
+    if (!sgn && node->fclass == OVF_SUB)
+      return cmp_("Lt", ity, A, B);
+    if (!sgn)
+      // (a * b) / a == b holds exactly when the multiplication did not wrap, and
+      // a == 0 wraps nothing (and is the division that would trap).
+      return guarded("I32", cmp_("Eq", ity, A, IZERO), e_i32(0),
+                     cmp_("Ne", ity, e_binary("Div", ity, RES, A), B));
+    // Signed: the result's sign differs from what the operation would give.
+    if (node->fclass == OVF_ADD)
+      return or_(and_(cmp_("Gt", ity, B, IZERO), cmp_("Lt", ity, RES, A)),
+                 and_(cmp_("Lt", ity, B, IZERO), cmp_("Gt", ity, RES, A)));
+    if (node->fclass == OVF_SUB)
+      return or_(and_(cmp_("Gt", ity, B, IZERO), cmp_("Gt", ity, RES, A)),
+                 and_(cmp_("Lt", ity, B, IZERO), cmp_("Lt", ity, RES, A)));
+    // Signed mul: the same division test, except that a == -1 with b == the most
+    // negative value is a wrap the division cannot be asked about, since that
+    // division is the one that traps.
+    return guarded("I32", cmp_("Eq", ity, A, as_type(wide ? e_i64(-1) : e_i32(-1), ity)),
+                   cmp_("Eq", ity, B, as_type(wide ? e_i64(INT64_MIN) : e_i32(INT32_MIN), ity)),
+                   and_(cmp_("Ne", ity, A, IZERO),
+                        cmp_("Ne", ity, e_binary("Div", ity, RES, A), B)));
+#undef A
+#undef B
+#undef RES
+#undef IZERO
   }
 
   case ND_MEMCPY:
@@ -1195,18 +1364,35 @@ static void gen_stmt(Node *node) {
 
 // ───────────────────────── module ─────────────────────────
 
-// Every object with a static extent gets one address in the data area, in
-// definition order. One that is never initialised writes no data segment:
-// memory starts zeroed, which is what C asks for.
+// Every object with a static extent gets one address in the data area. The
+// thread-local ones come first, so that they form one contiguous block whose base
+// and size are known; the rest follow in definition order. One that is never
+// initialised writes no data segment: memory starts zeroed, which is what C asks
+// for.
 static void assign_global_offsets(Obj *prog) {
-  int top = GLOBAL_BASE;
   for (Obj *var = prog; var; var = var->next) {
-    if (var->is_function || !var->is_definition)
+    if (var->is_function || !var->is_definition || !var->is_tls)
       continue;
     int align = var->align < 1 ? 1 : var->align;
-    top = align_to(top, align);
-    var->offset = top;
-    top += var->ty->size;
+    if (align > tls_align)
+      tls_align = align;
+  }
+
+  int top = align_to(GLOBAL_BASE, tls_align);
+  tls_base = top;
+  for (int pass = 0; pass < 2; pass++) {
+    for (Obj *var = prog; var; var = var->next) {
+      if (var->is_function || !var->is_definition)
+        continue;
+      if (var->is_tls != (pass == 0))
+        continue;
+      int align = var->align < 1 ? 1 : var->align;
+      top = align_to(top, align);
+      var->offset = top;
+      top += var->ty->size;
+    }
+    if (pass == 0)
+      tls_size = top - tls_base;
   }
   if (top + MIN_STACK > STACK_TOP)
     error("the data area leaves less than %d bytes of stack below STACK_TOP; "

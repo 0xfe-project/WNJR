@@ -256,7 +256,15 @@ typedef enum {
   ND_FLOAT_TEST,      // __builtin_isinf, isfinite, isnormal, signbit
   ND_FLOAT_CMP,       // __builtin_isunordered, islessgreater
   ND_OVERFLOW,        // __builtin_add_overflow, sub_overflow, mul_overflow
+  ND_TLS,             // __builtin_wasm_tls_base, _size, _align
 } NodeKind;
+
+// Which of the three thread-local-storage intrinsics a ND_TLS node is.
+enum {
+  TLS_BASE = 1,
+  TLS_SIZE,
+  TLS_ALIGN,
+};
 
 // Which test a ND_FLOAT_TEST or ND_FLOAT_CMP node performs. The C99
 // classification macros are one family with one shape (floating operands in, int

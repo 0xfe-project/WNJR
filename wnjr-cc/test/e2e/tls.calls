@@ -1,0 +1,11 @@
+get
+wide_ok
+addr_stable
+base_nonzero
+size_covers
+align_pow2
+base_in_block
+normal_is_outside
+nan_is_nan
+nan_compares_false
+same_as_plain

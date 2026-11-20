@@ -3406,24 +3406,110 @@ static Node *primary(Token **rest, Token *tok) {
     return new_num(0, start);
   }
 
+  // NAN, and the payload argument nobody here reads.
+  if (equal(tok, "__builtin_nanf") || equal(tok, "__builtin_nan")) {
+    bool is_float = equal(tok, "__builtin_nanf");
+    assign(&tok, skip(tok->next, "("));
+    *rest = skip(tok, ")");
+    Node *node = new_num(0, start);
+    node->ty = is_float ? ty_float : ty_double;
+    node->fval = strtod("nan", NULL);
+    return node;
+  }
+
+  // The thread-local-storage intrinsics. This runtime has one execution context,
+  // so the TLS block is laid out with the globals and the frontend knows where it
+  // starts, how large it is and how it is aligned: all three are constants here.
+  if (equal(tok, "__builtin_wasm_tls_base") ||
+      equal(tok, "__builtin_wasm_tls_size") ||
+      equal(tok, "__builtin_wasm_tls_align")) {
+    Node *node = new_node(ND_TLS, start);
+    node->fclass = equal(tok, "__builtin_wasm_tls_base") ? TLS_BASE
+                   : equal(tok, "__builtin_wasm_tls_size") ? TLS_SIZE
+                                                           : TLS_ALIGN;
+    tok = skip(tok->next, "(");
+    *rest = skip(tok, ")");
+    return node;
+  }
+
   {
     struct {
       char *name;
       NodeKind kind;
+      int fclass;
     } unary[] = {
-      {"__builtin_clz", ND_CLZ},       {"__builtin_clzll", ND_CLZ},
-      {"__builtin_ctz", ND_CTZ},       {"__builtin_ctzll", ND_CTZ},
-      {"__builtin_popcount", ND_POPCOUNT},
-      {"__builtin_popcountll", ND_POPCOUNT},
-      {"__builtin_isnan", ND_ISNAN},
+      {"__builtin_clz", ND_CLZ, 0},
+      {"__builtin_clzll", ND_CLZ, 0},
+      {"__builtin_ctz", ND_CTZ, 0},
+      {"__builtin_ctzll", ND_CTZ, 0},
+      {"__builtin_popcount", ND_POPCOUNT, 0},
+      {"__builtin_popcountll", ND_POPCOUNT, 0},
+      {"__builtin_isnan", ND_ISNAN, 0},
+      {"__builtin_isinf", ND_FLOAT_TEST, FC_ISINF},
+      {"__builtin_isfinite", ND_FLOAT_TEST, FC_ISFINITE},
+      {"__builtin_isnormal", ND_FLOAT_TEST, FC_ISNORMAL},
+      {"__builtin_signbit", ND_FLOAT_TEST, FC_SIGNBIT},
     };
     for (int i = 0; i < sizeof(unary) / sizeof(*unary); i++) {
       if (!equal(tok, unary[i].name))
         continue;
       Node *arg = assign(&tok, skip(tok->next, "("));
       *rest = skip(tok, ")");
-      return new_unary(unary[i].kind, arg, start);
+      Node *node = new_unary(unary[i].kind, arg, start);
+      node->fclass = unary[i].fclass;
+      return node;
     }
+  }
+
+  // C's relational macros are two-operand tests, and the four that are a plain
+  // comparison are built as one: isgreater is isless with the operands swapped,
+  // which is how the parser already reads a greater-than.
+  {
+    struct {
+      char *name;
+      NodeKind kind;
+      int fclass;
+      bool swap;
+    } binary[] = {
+      {"__builtin_isunordered", ND_FLOAT_CMP, FC_ISUNORDERED, false},
+      {"__builtin_islessgreater", ND_FLOAT_CMP, FC_ISLESSGREATER, false},
+      {"__builtin_isless", ND_LT, 0, false},
+      {"__builtin_islessequal", ND_LE, 0, false},
+      {"__builtin_isgreater", ND_LT, 0, true},
+      {"__builtin_isgreaterequal", ND_LE, 0, true},
+    };
+    for (int i = 0; i < sizeof(binary) / sizeof(*binary); i++) {
+      if (!equal(tok, binary[i].name))
+        continue;
+      Node *lhs = assign(&tok, skip(tok->next, "("));
+      tok = skip(tok, ",");
+      Node *rhs = assign(&tok, tok);
+      *rest = skip(tok, ")");
+      Node *node = new_binary(binary[i].kind, binary[i].swap ? rhs : lhs,
+                              binary[i].swap ? lhs : rhs, start);
+      node->fclass = binary[i].fclass;
+      return node;
+    }
+  }
+
+  // __builtin_{add,sub,mul}_overflow(a, b, &result): the result is written
+  // through the pointer and the value is 1 when the arithmetic wrapped. The
+  // pointer is the same field the atomic builtins use for their object.
+  if (equal(tok, "__builtin_add_overflow") ||
+      equal(tok, "__builtin_sub_overflow") ||
+      equal(tok, "__builtin_mul_overflow")) {
+    Node *node = new_node(ND_OVERFLOW, start);
+    node->fclass = equal(tok, "__builtin_add_overflow") ? OVF_ADD
+                   : equal(tok, "__builtin_sub_overflow") ? OVF_SUB
+                                                          : OVF_MUL;
+    tok = skip(tok->next, "(");
+    node->lhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->rhs = assign(&tok, tok);
+    tok = skip(tok, ",");
+    node->cas_addr = assign(&tok, tok);
+    *rest = skip(tok, ")");
+    return node;
   }
 
   if (equal(tok, "__builtin_memcpy") || equal(tok, "__builtin_memmove") ||
