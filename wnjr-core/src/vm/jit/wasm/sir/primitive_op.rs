@@ -285,7 +285,11 @@ macro_rules! for_each_primitive_op {
             RefNull => (0, 1),
             RefIsNull => (1, 1),
             RefFunc { func_idx: u32 } => (0, 1),
-            EhAllocExnRef { tag_idx: u32 } => (0, 1),
+            EhAllocExnRef {
+                tag_idx: u32,
+                start_slot: u32,
+                slot_count: u32,
+            } => (0, 1),
             RefAsNonNull => (1, 1),
             RefEq => (2, 1),
             RefI31 => (1, 1),

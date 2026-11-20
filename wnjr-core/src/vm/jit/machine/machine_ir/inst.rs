@@ -460,6 +460,9 @@ pub(crate) enum MachineInstKind {
     },
     EhAllocExnRef {
         tag_idx: u32,
+        /// Where the payload values sit in the current frame.
+        start_slot: u32,
+        slot_count: u32,
         dst: MachineReg,
     },
     MemoryGrow {
@@ -763,6 +766,8 @@ pub(crate) enum EhHelperOp {
     Payload,
     /// A handler is taking the exception; drops it.
     Clear,
+    /// `dst` = an `exnref` for the pending exception, for a `catch_ref` clause.
+    ExnRef,
     /// No clause matched; unwind this function.
     Rethrow,
 }

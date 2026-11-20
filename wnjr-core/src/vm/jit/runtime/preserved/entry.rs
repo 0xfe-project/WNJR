@@ -13,9 +13,9 @@ use super::{
     ops::{
         do_any_convert_extern, do_array_copy, do_array_fill, do_array_get, do_array_init_data,
         do_array_init_elem, do_array_len, do_array_new, do_array_new_data, do_array_new_default,
-        do_array_new_elem, do_array_new_fixed, do_array_set, do_eh_alloc_exn_ref, do_eh_throw,
-        do_eh_clear, do_eh_match, do_eh_payload, do_eh_rethrow, do_eh_throw_ref,
-        do_extern_convert_any, do_i31_get_s, do_i31_get_u, do_memory_copy,
+        do_array_new_elem, do_array_new_fixed, do_array_set, do_eh_alloc_exn_ref, do_eh_clear,
+        do_eh_match, do_eh_payload, do_eh_pending_exn_ref, do_eh_rethrow, do_eh_throw,
+        do_eh_throw_ref, do_extern_convert_any, do_i31_get_s, do_i31_get_u, do_memory_copy,
         do_memory_grow, do_memory_init, do_ref_absolutize, do_ref_as_non_null, do_ref_cast,
         do_ref_eq, do_ref_func, do_ref_i31, do_ref_test, do_struct_get, do_struct_new,
         do_struct_new_default, do_struct_set, do_table_copy, do_table_fill, do_table_grow,
@@ -293,6 +293,13 @@ unsafe fn dispatch_preserved(
         op::EH_PAYLOAD => {
             let index = unsafe { *io_ptr.add(io::IMM0) } as u32;
             let result = do_eh_payload(ctx, index)?;
+            unsafe {
+                *io_ptr.add(io::RET0) = result;
+            }
+            Ok(())
+        }
+        op::EH_PENDING_EXN_REF => {
+            let result = do_eh_pending_exn_ref(ctx)?;
             unsafe {
                 *io_ptr.add(io::RET0) = result;
             }

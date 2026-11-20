@@ -300,6 +300,21 @@ pub(super) fn do_eh_payload(ctx: &mut NativeContext, index: u32) -> Result<u64, 
     Ok(raw)
 }
 
+/// An `exnref` for the pending exception, for a `catch_ref` clause.
+///
+/// The exception being unwound is an `Rc` on the escape chain; a guest that
+/// asked for a reference gets a registry entry naming it, which is the only
+/// place an `exnref` can live once it outlives the throw. The throw itself
+/// still allocates nothing: this runs only where a clause asked for the
+/// reference.
+pub(super) fn do_eh_pending_exn_ref(ctx: &mut NativeContext) -> Result<u64, WasmError> {
+    let Some((tag, exn)) = pending_throw(ctx) else {
+        return Err(internal_error("eh_pending_exn_ref: no pending exception"));
+    };
+    let handle = current_store_mut(ctx)?.alloc_exn(tag, exn.fields.clone());
+    Ok(ref_to_machine(handle))
+}
+
 /// A handler is taking the pending exception.
 pub(super) fn do_eh_clear(ctx: &mut NativeContext) -> Result<(), WasmError> {
     ctx.pending_escape = PendingEscape::None;

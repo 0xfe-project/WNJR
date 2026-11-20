@@ -938,8 +938,10 @@ fn lower_block_body_op(
                 config,
             )
         }
-        SemanticOpKind::AllocExnRef { tag_idx } => lower_alloc_exn_ref(
+        SemanticOpKind::AllocExnRef { tag_idx, arity } => lower_alloc_exn_ref(
             *tag_idx,
+            *arity,
+            frame,
             semantic,
             semantic_index,
             state,
@@ -1333,6 +1335,8 @@ fn live_scalar_call_result(
 
 fn lower_alloc_exn_ref(
     tag_idx: u32,
+    arity: u16,
+    frame: FrameLayoutPlan,
     semantic: &SemanticProgram,
     semantic_index: usize,
     state: &mut BlockState,
@@ -1342,9 +1346,16 @@ fn lower_alloc_exn_ref(
     values: &mut ValueAlloc,
     builder: &mut ProgramBuilder,
 ) -> Result<(), WasmError> {
+    // This op spills everything below it, so the payload is already in its
+    // frame slots when the helper reads them; it only has to be told where.
+    let start_slot = call_base_slot(frame, state.height(), arity);
     lower_primitive(
         semantic,
-        &PrimitiveOpKind::EhAllocExnRef { tag_idx },
+        &PrimitiveOpKind::EhAllocExnRef {
+            tag_idx,
+            start_slot: u32::from(start_slot.0),
+            slot_count: u32::from(arity),
+        },
         semantic_index,
         state,
         planner,
@@ -1746,9 +1757,11 @@ fn lower_block_terminator(
                 planner,
             )?))
         }
-        SemanticOpKind::AllocExnRef { tag_idx } => {
+        SemanticOpKind::AllocExnRef { tag_idx, arity } => {
             lower_alloc_exn_ref(
                 *tag_idx,
+                *arity,
+                frame,
                 semantic,
                 semantic_index,
                 state,

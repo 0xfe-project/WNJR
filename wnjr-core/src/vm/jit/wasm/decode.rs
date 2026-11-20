@@ -1163,20 +1163,15 @@ impl<'a> DecodeContext<'a> {
     fn handle_throw(&mut self, tag_idx: u32) {
         let (arity, _results) = self.compile.resolve_tag_type(tag_idx);
         if let Some(resolved) = self.match_throw_to_catch(tag_idx) {
+            // A `catch_ref` clause hands the handler an exnref for the
+            // exception it caught, so the throw has to build one. It is built
+            // from the payload that is still on the stack here: the binding
+            // below does not consume it, the branch arm reads it as well.
             if resolved.forwards_exn {
-                if arity == 0 {
-                    let op_idx = self.push_op(SemanticOpKind::AllocExnRef { tag_idx });
-                    self.record_result_types(op_idx, &[ValueType::ref_exn()]);
-                    if !self.unreachable {
-                        self.push_typed_value_with_exn_tag(ValueType::ref_exn(), Some(tag_idx));
-                    }
-                } else {
-                    let op_idx = self.current_index();
-                    self.push_op(PrimitiveOpKind::RefNull);
-                    self.record_result_types(op_idx, &[ValueType::ref_exn()]);
-                    if !self.unreachable {
-                        self.push_typed_value_with_exn_tag(ValueType::ref_exn(), Some(tag_idx));
-                    }
+                let op_idx = self.push_op(SemanticOpKind::AllocExnRef { tag_idx, arity });
+                self.record_result_types(op_idx, &[ValueType::ref_exn()]);
+                if !self.unreachable {
+                    self.push_typed_value_with_exn_tag(ValueType::ref_exn(), Some(tag_idx));
                 }
             }
             self.pop_typed_values(resolved.arity as usize);
@@ -1961,33 +1956,36 @@ impl<'a> DecodeContext<'a> {
             }
             OP(THROW_REF) => {
                 let exn_tag = self.exn_tag_stack.last().copied().flatten();
-                if let Some(tag_idx) = exn_tag {
-                    if let Some(mut resolved) = self.match_throw_to_catch(tag_idx) {
-                        if resolved.forwards_exn {
-                            resolved.stack_drop = resolved.stack_drop.saturating_sub(1);
-                        }
-                        self.pop_typed_values(1);
-                        let br_idx = self.push_op(SemanticOpKind::Br {
-                            stack_drop: resolved.stack_drop,
-                            arity: resolved.arity,
-                            target: resolved.target,
-                        });
-                        if let Some(fixup_depth) = resolved.pending_fixup_depth {
-                            self.register_forward_branch(
-                                fixup_depth,
-                                br_idx,
-                                PendingFixupSite::Target,
-                            );
-                        }
-                        if resolved.forwards_exn {
-                            self.last_static_exn_tag = Some(tag_idx);
-                        }
-                        self.set_unreachable();
-                    } else {
-                        self.pop_typed_values(1);
-                        self.push_op(SemanticOpKind::ThrowRef);
-                        self.set_unreachable();
+                // A static catch is a branch to the handler, and that branch has
+                // to carry the tag's payload -- which a throw_ref does not have
+                // on the stack: it is inside the exception the reference names.
+                // Only a clause that takes nothing but the reference itself is
+                // served this way; anything else keeps unwinding.
+                let resolved = exn_tag
+                    .and_then(|tag_idx| {
+                        self.match_throw_to_catch(tag_idx)
+                            .map(|resolved| (tag_idx, resolved))
+                    })
+                    .filter(|(_, resolved)| {
+                        resolved.arity as usize == usize::from(resolved.forwards_exn)
+                    });
+                if let Some((tag_idx, mut resolved)) = resolved {
+                    if resolved.forwards_exn {
+                        resolved.stack_drop = resolved.stack_drop.saturating_sub(1);
                     }
+                    self.pop_typed_values(1);
+                    let br_idx = self.push_op(SemanticOpKind::Br {
+                        stack_drop: resolved.stack_drop,
+                        arity: resolved.arity,
+                        target: resolved.target,
+                    });
+                    if let Some(fixup_depth) = resolved.pending_fixup_depth {
+                        self.register_forward_branch(fixup_depth, br_idx, PendingFixupSite::Target);
+                    }
+                    if resolved.forwards_exn {
+                        self.last_static_exn_tag = Some(tag_idx);
+                    }
+                    self.set_unreachable();
                 } else {
                     self.pop_typed_values(1);
                     self.push_op(SemanticOpKind::ThrowRef);

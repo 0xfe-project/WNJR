@@ -1,7 +1,8 @@
 # Threads 设计
 
-状态：th1–th10 已实现。`cargo test --workspace`：arm64 666 passed / 0 failed，x86_64 669 passed / 0 failed；
-spec 全量 281 个 wast 文件在 arm64 和 x86_64 上都是 281 通过（含 `proposals/threads/atomic.wast`）；
+状态：th1–th10 已实现。`cargo test --workspace`：arm64 **802 passed / 0 failed / 1 ignored**（本机实测）；
+x86_64 本轮未复跑，只保证 `cargo check --offline --target x86_64-unknown-linux-gnu` 通过。
+spec 全量 281 个 wast 文件在 arm64 上 281 通过（含 `proposals/threads/atomic.wast`）；
 官方 wasi-threads testsuite 14 个用例全过。对应实现步骤 th1–th10。
 
 ## 结论

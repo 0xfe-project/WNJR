@@ -146,13 +146,18 @@ impl<'a> X86_64Backend<'a> {
                 MachineValue::Imm64(exnref_slot.0 as u64),
                 MachineValue::Imm64(0),
             ),
-            MachineInstKind::EhAllocExnRef { tag_idx, dst } => self.lower_preserved_result(
+            MachineInstKind::EhAllocExnRef {
+                tag_idx,
+                start_slot,
+                slot_count,
+                dst,
+            } => self.lower_preserved_result(
                 preserved::op::EH_ALLOC_EXN_REF,
                 *tag_idx,
                 0,
                 MachineValue::Reg(MACHINE_FP_REG),
-                MachineValue::Imm64(0),
-                MachineValue::Imm64(0),
+                MachineValue::Imm64(u64::from(*start_slot)),
+                MachineValue::Imm64(u64::from(*slot_count)),
                 MachineStorageType::GpWord,
                 *dst,
             ),

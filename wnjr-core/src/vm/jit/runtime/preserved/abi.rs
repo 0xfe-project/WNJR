@@ -83,4 +83,6 @@ pub(crate) mod op {
     pub(crate) const EH_CLEAR: u32 = 51;
     /// Re-raise the pending exception so an outer handler can take it.
     pub(crate) const EH_RETHROW: u32 = 52;
+    /// RET0 = an `exnref` handle naming the pending exception.
+    pub(crate) const EH_PENDING_EXN_REF: u32 = 53;
 }

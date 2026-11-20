@@ -363,8 +363,12 @@ fn walk_block(
             SemanticOpKind::Primitive(kind) => {
                 primitive_effect(kind, semantic_index, semantic, window)
             }
-            SemanticOpKind::AllocExnRef { tag_idx } => primitive_effect(
-                &PrimitiveOpKind::EhAllocExnRef { tag_idx: *tag_idx },
+            SemanticOpKind::AllocExnRef { tag_idx, arity } => primitive_effect(
+                &PrimitiveOpKind::EhAllocExnRef {
+                    tag_idx: *tag_idx,
+                    start_slot: 0,
+                    slot_count: u32::from(*arity),
+                },
                 semantic_index,
                 semantic,
                 window,

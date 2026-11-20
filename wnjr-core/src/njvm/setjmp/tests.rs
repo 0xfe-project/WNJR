@@ -371,6 +371,85 @@ fn catch_from_callee_other_tag(nops: &str) -> Result<Vec<Value>, crate::WasmErro
     invoke_wat(&src)
 }
 
+/// A caught throw from a real call delivers its payload to a handler that
+/// binds it into a plain local.
+///
+/// The handler block is the code after the try_table, which the normal path also
+/// falls into; giving the exception edge the same entry is what the dispatcher
+/// has to do, and getting it wrong used to re-enter the call forever.
+#[test]
+fn catch_payload_reaches_a_handler_that_binds_a_plain_local() {
+    let r = invoke_wat(
+        r#"(module
+      (tag $e (param i32))
+      (func $thr (param i32) local.get 0 i32.const 1 i32.add throw $e)
+      (func (export "f") (result i32) (local $p i32)
+        block $h (result i32)
+          try_table (result i32) (catch $e $h)
+            i32.const 7
+            i32.const 7
+            call $thr
+          end
+        end
+        local.set $p
+        local.get $p))"#,
+    )
+    .expect("caught");
+    assert_eq!(r, vec![crate::Value::I32(8)]);
+}
+
+/// A `catch_ref` clause around a real call gets a non-null exnref for the
+/// exception the call raised: 108 is the payload 8 plus 100.
+#[test]
+fn catch_ref_across_a_real_call_yields_a_non_null_exnref() {
+    let r = invoke_wat(
+        r#"(module
+      (tag $e (param i32))
+      (func $thr (param i32) local.get 0 i32.const 1 i32.add throw $e)
+      (func (export "f") (result i32) (local $p i32) (local $x exnref)
+        block $h (result i32 exnref)
+          try_table (result i32 exnref) (catch_ref $e $h)
+            i32.const 7
+            call $thr
+            i32.const 0
+            ref.null exn
+          end
+        end
+        local.set $x
+        local.set $p
+        (if (result i32) (ref.is_null (local.get $x))
+          (then (i32.const -1))
+          (else (i32.add (local.get $p) (i32.const 100))))))"#,
+    )
+    .expect("caught");
+    assert_eq!(r, vec![crate::Value::I32(108)]);
+}
+
+/// A statically caught `catch_ref` clause gets a real exnref for the exception
+/// it caught, not a null one: 109 is the payload 9 plus 100, which the module
+/// only reaches when the reference is non-null.
+#[test]
+fn static_catch_ref_yields_a_non_null_exnref() {
+    let r = invoke_wat(
+        r#"(module
+      (tag $e (param i32))
+      (func (export "f") (result i32) (local $p i32) (local $x exnref)
+        block $h (result i32 exnref)
+          try_table (result i32 exnref) (catch_ref $e $h)
+            i32.const 9
+            throw $e
+          end
+        end
+        local.set $x
+        local.set $p
+        (if (result i32) (ref.is_null (local.get $x))
+          (then (i32.const -1))
+          (else (i32.add (local.get $p) (i32.const 100))))))"#,
+    )
+    .expect("caught");
+    assert_eq!(r, vec![crate::Value::I32(109)]);
+}
+
 /// Run a whole wat module's export "f".
 fn invoke_wat(src: &str) -> Result<Vec<Value>, crate::WasmError> {
     let bytes = wat::parse_str(src).expect("parse wat");

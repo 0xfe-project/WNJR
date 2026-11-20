@@ -400,6 +400,9 @@ fn thread_empty_goto_blocks(program: &mut SsaProgram) -> bool {
         if target.as_usize() == block_index {
             continue;
         }
+        if is_eh_handler(program, block_index) {
+            continue;
+        }
 
         if block_index == program.entry.as_usize() {
             if !program.blocks[block_index].params.is_empty() || !bindings_empty {
@@ -533,6 +536,9 @@ fn merge_goto_successor(
         return None;
     }
     if predecessor_counts[succ_index] != 1 {
+        return None;
+    }
+    if is_eh_handler(program, succ_index) {
         return None;
     }
 
@@ -670,6 +676,25 @@ fn remove_unreachable_blocks(program: &mut SsaProgram) -> bool {
     }
     remove_blocks(program, &removed);
     true
+}
+
+/// Whether some try_table catch names this block as its handler.
+///
+/// A handler is entered by an exception edge the machine layer synthesises, and
+/// the dispatcher hands the payload over through the handler block's own entry:
+/// its entry-cache row names the registers to fill, and its first ops name the
+/// frame slots to store. Both are properties of *that block*. Collapsing the
+/// handler into a predecessor moves its entry point back to the predecessor's
+/// start -- and a handler that is also a fallthrough target shares its start
+/// with the very code that raised -- so a handler block is never eliminated or
+/// merged away.
+fn is_eh_handler(program: &SsaProgram, block_index: usize) -> bool {
+    program.try_scopes.iter().any(|scope| {
+        scope
+            .catches
+            .iter()
+            .any(|clause| clause.handler.as_usize() == block_index)
+    })
 }
 
 fn predecessor_counts(program: &SsaProgram) -> collections::Vec<usize> {

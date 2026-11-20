@@ -182,6 +182,8 @@ pub(crate) enum SemanticOpKind {
     },
     AllocExnRef {
         tag_idx: u32,
+        /// How many payload values the stack holds for this exception.
+        arity: u16,
     },
     ThrowRef,
 }

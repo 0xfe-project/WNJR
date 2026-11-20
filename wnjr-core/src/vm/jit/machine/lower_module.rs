@@ -2880,6 +2880,9 @@ struct EhCatchFixup {
     /// Where the catch block goes when it cannot deliver the handler's values.
     rethrow: MachineBlockId,
     payload_arity: u16,
+    /// Whether the clause also hands the handler an exnref for the exception it
+    /// caught, which the exception carries on top of its payload.
+    forwards_exn: bool,
     /// A free linear register the catch block may use to move a payload word
     /// into its slot.
     scratch: MachineReg,
@@ -2912,24 +2915,30 @@ struct EhCellReload {
 /// Runs once every block exists: a handler's parameter registers are chosen
 /// when that block is lowered, which may happen after the call that needed the
 /// dispatcher.
-/// One frame slot a catch handler reloads its incoming payload from.
+/// One frame slot a catch handler reads an incoming exception value out of.
+#[derive(Clone, Copy, Debug)]
 struct EhPayloadSlot {
     addr: MachineAddr,
     ty: MachineStorageType,
     width: MachineMemWidth,
 }
 
-/// The first frame slot a handler reloads a cached cell from, when the cell is
-/// how the payload reaches it.
-/// Return one slot for each leading `Load` + `Move` pair, in program order.
+/// The slots a handler block reads the payload from, in program order.
+///
+/// A handler consumes the payload the way it consumes any other value that
+/// arrives on the stack: through whatever its block entry says. When the value
+/// lands in a parameter register the block reads it there and there is nothing
+/// to store; when it crossed a call the block starts by filling it from a frame
+/// slot, and that leading run of loads names the slots. Requiring a cached cell
+/// after each load would miss the second shape, which is the common one: a
+/// handler that binds the payload into a plain local.
 fn payload_slots(handler: &MachineBlock, want: usize) -> collections::Vec<EhPayloadSlot> {
     use crate::vm::jit::machine::machine_ir::MachineRegOwner;
 
     let mut slots = collections::Vec::with_capacity(want);
     let mut index = 0;
     while slots.len() < want {
-        let (Some(load), Some(move_inst)) = (handler.ops.get(index), handler.ops.get(index + 1))
-        else {
+        let (Some(load), Some(bind)) = (handler.ops.get(index), handler.ops.get(index + 1)) else {
             break;
         };
         let MachineInstKind::Load {
@@ -2942,16 +2951,24 @@ fn payload_slots(handler: &MachineBlock, want: usize) -> collections::Vec<EhPayl
         else {
             break;
         };
-        let MachineInstKind::Move {
-            owner: MachineRegOwner::CachedCell,
-            dst: cell,
-            src: MachineValue::Reg(src),
-            ..
-        } = &move_inst.kind
-        else {
-            break;
+        // The slot only carries the payload when the handler binds what it
+        // loaded straight into a cell: either by moving it into the register
+        // the cell lives in, or by storing it into the cell's frame home when
+        // the handler binds the payload into a plain local.
+        let binds = match &bind.kind {
+            MachineInstKind::Move {
+                owner: MachineRegOwner::CachedCell,
+                dst: cell,
+                src: MachineValue::Reg(src),
+                ..
+            } => dst == src && dst != cell,
+            MachineInstKind::Store {
+                src: MachineValue::Reg(src),
+                ..
+            } => dst == src,
+            _ => false,
         };
-        if dst != src || dst == cell {
+        if !binds {
             break;
         }
         slots.push(EhPayloadSlot {
@@ -2979,37 +2996,56 @@ fn finish_eh_dispatch(
             ));
         };
         // A handler's parameters are its own values plus the registers its
-        // cached locals live in on entry. Only the former carry the exception
-        // payload; the latter are written by the handler itself when it reloads
+        // cached locals live in on entry. Only the former carry exception
+        // values; the latter are written by the handler itself when it reloads
         // a cell, so an identity argument is all they need.
-        let value_count = handler
-            .params
-            .iter()
-            .filter(|param| param.owner == MachineRegOwner::LinearValue)
-            .count();
-        if value_count > fixup.payload_arity as usize {
-            // The handler wants values the exception does not carry: the ones
-            // that were already on the stack at the try site. Those are gone
-            // once the frame has unwound, so the exception keeps unwinding
-            // instead of being caught with the wrong arguments.
-            if let Some(block) = blocks.get_mut(fixup.block.as_usize()) {
-                block.terminator = MachineTerminator::Jump(MachineEdge {
-                    target: fixup.rethrow,
-                    args: collections::Vec::new(),
-                });
-            }
-            continue;
-        }
-        // A catch label takes only what its own arity asks for; the rest of the
-        // payload is dropped, exactly as a br to that label would drop it.
-        let first_word = fixup.payload_arity as usize - value_count;
-        let payload_regs = handler
+        let linear = handler
             .params
             .iter()
             .filter(|param| param.owner == MachineRegOwner::LinearValue)
             .map(|param| param.reg)
             .collect::<collections::Vec<_>>();
-        let slots = payload_slots(handler, fixup.payload_arity as usize);
+        let payload_arity = fixup.payload_arity as usize;
+        // Everything the exception can hand over: its payload plus, for a
+        // `catch_ref` clause, the exnref it carries on top of it.
+        let carried = payload_arity.saturating_add(usize::from(fixup.forwards_exn));
+        if linear.len() > carried {
+            rethrow_uncaught(blocks, fixup);
+            continue;
+        }
+        // A catch label takes only what its own arity asks for; the rest of the
+        // payload is dropped, exactly as a br to that label would drop it.
+        let first_word = payload_arity.saturating_sub(linear.len());
+        let scratch = fixup.scratch;
+
+        // How the exception's values reach the handler: through its parameters,
+        // or through the frame slots its own leading reloads name. A `catch_ref`
+        // clause hands over one value more than the payload, and that value is
+        // on top of the stack, so it is the last parameter -- or, when the
+        // handler binds its incoming values into cells, the first slot.
+        let mut payload_regs = linear.as_slice();
+        let mut exn_reg = None;
+        let mut slots = collections::Vec::new();
+        if fixup.forwards_exn {
+            if linear.len() == carried {
+                payload_regs = &linear[..carried - 1];
+                exn_reg = linear.last().copied();
+            } else if linear.is_empty() {
+                slots = payload_slots(handler, carried);
+                if slots.len() != carried {
+                    rethrow_uncaught(blocks, fixup);
+                    continue;
+                }
+            } else {
+                // Part of the handler's values in registers and part in slots
+                // is a shape the plain catch path never produces either; the
+                // exception keeps unwinding rather than being caught wrongly.
+                rethrow_uncaught(blocks, fixup);
+                continue;
+            }
+        } else {
+            slots = payload_slots(handler, payload_arity);
+        }
 
         let Some(block) = blocks.get_mut(fixup.block.as_usize()) else {
             return Err(WasmError::internal(
@@ -3026,29 +3062,39 @@ fn finish_eh_dispatch(
                 },
             });
         }
-        // The payload has to arrive where the handler reads it. This engine
-        // keeps block-crossing values in cells, so a handler that binds a catch
-        // payload begins by reloading that value from its frame home; those
-        // loads name the slots, and the wasm stack pops the payload top first,
-        // so the last one takes the first word.
-        let scratch = fixup.scratch;
-        if slots.len() == fixup.payload_arity as usize {
+        if let Some(reg) = exn_reg {
+            ops.push(MachineInst {
+                kind: MachineInstKind::EhHelper {
+                    op: EhHelperOp::ExnRef,
+                    dst: reg,
+                    imm: 0,
+                },
+            });
+        }
+        // Values the handler binds from its frame homes: the loads in front of
+        // it name the slots. The wasm stack pops the exception's values top
+        // first, so the first load takes the value on top -- the exnref when the
+        // clause forwards one -- and the payload words follow in reverse.
+        if fixup.forwards_exn && !slots.is_empty() {
+            push_payload_store(&mut ops, scratch, slots[0], EhHelperOp::ExnRef, 0);
+            for word in 0..payload_arity {
+                push_payload_store(
+                    &mut ops,
+                    scratch,
+                    slots[1 + (payload_arity - 1 - word)],
+                    EhHelperOp::Payload,
+                    word as u32,
+                );
+            }
+        } else if slots.len() == payload_arity {
             for (word, slot) in slots.iter().enumerate() {
-                ops.push(MachineInst {
-                    kind: MachineInstKind::EhHelper {
-                        op: EhHelperOp::Payload,
-                        dst: scratch,
-                        imm: (slots.len() - 1 - word) as u32,
-                    },
-                });
-                ops.push(MachineInst {
-                    kind: MachineInstKind::Store {
-                        ty: slot.ty,
-                        addr: slot.addr,
-                        width: slot.width,
-                        src: MachineValue::Reg(scratch),
-                    },
-                });
+                push_payload_store(
+                    &mut ops,
+                    scratch,
+                    *slot,
+                    EhHelperOp::Payload,
+                    (slots.len() - 1 - word) as u32,
+                );
             }
         }
         ops.extend(block.ops.drain(..));
@@ -3067,12 +3113,62 @@ fn finish_eh_dispatch(
             });
         }
         block.ops = ops;
+        // The handler's parameters come in its own order: the values the
+        // exception delivers first, then the registers its cells live in.
+        let mut args =
+            collections::Vec::with_capacity(payload_regs.len() + fixup.handler_args.len());
+        args.extend(payload_regs.iter().copied().map(MachineValue::Reg));
+        if let Some(reg) = exn_reg {
+            args.push(MachineValue::Reg(reg));
+        }
+        args.extend(fixup.handler_args.iter().copied());
         block.terminator = MachineTerminator::Jump(MachineEdge {
             target: fixup.handler,
-            args: fixup.handler_args.clone(),
+            args,
         });
     }
     Ok(())
+}
+
+/// Hand the exception on instead of catching it wrongly.
+///
+/// A handler that wants values the exception does not carry wants the ones that
+/// were already on the stack at the try site; those are gone once the frame has
+/// unwound, so the exception keeps unwinding.
+fn rethrow_uncaught(blocks: &mut [MachineBlock], fixup: &EhCatchFixup) {
+    if let Some(block) = blocks.get_mut(fixup.block.as_usize()) {
+        block.terminator = MachineTerminator::Jump(MachineEdge {
+            target: fixup.rethrow,
+            args: collections::Vec::new(),
+        });
+    }
+}
+
+/// Read one of the exception's values into the scratch lane and store it into
+/// the frame slot the handler reads it from.
+fn push_payload_store(
+    ops: &mut collections::Vec<MachineInst>,
+    scratch: MachineReg,
+    slot: EhPayloadSlot,
+    op: crate::vm::jit::machine::machine_ir::EhHelperOp,
+    imm: u32,
+) {
+    use crate::vm::jit::machine::machine_ir::MachineValue;
+    ops.push(MachineInst {
+        kind: MachineInstKind::EhHelper {
+            op,
+            dst: scratch,
+            imm,
+        },
+    });
+    ops.push(MachineInst {
+        kind: MachineInstKind::Store {
+            ty: slot.ty,
+            addr: slot.addr,
+            width: slot.width,
+            src: MachineValue::Reg(scratch),
+        },
+    });
 }
 
 /// How a catch handler's cached cells cross the throw that led to it.
@@ -3187,10 +3283,7 @@ fn attach_eh_dispatch(
         .map(|clause| clause.payload_arity)
         .max()
         .unwrap_or(0);
-    if scope.catches.is_empty()
-        || scope.catches.iter().any(|clause| clause.forwards_exn)
-        || max_arity > EH_MAX_PAYLOAD
-    {
+    if scope.catches.is_empty() || max_arity > EH_MAX_PAYLOAD {
         return Ok(false);
     }
     // The tag test writes a plain machine word; no backend accepts a reserved
@@ -3253,6 +3346,7 @@ fn attach_eh_dispatch(
             handler: MachineBlockId(clause.handler.as_usize() as u32),
             rethrow,
             payload_arity: clause.payload_arity,
+            forwards_exn: clause.forwards_exn,
             scratch: flag,
             handler_args: clause_handover[index].0.clone(),
             reloads: clause_handover[index].1.clone(),

@@ -780,8 +780,12 @@ impl<'a> BlockLowerContext<'a> {
                 self.lower_elem_drop(*elem_idx)?;
                 LeafLowering::InPlace
             }
-            P::EhAllocExnRef { tag_idx } => {
-                self.lower_eh_alloc_exn_ref(*tag_idx, results)?;
+            P::EhAllocExnRef {
+                tag_idx,
+                start_slot,
+                slot_count,
+            } => {
+                self.lower_eh_alloc_exn_ref(*tag_idx, *start_slot, *slot_count, results)?;
                 LeafLowering::InPlace
             }
             P::GlobalGet { idx } => {
