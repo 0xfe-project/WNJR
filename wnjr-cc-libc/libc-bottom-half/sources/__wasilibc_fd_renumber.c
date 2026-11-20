@@ -44,10 +44,6 @@ int close(int fd) {
   return 0;
 }
 
-#ifndef __webp2__
-weak void __wasilibc_populate_preopens(void) {
-  // This version does nothing. It may be overridden by a version which does
-  // something if `__wasilibc_find_abspath` or `__wasilibc_find_relpath` are
-  // used.
-}
-#endif
+/* The weak placeholder that upstream carries here is for programs that link
+ * without preopens.c: this tree always has it, and this frontend reports two
+ * definitions of one name rather than letting the linker pick the strong one. */
