@@ -628,7 +628,6 @@ fn lower_function(
                             &mut eh_fixups,
                             &entry_cache_params,
                             &explicit_cache,
-                            &block_entry_cache_dirty,
                         )?;
                         push_lowered_block(
                             current_block,
@@ -3160,7 +3159,6 @@ fn attach_eh_dispatch(
     eh_fixups: &mut collections::Vec<EhCatchFixup>,
     entry_cache_params: &[collections::Vec<EntryCacheParam>],
     cached_cells: &[CachedCell],
-    entry_cache_dirty: &[collections::Vec<bool>],
 ) -> Result<bool, WasmError> {
     use crate::vm::jit::machine::machine_ir::{
         EhHelperOp, MachineBranchCond, MachineCompareKind, MachineEdge, MachineInst,
