@@ -12,3 +12,4 @@ BLUE.md
 NJVM.md
 vendor/
 *.o.tmp
+wnjr-cc/wnjr-cc-asan*

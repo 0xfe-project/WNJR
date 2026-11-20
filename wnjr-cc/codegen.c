@@ -242,6 +242,23 @@ static bool indirect_used;
 // means the one belonging to the unit asking.
 static HashMap *syms;
 
+// Symbols the program refers to and nothing defines. Compilation carries on past
+// them -- a missing function gets index 0 and a missing object address 0 -- so
+// that one run reports all of them instead of the first. The module is never
+// written when the list is not empty.
+static StringArray missing;
+static StringArray missing_where;
+
+static void note_missing(Token *tok, const char *name) {
+  for (int i = 0; i < missing.len; i++)
+    if (!strcmp(missing.data[i], name))
+      return;
+  strarray_push(&missing, (char *)name);
+  strarray_push(&missing_where,
+                tok ? format("%s:%d", tok->file->name, tok->line_no)
+                    : (char *)"a static initialiser");
+}
+
 // The definition a name has in the program, or NULL. Only a definition, an
 // import or an alias answers: a bare declaration is not something to call or to
 // take the address of.
@@ -330,6 +347,15 @@ static void build_symbols(Obj *prog) {
 }
 
 
+// chibicc marks a function whose parameter list is empty -- f() -- variadic,
+// because at that point in the parser an empty list and "..." are the same thing.
+// Here they are not: C requires a named parameter before the "...", so a variadic
+// type with no parameters is an old-style declaration with none, and the calling
+// convention treats it as taking nothing extra.
+static bool takes_varargs(Type *fnty) {
+  return fnty && fnty->is_variadic && fnty->params != NULL;
+}
+
 // The wasm type of parameter j of a C function type, under this frontend's two
 // conventions: a struct or union return is one hidden address first, and a
 // variadic function takes the caller's argument buffer last.
@@ -358,7 +384,7 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
   }
   // A variadic callee takes the argument buffer's address as one more
   // parameter, so that its signature matches what gen_call passes.
-  if (fnty->is_variadic)
+  if (takes_varargs(fnty))
     n++;
   const char *result = NULL;
   if (!sret && fnty->return_ty->kind != TY_VOID) {
@@ -398,7 +424,7 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
     s->params[i++] = PTR_MEM;
   for (Type *p = fnty->params; p; p = p->next)
     s->params[i++] = is_aggregate(p) ? PTR_MEM : ir_ty(p);
-  if (fnty->is_variadic)
+  if (takes_varargs(fnty))
     s->params[i++] = PTR_MEM;
   return (uint32_t)nsigs++;
 }
@@ -505,16 +531,18 @@ static E *gen_addr(Node *node) {
       // the value to use. An imported function has an index too, and one
       // defined in another translation unit is found by name.
       Obj *fn = definition_of(node->var);
-      if (!fn->is_definition && !fn->import_module && !fn->is_alias)
-        unsupported(node->tok,
-                    "the address of a function the program does not define");
       indirect_used = true;
+      if (!fn->is_definition && !fn->import_module && !fn->is_alias) {
+        note_missing(node->tok, fn->name);
+        return e_i32(0);
+      }
       return e_i32(fn->offset);
     }
     Obj *def = definition_of(node->var);
-    if (!def->is_definition)
-      unsupported(node->tok,
-                  "a reference to a variable the program does not define");
+    if (!def->is_definition) {
+      note_missing(node->tok, def->name);
+      return e_i32(0);
+    }
     return e_i32(def->offset);
   case ND_DEREF:
     return gen_expr(node->lhs);
@@ -763,10 +791,10 @@ static uint32_t func_index(Obj *fn) {
   // said where it comes from, when it is another name for a function here, or
   // when another unit defines it.
   Obj *def = definition_of(fn);
-  if (!def->is_definition && !def->import_module && !def->is_alias)
-    error_tok(fn->tok,
-              "wnjr-cc: %s is not defined in this program and carries no import attribute",
-              fn->name);
+  if (!def->is_definition && !def->import_module && !def->is_alias) {
+    note_missing(fn->tok, fn->name);
+    return 0;
+  }
   return (uint32_t)def->offset;
 }
 
@@ -816,7 +844,7 @@ static E *gen_call(Node *node) {
   // A variadic callee's "..." arguments are not parameters: the caller lays them
   // out in a buffer of its own frame and passes that buffer's address as the
   // last argument (parse.c:funcall made the buffer a local).
-  bool variadic = node->func_ty && node->func_ty->is_variadic;
+  bool variadic = takes_varargs(node->func_ty);
   Obj *vb = variadic ? node->va_buf : NULL;
   Type *declared = node->func_ty ? node->func_ty->params : NULL;
   int slot = 0;
@@ -1472,8 +1500,10 @@ static void gen_stmt(Node *node) {
     return;
 
   case ND_GOTO:
+      if (!node->unique_label)
+      unsupported(node->tok, "a jump to a label the function does not name");
     OP(nj_op_jmp(out, label_id(node->unique_label)));
-    return;
+      return;
 
   case ND_GOTO_EXPR:
     OP(nj_op_gotoindirect(out, gen_expr(node->lhs)));
@@ -1594,10 +1624,10 @@ static void resolve_relocations(Obj *prog) {
       // parse.c puts a computed-goto label here as its own name, and a label is
       // not an object: the program has no symbol for it.
       Obj *target = find_symbol(*rel->label, var->tu);
-      if (!target)
-        error_obj(var,
-                  format("%s is initialised with %s, which no translation unit "
-                         "defines", var->name, *rel->label));
+      if (!target) {
+        note_missing(var->tok, *rel->label);
+        continue;
+      }
       // A function's value is its index in the function-pointer table, which
       // is assigned from `offset` when the function indices are handed out.
       if (target->is_function)
@@ -1633,6 +1663,7 @@ static void emit_type_array(const char **tys, int n) {
   mp_end_container(out, a, (size_t)n);
 }
 
+
 static void emit_function(Obj *fn) {
   reset_locals();
   reset_labels();
@@ -1661,7 +1692,7 @@ static void emit_function(Obj *fn) {
   // argument buffer; a wasm signature is fixed, so the "..." arguments cannot
   // be parameters of their own.
   int va_param = -1;
-  if (fn->ty->is_variadic)
+  if (takes_varargs(fn->ty))
     va_param = add_local(PTR_MEM);
   nparams = nlocals;
   fp_local = new_temp("I32");
@@ -2059,4 +2090,14 @@ void njvm_emit_module(Obj *prog, Mp *m) {
 
   mp_end_container(out, mod, fields);
   mp_end_container(out, env, 2);
+
+  // A reference to something nothing defines was given index 0 or address 0
+  // above so that the rest of the program could still be checked. Say which, and
+  // do not let the module out.
+  if (missing.len) {
+    for (int i = 0; i < missing.len; i++)
+      fprintf(stderr, "wnjr-cc: undefined: %s (used at %s)\n", missing.data[i],
+              missing_where.data[i]);
+    error("wnjr-cc: %d symbol(s) are used and defined nowhere", missing.len);
+  }
 }
