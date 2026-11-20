@@ -1,0 +1,19 @@
+sum_inner 3 4
+sum_big_inner 5
+sum_outer_inner 6 7
+swap_inner 1 2
+add_pairs_inner 1 2
+mutate_copy_inner 1 2
+copy_is_independent 1 2
+assign_copy 3 4
+assign_chain 5
+member_of_call 7 8
+member_of_returned_nested
+recurse_struct_inner 1 5
+combine_inner 2 3
+sum_by_pointer_inner 9 10
+make_via_pointer_inner 11 12
+call_through_two_levels 13 14
+big_roundtrip 7
+union_by_value 258
+array_in_struct_inner 5

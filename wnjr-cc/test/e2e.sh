@@ -7,6 +7,11 @@
 #
 #   test/e2e/<name>.c       the translation unit (no libc)
 #   test/e2e/<name>.calls   one call per line: "<function> [int arg...]"
+
+# The driver that gives the expected answers declares every call as
+# int(int, ...), because the call table carries nothing but integers. That
+# means a function with a struct parameter or a struct return cannot be
+# driven directly: call it from an int wrapper in the same file instead.
 #
 # Usage: test/e2e.sh [case...]
 

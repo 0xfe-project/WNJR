@@ -1262,6 +1262,16 @@ static void initializer2(Token **rest, Token *tok, Initializer *init) {
   }
 
   if (init->ty->kind == TY_UNION) {
+    // A union can also be initialized from another union, the same way a
+    // struct can; upstream chibicc only handled the struct case.
+    if (!equal(tok, "{")) {
+      Node *expr = assign(rest, tok);
+      add_type(expr);
+      if (expr->ty->kind == TY_UNION) {
+        init->expr = expr;
+        return;
+      }
+    }
     union_initializer(rest, tok, init);
     return;
   }
@@ -1350,7 +1360,9 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
     return node;
   }
 
-  if (ty->kind == TY_UNION) {
+  // A union initialized from another union carries an expression, not a list
+  // of members; the assignment at the end of this function handles it.
+  if (ty->kind == TY_UNION && !init->expr) {
     Member *mem = init->mem ? init->mem : ty->members;
     InitDesg desg2 = {desg, 0, mem};
     return create_lvar_init(init->children[mem->idx], mem->ty, &desg2, tok);

@@ -95,9 +95,21 @@ indirect call is `call_indirect` with the signature the pointer's C type
 spells out: each distinct signature becomes one entry in the module's type
 list, collected while the bodies are emitted. Function addresses work
 anywhere a value does, including a static initialiser (a relocation whose
-target is a function). Not yet: struct arguments and returns by value,
-VLAs, bitfields, `_Atomic`, `asm`, and anything needing libc — there are no
-imports yet.
+target is a function).
+
+Structs and unions travel by value with the same trick the objects already
+use: the value of an aggregate expression is its address. A parameter
+arrives as the address of the caller's object and the callee copies it into
+its own frame in the prologue, so writing to a parameter cannot reach the
+caller and `&param` is a per-activation address; a return goes through a
+hidden first parameter pointing at a buffer the caller allocated (parse.c
+already gives each such call a local for it), so nothing wider than a wasm
+value has to cross the boundary; assignment is a `memory.copy`. Both struct
+parameters and struct returns are therefore one `i32` each in a function
+pointer's signature, which is why the two features meet cleanly.
+
+Not yet: VLAs, bitfields, `_Atomic`, `asm`, and anything needing libc —
+there are no imports yet.
 
 The type table is chibicc's LP64 one, so `long` and a pointer are eight bytes
 wide; only the low 32 bits of a pointer slot are an address, and the upper half

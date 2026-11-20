@@ -189,16 +189,20 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
   if (!fnty || fnty->kind != TY_FUNC)
     unsupported(tok, "a call through something that is not a function pointer");
 
-  int n = 0;
+  // A struct parameter travels as the address of the caller's copy and a
+  // struct return goes through a hidden first parameter, so each is one i32
+  // in the wasm signature — the same convention a direct call uses.
+  bool sret = is_aggregate(fnty->return_ty);
+  int n = sret ? 1 : 0;
   for (Type *p = fnty->params; p; p = p->next) {
-    if (!is_scalar(p))
-      unsupported(tok, "passing a struct or union by value through a function pointer");
+    if (!is_scalar(p) && !is_aggregate(p))
+      unsupported(tok, "a parameter of this type through a function pointer");
     n++;
   }
   const char *result = NULL;
-  if (fnty->return_ty->kind != TY_VOID) {
+  if (!sret && fnty->return_ty->kind != TY_VOID) {
     if (!is_scalar(fnty->return_ty))
-      unsupported(tok, "returning a struct or union by value through a function pointer");
+      unsupported(tok, "returning this type by value through a function pointer");
     result = ir_ty(fnty->return_ty);
   }
 
@@ -230,8 +234,10 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
   s->nparams = n;
   s->result = result;
   int i = 0;
+  if (sret)
+    s->params[i++] = PTR_MEM;
   for (Type *p = fnty->params; p; p = p->next)
-    s->params[i++] = ir_ty(p);
+    s->params[i++] = is_aggregate(p) ? PTR_MEM : ir_ty(p);
   return (uint32_t)nsigs++;
 }
 
@@ -349,6 +355,17 @@ static E *gen_addr(Node *node) {
     E *base = gen_addr(node->lhs);
     return e_addr(base, node->member->offset);
   }
+  // An expression that *is* an aggregate has its address as its value, so an
+  // aggregate-valued call or assignment can be indexed, member-selected or
+  // copied like any other object.
+  case ND_FUNCALL:
+  case ND_ASSIGN:
+  case ND_COMMA:
+  case ND_COND:
+  case ND_STMT_EXPR:
+    if (is_aggregate(node->ty))
+      return to_temp(gen_expr(node));
+    unsupported(node->tok, "taking the address of this expression");
   default:
     unsupported(node->tok, "taking the address of this expression");
   }
@@ -504,18 +521,32 @@ static E *gen_call(Node *node) {
     indirect_used = true;
   }
 
+  // A struct return goes through a buffer the caller owns; parse.c has already
+  // made it a local of this function, so it has a frame slot before the body is
+  // generated, and its address is the hidden first argument.
+  Obj *rb = is_aggregate(node->ty) ? node->ret_buffer : NULL;
+  if (is_aggregate(node->ty) && !rb)
+    unsupported(node->tok, "a struct or union returned by this call");
+
   int nargs = 0;
   for (Node *arg = node->args; arg; arg = arg->next)
     nargs++;
-  E **args = nargs ? calloc((size_t)nargs, sizeof(E *)) : NULL;
-  if (nargs && !args)
+  E **args = calloc((size_t)nargs + 1, sizeof(E *));
+  if (!args)
     error("out of memory");
   int i = 0;
+  if (rb)
+    args[i++] = e_i32(rb->offset);
   for (Node *arg = node->args; arg; arg = arg->next) {
-    if (!is_scalar(arg->ty))
-      unsupported(arg->tok, "passing a struct or union by value");
+    // A struct argument is passed as the address of the argument object; the
+    // callee copies it into its own frame, so by-value semantics hold without a
+    // temporary here. parse.c inserts no cast for a struct parameter, so the
+    // value of the expression is already that address.
+    if (!is_scalar(arg->ty) && !is_aggregate(arg->ty))
+      unsupported(arg->tok, "a variable-length array argument");
     args[i++] = gen_expr(arg);
   }
+  size_t narg = (size_t)i;
 
   // The arguments are evaluated before the callee (erase.rs documents that
   // order for CallIndirect), so a callee expression that itself contains a
@@ -523,22 +554,29 @@ static E *gen_call(Node *node) {
   E *callee_e = direct ? NULL : to_temp(gen_expr(callee));
 
   E *result;
-  if (node->ty->kind == TY_VOID) {
+  if (rb) {
+    // The callee wrote into the buffer and returned nothing; the value of the
+    // call is that buffer's address.
     if (direct)
-      OP(nj_op_call(out, idx, args, (size_t)nargs));
+      OP(nj_op_call(out, idx, args, narg));
     else
-      OP(nj_op_callindirect(out, type_idx, 0, callee_e, args, (size_t)nargs));
+      OP(nj_op_callindirect(out, type_idx, 0, callee_e, args, narg));
+    result = e_i32(rb->offset);
+  } else if (node->ty->kind == TY_VOID) {
+    if (direct)
+      OP(nj_op_call(out, idx, args, narg));
+    else
+      OP(nj_op_callindirect(out, type_idx, 0, callee_e, args, narg));
     result = e_i32(0);
   } else {
     int t = new_temp(ir_ty(node->ty));
     if (direct)
-      OP(nj_op_localset_call(out, (uint32_t)t, idx, args, (size_t)nargs));
+      OP(nj_op_localset_call(out, (uint32_t)t, idx, args, narg));
     else
-      OP(nj_op_localset_callindirect(out, (uint32_t)t, type_idx, 0, callee_e, args,
-                                     (size_t)nargs));
+      OP(nj_op_localset_callindirect(out, (uint32_t)t, type_idx, 0, callee_e, args, narg));
     result = e_local(t, local_ty[t]);
   }
-  for (int j = 0; j < nargs; j++)
+  for (size_t j = 0; j < narg; j++)
     e_free(args[j]);
   free(args);
   if (callee_e)
@@ -604,6 +642,17 @@ static E *gen_expr(Node *node) {
     return gen_addr(node->lhs);
 
   case ND_ASSIGN: {
+    if (is_aggregate(node->lhs->ty)) {
+      // A struct or union assignment is a byte copy of the object; the value of
+      // the expression is the destination, whose address is what an aggregate
+      // value is everywhere else in this file.
+      E *dst = to_temp(gen_addr(node->lhs));
+      E *src = to_temp(gen_expr(node->rhs));
+      int size = node->lhs->ty->size;
+      OP(nj_op_memorycopy(out, dst, src, e_i32(size)));
+      e_free(src);
+      return dst;
+    }
     // The value of an assignment is a snapshot of what was stored, taken before
     // the store: parse.c's compound-assignment lowering re-reads the lvalue from
     // its own value expression, so returning the tree would read the *new*
@@ -642,6 +691,16 @@ static E *gen_expr(Node *node) {
     return gen_cond(node);
 
   case ND_CAST: {
+    if (is_aggregate(node->ty)) {
+      // C allows a cast to the same struct or union type and nothing wider, and
+      // here the value of an aggregate expression is its address, so the cast
+      // is a no-op. Upstream chibicc wraps the right side of every union
+      // assignment in one; keeping that shape keeps the AST dump identical to
+      // chibicc's, which test/dump-test.sh compares.
+      if (node->lhs->ty->kind != node->ty->kind || node->lhs->ty->size != node->ty->size)
+        unsupported(node->tok, "a cast between two different struct or union types");
+      return gen_expr(node->lhs);
+    }
     E *v = gen_expr(node->lhs);
     if (!is_scalar(node->ty))
       unsupported(node->tok, "a cast to a struct or union");
@@ -715,8 +774,16 @@ static void gen_stmt(Node *node) {
 
   case ND_RETURN: {
     E *v = node->lhs ? gen_expr(node->lhs) : NULL;
+    // The value of an aggregate expression is its address, so returning one
+    // is a copy through the hidden buffer pointer — local 0 — and the copy
+    // has to happen before the frame goes away.
+    bool agg = v && is_aggregate(node->lhs->ty);
     int t = -1;
-    if (v) {
+    if (agg) {
+      E *src = to_temp(v); // frees v when it has to make a local
+      OP(nj_op_memorycopy(out, e_local(0, PTR_MEM), src, e_i32(node->lhs->ty->size)));
+      e_free(src);
+    } else if (v) {
       t = new_temp(v->ty);
       OP(nj_op_localset(out, t, v));
       e_free(v);
@@ -724,7 +791,9 @@ static void gen_stmt(Node *node) {
     if (frame_size)
       OP(nj_op_globalset(out, sp_global,
                          e_binary("Add", "I32", e_local(fp_local, "I32"), e_i32(frame_size))));
-    if (t >= 0)
+    if (agg)
+      OP(nj_op_return_void(out));
+    else if (t >= 0)
       OP(nj_op_return(out, e_local(t, local_ty[t])));
     else
       OP(nj_op_return_void(out));
@@ -930,11 +999,17 @@ static void emit_function(Obj *fn) {
   body_len = 0;
   frame_size = fn->stack_size;
 
-  for (Obj *p = fn->params; p; p = p->next) {
-    if (!is_scalar(p->ty))
-      unsupported(p->tok, "a struct or union parameter");
-    add_local(ir_ty(p->ty));
+  // A struct or union return cannot be a wasm value, so the caller passes the
+  // address of its buffer as a hidden first parameter, exactly as the C ABI
+  // does; param i is then wasm local i + 1.
+  bool sret = is_aggregate(fn->ty->return_ty);
+  int arg_base = 0;
+  if (sret) {
+    add_local(PTR_MEM);
+    arg_base = 1;
   }
+  for (Obj *p = fn->params; p; p = p->next)
+    add_local(is_aggregate(p->ty) ? PTR_MEM : ir_ty(p->ty));
   nparams = nlocals;
   fp_local = new_temp("I32");
 
@@ -953,10 +1028,19 @@ static void emit_function(Obj *fn) {
   } else {
     OP(nj_op_localset(out, (uint32_t)fp_local, e_global((uint32_t)sp_global, "I32")));
   }
-  int i = 0;
+  int i = arg_base;
   for (Obj *p = fn->params; p; p = p->next) {
-    OP(nj_op_store(out, mem_ty(p->ty), frame_addr(p->offset), e_local((uint32_t)i, local_ty[i]), 0,
-                   0));
+    if (is_aggregate(p->ty)) {
+      // The caller passed the address of its own object; C says the callee
+      // gets a copy, so the copy happens here. That is also why &param is a
+      // per-activation address and why the argument needs no caller-side
+      // temporary.
+      OP(nj_op_memorycopy(out, frame_addr(p->offset), e_local((uint32_t)i, local_ty[i]),
+                          e_i32(p->ty->size)));
+    } else {
+      OP(nj_op_store(out, mem_ty(p->ty), frame_addr(p->offset),
+                     e_local((uint32_t)i, local_ty[i]), 0, 0));
+    }
     i++;
   }
 
@@ -971,7 +1055,8 @@ static void emit_function(Obj *fn) {
   fields++;
 
   mp_key(out, "results");
-  if (fn->ty->return_ty->kind == TY_VOID) {
+  if (fn->ty->return_ty->kind == TY_VOID || sret) {
+    // A struct return writes through the hidden parameter and yields nothing.
     int a = mp_begin_arr(out);
     mp_end_container(out, a, 0);
   } else {
