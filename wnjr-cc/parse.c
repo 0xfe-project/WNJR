@@ -3582,6 +3582,9 @@ static Node *primary(Token **rest, Token *tok) {
       {"__sync_fetch_and_and", "And"}, {"__sync_fetch_and_or", "Or"},
       {"__sync_fetch_and_xor", "Xor"}, {"__sync_lock_test_and_set", "Xchg"},
       {"__sync_lock_release", "Store"},
+      // this frontend's own <stdatomic.h> spells atomic_exchange this way, and it
+      // is the same atomic exchange the line above is.
+      {"__builtin_atomic_exchange", "Xchg"},
     };
     for (int i = 0; i < sizeof(rmw) / sizeof(*rmw); i++) {
       if (!equal(tok, rmw[i].name))
@@ -4012,10 +4015,16 @@ static void scan_globals(void) {
       if (var != var2 && var2->is_definition && !strcmp(var->name, var2->name))
         break;
 
-    // If there's another definition, the tentative definition
-    // is redundant
-    if (!var2)
+    // If there's another definition, the tentative definition is redundant.
+    // It stops being a definition here rather than only being left out of the
+    // list: a reference made after it was declared still points at this object,
+    // and codegen resolves a reference that is not a definition by name -- which
+    // is how "int y = 7; int y;" reads 7 instead of reading from address zero.
+    if (!var2) {
       cur = cur->next = var;
+    } else {
+      var->is_definition = false;
+    }
   }
 
   cur->next = NULL;

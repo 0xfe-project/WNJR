@@ -141,6 +141,14 @@ static bool is_addr_value(Type *ty) {
 // word and the upper half is left alone. #634 puts the GC tag in that upper
 // half; when it lands this becomes "I64" and nothing else in this file moves.
 #define PTR_MEM "I32"
+// An address as a value, rather than as the contents of a memory word. NJVM-IR
+// has a type of its own for this (Type::Ptr, "equivalent to I32 in code
+// generation"), and the difference is not cosmetic: the signedness of a type is
+// what selects the comparison instruction, and C compares addresses as
+// unsigned. With pointers carried as plain I32, the comparison of two of them
+// came out signed, so (void *)0xffffffffffffffff > (void *)0 answered 0 here
+// where C says 1.
+#define PTR_TY "Ptr"
 
 // Where the thread-local block is. There is one execution context in this
 // runtime, so there is one TLS block, laid out with the globals and never copied:
@@ -157,6 +165,8 @@ static int tls_align = 1;
 // picks the signed or the unsigned instruction from it: an unsigned divide, a
 // right shift, a less-than. Narrow integers are promoted to int before any
 // arithmetic (usual_arith_conv), so they never reach here needing a U type.
+static Token *cur_tok;
+
 static const char *ir_ty(Type *ty) {
   switch (ty->kind) {
   case TY_FLOAT:
@@ -167,14 +177,14 @@ static const char *ir_ty(Type *ty) {
   case TY_PTR:
   case TY_ARRAY:
   case TY_FUNC:
-    return PTR_MEM;
+    return PTR_TY;
   // A variable-length array's value is the address of its region, so it is a
   // scalar of the pointer kind wherever it is not simply a place.
   case TY_VLA:
-    return PTR_MEM;
+    return PTR_TY;
   case TY_STRUCT:
   case TY_UNION:
-    error("internal error: %s is not a scalar type", __FILE__);
+    error_tok(cur_tok, "internal error: a struct or union has no IR type");
   default:
     if (ty->size == 8)
       return ty->is_unsigned ? "U64" : "I64";
@@ -299,6 +309,25 @@ static Obj *definition_of(Obj *ref) {
   return def ? def : ref;
 }
 
+// The function type a call to this object is emitted with. A call is typed by
+// the declaration its own unit saw, and in a whole program of several units the
+// definition of the same name may have been written with a different prototype:
+// chibicc's own test headers declare memcpy and memcmp with a long count where
+// the libc defines them with a size_t one, and this runtime has size_t at four
+// bytes against long's eight. Only a compiler that sees both units can settle
+// that, so the definition wins for the parameters, the "..." and the return type
+// alike. A pair of return types that disagree on being an aggregate keeps the
+// declaration instead: a struct return and a scalar return are not two spellings
+// of one convention, and parse.c has already built what the declaration implies.
+static Type *call_type_of(Obj *callee, Type *declared) {
+  Obj *def = definition_of(callee);
+  if (!def->ty || def->ty->kind != TY_FUNC || !declared || declared->kind != TY_FUNC)
+    return declared;
+  if (is_aggregate(def->ty->return_ty) != is_aggregate(declared->return_ty))
+    return declared;
+  return def->ty;
+}
+
 // C says a tentative definition -- `int x;` at file scope -- gives way to a real
 // one, and that two tentative definitions are one object. parse.c collapses them
 // inside a unit; this does it across units, and reports a name that is really
@@ -388,8 +417,8 @@ static const char *param_ir_type(Type *fnty, bool sret, int j) {
   int idx = sret ? 1 : 0;
   for (Type *p = fnty->params; p; p = p->next, idx++)
     if (idx == j)
-      return is_aggregate(p) ? PTR_MEM : ir_ty(p);
-  return PTR_MEM;
+      return is_aggregate(p) ? PTR_TY : ir_ty(p);
+  return PTR_TY;
 }
 
 // The index in `Module::types` of this function type, adding it if new.
@@ -446,11 +475,11 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
   s->result = result;
   int i = 0;
   if (sret)
-    s->params[i++] = PTR_MEM;
+    s->params[i++] = PTR_TY;
   for (Type *p = fnty->params; p; p = p->next)
-    s->params[i++] = is_aggregate(p) ? PTR_MEM : ir_ty(p);
+    s->params[i++] = is_aggregate(p) ? PTR_TY : ir_ty(p);
   if (takes_varargs(fnty))
-    s->params[i++] = PTR_MEM;
+    s->params[i++] = PTR_TY;
   return (uint32_t)nsigs++;
 }
 
@@ -472,18 +501,25 @@ static int add_local(const char *ty) {
   return nlocals++;
 }
 
+static E *as_type(E *e, const char *want);
+
 static int new_temp(const char *ty) {
   return add_local(ty);
 }
 
+// base + byte offset, in the type the base already has: a frame address and a
+// loaded pointer are both addresses, and this keeps the arithmetic in whichever
+// one it was handed.
 static E *e_addr(E *base, int offset) {
   if (!offset)
     return base;
-  return e_binary("Add", "I32", base, e_i32(offset));
+  return e_binary("Add", base->ty, base, as_type(e_i32(offset), base->ty));
 }
 
+// The address of a local, as a Ptr: two of them may be compared, and C compares
+// addresses as unsigned.
 static E *frame_addr(int offset) {
-  return e_addr(e_local(fp_local, "I32"), offset);
+  return e_addr(e_local(fp_local, PTR_TY), offset);
 }
 
 // ───────────────────────── labels ─────────────────────────
@@ -580,14 +616,14 @@ static E *gen_addr(Node *node) {
         note_missing(node->tok, fn->name);
         return e_i32(0);
       }
-      return e_i32(fn->offset);
+      return as_type(e_i32(fn->offset), PTR_TY);
     }
     Obj *def = definition_of(node->var);
     if (!def->is_definition) {
       note_missing(node->tok, def->name);
       return e_i32(0);
     }
-    return e_i32(def->offset);
+    return as_type(e_i32(def->offset), PTR_TY);
   case ND_DEREF:
     return gen_expr(node->lhs);
   // The designator of a variable-length array: the place where the address alloca
@@ -601,9 +637,17 @@ static E *gen_addr(Node *node) {
   // An expression that *is* an aggregate has its address as its value, so an
   // aggregate-valued call or assignment can be indexed, member-selected or
   // copied like any other object.
+  // C says a comma expression designates what its right operand designates, so
+  // "(i = 5, j) = 6" assigns through j after evaluating the left side. The left
+  // side is evaluated for its effect and its value dropped.
+  case ND_COMMA: {
+    E *a = gen_expr(node->lhs);
+    OP(nj_op_drop(out, a));
+    e_free(a);
+    return gen_addr(node->rhs);
+  }
   case ND_FUNCALL:
   case ND_ASSIGN:
-  case ND_COMMA:
   case ND_COND:
   case ND_STMT_EXPR:
     if (is_aggregate(node->ty))
@@ -625,6 +669,25 @@ static E *gen_load(Node *node, Type *ty, E *addr) {
   return v;
 }
 
+// A bitfield: the bits it occupies inside the storage unit at the member's
+// offset. The load brings the field to the top of a 64-bit word and shifts it
+// back down, which is right for every width and both signednesses -- the same
+// two shifts chibicc emits (codegen.c:760).
+static E *load_bitfield(Node *node, E *addr) {
+  Member *mem = node->member;
+  Type *ty = node->ty;
+  E *v = as_type(gen_load(node, ty, addr), "I64");
+  v = e_binary("Shl", "I64", v, e_i64(64 - mem->bit_width - mem->bit_offset));
+  v = e_binary("Shr", ty->is_unsigned ? "U64" : "I64", v, e_i64(64 - mem->bit_width));
+  return as_type(v, ir_ty(ty));
+}
+
+// A constant of the given IR type, from a 64-bit pattern.
+static E *wide_const(uint64_t v, const char *ty) {
+  if (!strcmp(ty, "I64") || !strcmp(ty, "U64"))
+    return as_type(e_i64((int64_t)v), ty);
+  return as_type(e_i32((int32_t)v), ty);
+}
 // A store takes the type its memory type produces on a load (see gen_load), so a
 // value of another IR type of the same width is converted first. An unsigned
 // 32-bit value into an i32 word is the pair that occurs: same bits, and the
@@ -835,10 +898,79 @@ static E *narrow_atomic_result(E *v, Type *cty) {
   return e_convert(narrow, ir_ty(cty), e_convert("I32", narrow, v));
 }
 
+// A floating-point constant of the given IR type, from the nearest double.
+static E *f_const(const char *fty, double d) {
+  if (!strcmp(fty, "F32")) {
+    float f = (float)d;
+    uint32_t bits;
+    memcpy(&bits, &f, sizeof bits);
+    return e_f32(bits);
+  }
+  uint64_t bits;
+  memcpy(&bits, &d, sizeof bits);
+  return e_f64(bits);
+}
+
+// A cast from a floating type to a signed integer. C leaves a value that does not
+// fit undefined, and the answer here is the one the C compiler this frontend is
+// compared against gives (x86's cvttsd2si): the smallest integer. A plain trunc
+// traps instead, and a trap takes the program with it -- chibicc's own float test
+// asserts that (double)(unsigned long)(long)-1 converts to -2147483648. NaN fails
+// both bound comparisons, so it lands in the same place. The bounds are powers of
+// two, which both float widths hold exactly.
+static E *float_to_int(E *v, bool wide) {
+  const char *fty = v->ty;
+  const char *ity = wide ? "I64" : "I32";
+  int x = new_temp(fty);
+  int t = new_temp(ity);
+  set_local((uint32_t)x, v);
+  uint32_t l_end = fresh_label();
+  set_local((uint32_t)t, as_type(wide ? e_i64(INT64_MIN) : e_i32(INT32_MIN), ity));
+  E *in_range = and_(cmp_("Ge", fty, e_local((uint32_t)x, fty),
+                           f_const(fty, wide ? -9223372036854775808.0 : -2147483648.0)),
+                     cmp_("Lt", fty, e_local((uint32_t)x, fty),
+                           f_const(fty, wide ? 9223372036854775808.0 : 2147483648.0)));
+  OP(nj_op_jmpif(out, falsy(in_range), l_end));
+  set_local((uint32_t)t, e_convert(fty, ity, e_local((uint32_t)x, fty)));
+  OP(nj_op_label(out, l_end));
+  return e_local((uint32_t)t, ity);
+}
+// A cast to a narrow integer truncates, and this frontend carries every integer
+// in an i32 (ir_ty names no narrow value type), so the truncation has to be said
+// out loud: to the narrow IR type -- which normalizes to the width and the
+// signedness, exactly as a load of that width does -- and back to the i32 the
+// value travels in. Without it a cast to short was a plain i32 wrap, and
+// (short)8590066177 came out 131585 instead of 513.
+static E *to_narrow(E *v, Type *ty) {
+  const char *want = ir_ty(ty);
+  v = as_type(v, want);
+  if (ty->size != 1 && ty->size != 2)
+    return v;
+  const char *narrow;
+  if (ty->size == 1)
+    narrow = ty->is_unsigned ? "U8" : "I8";
+  else
+    narrow = ty->is_unsigned ? "U16" : "I16";
+  return e_convert(narrow, want, e_convert(want, narrow, v));
+}
+// Convert a value to the C type `ty`, which is what a cast does and what a call
+// does with the value it gets back (see gen_call).
+static E *cast_value(E *v, Type *ty) {
+  // _Bool is not a truncation: C turns any non-zero value into 1.
+  if (ty->kind == TY_BOOL)
+    return truthy(v);
+  // A float to a signed integer does not simply truncate (see float_to_int). The
+  // unsigned targets keep the plain conversion.
+  if ((!strcmp(v->ty, "F32") || !strcmp(v->ty, "F64")) && is_integer(ty) && !ty->is_unsigned)
+    return to_narrow(float_to_int(v, ty->size == 8), ty);
+  return to_narrow(v, ty);
+}
 // The IR type a value of C type `ty` is carried in. Narrow integers travel as
-// i32, so this is the type a temp for that C type should have.
+// i32, so this is the type a temp for that C type should have. A struct or union
+// value is the address of the object (see the top of this file), so it travels as
+// a Ptr: "1 ? x : y" on two structs is a choice between two addresses.
 static const char *value_ty(Type *ty) {
-  return ir_ty(ty);
+  return is_aggregate(ty) ? PTR_TY : ir_ty(ty);
 }
 
 static E *gen_probe_ty(Node *node) {
@@ -886,8 +1018,8 @@ static void store_va_arg(Obj *vb, int off, Type *ty, E *val) {
   // An address — a pointer, or an array that decayed to one — is 32 bits wide in
   // a 64-bit slot, and va_arg reads the whole slot as a pointer, so the upper
   // half has to be a defined zero.
-  if (!strcmp(ir_ty(ty), PTR_MEM)) {
-    OP(nj_op_store(out, "I64", addr, e_convert(PTR_MEM, "I64", val), 0, 0));
+  if (!strcmp(ir_ty(ty), PTR_TY)) {
+    OP(nj_op_store(out, "I64", addr, e_convert(PTR_TY, "I64", val), 0, 0));
     return;
   }
   OP(nj_op_store(out, mem_ty(ty), addr, store_value(val, mem_ty(ty)), 0, 0));
@@ -907,7 +1039,7 @@ static E *gen_alloca(Node *node) {
   int t = new_temp("I32");
   set_local((uint32_t)t, p);
   OP(nj_op_globalset(out, (uint32_t)sp_global, e_local((uint32_t)t, "I32")));
-  return e_local((uint32_t)t, "I32");
+  return as_type(e_local((uint32_t)t, "I32"), PTR_TY);
 }
 
 static E *gen_call(Node *node) {
@@ -945,14 +1077,15 @@ static E *gen_call(Node *node) {
   // A variadic callee's "..." arguments are not parameters: the caller lays them
   // out in a buffer of its own frame and passes that buffer's address as the
   // last argument (parse.c:funcall made the buffer a local).
-  bool variadic = takes_varargs(node->func_ty);
+  Type *fnty = direct ? call_type_of(callee->var, node->func_ty) : node->func_ty;
+  bool variadic = takes_varargs(fnty);
   Obj *vb = variadic ? node->va_buf : NULL;
-  Type *declared = node->func_ty ? node->func_ty->params : NULL;
+  Type *declared = fnty ? fnty->params : NULL;
   int slot = 0;
 
   int i = 0;
   if (rb)
-    args[i++] = e_i32(rb->offset);
+    args[i++] = as_type(e_i32(rb->offset), PTR_TY);
   for (Node *arg = node->args; arg; arg = arg->next) {
     // A struct argument is passed as the address of the argument object; the
     // callee copies it into its own frame, so by-value semantics hold without a
@@ -962,6 +1095,10 @@ static E *gen_call(Node *node) {
       unsupported(arg->tok, "a variable-length array argument");
     E *val = gen_expr(arg);
     if (declared) {
+      // The argument was converted to the type of the declaration in scope; the
+      // parameter this call really lands on may be another one (call_type_of).
+      if (is_scalar(declared))
+        val = as_type(val, ir_ty(declared));
       args[i++] = val;
       declared = declared->next;
       continue;
@@ -975,8 +1112,12 @@ static E *gen_call(Node *node) {
     slot += align_to(arg->ty->size, 8);
     e_free(val);
   }
-  if (variadic)
-    args[i++] = vb ? frame_addr(vb->offset) : e_i32(0);
+  if (variadic) {
+    // A call with no "..." argument of its own still has to fill the slot
+    // (parse.c makes the buffer only when there is one), and a null address
+    // says there is nothing for the callee to read.
+    args[i++] = vb ? frame_addr(vb->offset) : as_type(e_i32(0), PTR_TY);
+  }
   size_t narg = (size_t)i;
 
   // The arguments are evaluated before the callee (erase.rs documents that
@@ -992,20 +1133,31 @@ static E *gen_call(Node *node) {
       OP(nj_op_call(out, idx, args, narg));
     else
       OP(nj_op_callindirect(out, type_idx, 0, callee_e, args, narg));
-    result = e_i32(rb->offset);
-  } else if (node->ty->kind == TY_VOID) {
+    result = as_type(e_i32(rb->offset), PTR_TY);
+  } else if ((fnty ? fnty->return_ty : node->ty)->kind == TY_VOID) {
     if (direct)
       OP(nj_op_call(out, idx, args, narg));
     else
       OP(nj_op_callindirect(out, type_idx, 0, callee_e, args, narg));
     result = e_i32(0);
   } else {
-    int t = new_temp(ir_ty(node->ty));
+    // What the call leaves behind is the callee's own return type; what the caller
+    // has is the declaration it saw. The two differ only in a program whose units
+    // disagree about a prototype, and then both halves matter: chibicc's own test
+    // declares "_Bool true_fn();" for a function that returns 513 and expects 1.
+    Type *def_ret = fnty ? fnty->return_ty : node->ty;
+    int t = new_temp(ir_ty(def_ret));
     if (direct)
       OP(nj_op_localset_call(out, (uint32_t)t, idx, args, narg));
     else
       OP(nj_op_localset_callindirect(out, (uint32_t)t, type_idx, 0, callee_e, args, narg));
-    result = e_local(t, local_ty[t]);
+    // The upper bits of a narrow return are cleared, not normalized: chibicc
+    // clears them after a call (movzx/movsbl, codegen.c:941) and its own tests
+    // depend on that -- a _Bool function that returns 512 answers 0, because the
+    // low byte is 0, while a cast to _Bool of 512 answers 1. So this is a
+    // truncation to the declared width, not cast_value.
+    E *raw = e_local(t, local_ty[t]);
+    result = is_aggregate(node->ty) ? raw : to_narrow(raw, node->ty);
   }
   for (size_t j = 0; j < narg; j++)
     e_free(args[j]);
@@ -1231,7 +1383,7 @@ static E *gen_expr(Node *node) {
   case ND_MEMSET: {
     // The destination is evaluated once; its address is also the value, which is
     // what C's memcpy and memset return.
-    int t = new_temp(PTR_MEM);
+    int t = new_temp(PTR_TY);
     set_local((uint32_t)t, gen_expr(node->lhs));
     E *src = gen_expr(node->rhs);
     // A length is a size_t, which is eight bytes wide here, and both engine ops
@@ -1241,10 +1393,10 @@ static E *gen_expr(Node *node) {
     if (strcmp(lty, PTR_MEM))
       len = e_convert(lty, PTR_MEM, len);
     if (node->kind == ND_MEMCPY)
-      OP(nj_op_memorycopy(out, e_local((uint32_t)t, PTR_MEM), src, len));
+      OP(nj_op_memorycopy(out, e_local((uint32_t)t, PTR_TY), src, len));
     else
-      OP(nj_op_memoryfill(out, e_local((uint32_t)t, PTR_MEM), src, len));
-    return e_local((uint32_t)t, PTR_MEM);
+      OP(nj_op_memoryfill(out, e_local((uint32_t)t, PTR_TY), src, len));
+    return e_local((uint32_t)t, PTR_TY);
   }
 
   // Atomic builtins. The value lives in memory and nowhere else, so each of
@@ -1346,6 +1498,8 @@ static E *gen_expr(Node *node) {
     E *addr = gen_addr(node);
     if (is_addr_value(node->ty))
       return addr; // an array, struct or function is its address
+    if (node->kind == ND_MEMBER && node->member->is_bitfield)
+      return load_bitfield(node, addr);
     return gen_load(node, node->ty, addr);
   }
 
@@ -1373,6 +1527,28 @@ static E *gen_expr(Node *node) {
     int t = new_temp(val->ty);
     set_local((uint32_t)t, val);
     e_free(val);
+    if (node->lhs->kind == ND_MEMBER && node->lhs->member->is_bitfield) {
+      // Read the unit, clear the field's bits, or the new value in, write it back
+      // (chibicc's merge, codegen.c:781). The value of the assignment is the value
+      // stored, not the merged word.
+      Member *mem = node->lhs->member;
+      Type *mf = node->lhs->ty;
+      const char *ity = ir_ty(mf);
+      uint64_t field = mem->bit_width >= 64 ? ~0ULL : ((1ULL << mem->bit_width) - 1);
+      uint64_t mask = field << mem->bit_offset;
+      const char *aty = local_ty[addr->idx];
+      E *cur = gen_load(node->lhs, mf, e_local(addr->idx, aty));
+      E *keep = e_binary("And", ity, cur, wide_const(~mask, ity));
+      E *put = e_binary("Shl", ity,
+                        e_binary("And", ity, as_type(e_local((uint32_t)t, local_ty[t]), ity),
+                                 wide_const(field, ity)),
+                        wide_const(mem->bit_offset, ity));
+      E *merged = e_binary("Or", ity, keep, put);
+      OP(nj_op_store(out, mem_ty(mf), e_local(addr->idx, aty),
+                     store_value(merged, mem_ty(mf)), 0, 0));
+      e_free(addr);
+      return e_local((uint32_t)t, local_ty[t]);
+    }
     OP(nj_op_store(out, mem_ty(node->lhs->ty), addr,
                    store_value(e_local((uint32_t)t, local_ty[t]), mem_ty(node->lhs->ty)), 0, 0));
     e_free(addr);
@@ -1429,7 +1605,9 @@ static E *gen_expr(Node *node) {
     // usual conversions widened) arrives in a wider type than ir_ty names for
     // its C type, and naming the C type as the source left the conversion lying
     // about its input.
-    return as_type(v, ir_ty(node->ty));
+    //
+    // _Bool is not a truncation either: C turns any non-zero value into 1.
+    return cast_value(v, node->ty);
   }
 
   case ND_COMMA: {
@@ -1503,7 +1681,7 @@ static void gen_stmt(Node *node) {
     int t = -1;
     if (agg) {
       E *src = to_temp(v); // frees v when it has to make a local
-      OP(nj_op_memorycopy(out, e_local(0, PTR_MEM), src, e_i32(node->lhs->ty->size)));
+      OP(nj_op_memorycopy(out, e_local(0, PTR_TY), src, e_i32(node->lhs->ty->size)));
       e_free(src);
     } else if (v) {
       t = new_temp(v->ty);
@@ -1512,7 +1690,9 @@ static void gen_stmt(Node *node) {
     }
     if (frame_size)
       OP(nj_op_globalset(out, sp_global,
-                         e_binary("Add", "I32", e_local(fp_local, "I32"), e_i32(frame_size))));
+                         as_type(e_binary("Add", PTR_TY, e_local(fp_local, PTR_TY),
+                                          as_type(e_i32(frame_size), PTR_TY)),
+                                 "I32")));
     if (agg)
       OP(nj_op_return_void(out));
     else if (t >= 0)
@@ -1619,7 +1799,10 @@ static void gen_stmt(Node *node) {
       return;
 
   case ND_GOTO_EXPR:
-    OP(nj_op_gotoindirect(out, gen_expr(node->lhs)));
+    // The selector is a label number in an i32, whichever pointer type the C
+    // expression had: LabelAddr values are numbered per function and the
+    // dispatch compares them as unsigned i32.
+    OP(nj_op_gotoindirect(out, as_type(gen_expr(node->lhs), "I32")));
     return;
 
   case ND_LABEL:
@@ -1756,20 +1939,34 @@ static void assign_lvar_offsets(Obj *prog) {
   for (Obj *fn = prog; fn; fn = fn->next) {
     if (!fn->is_function || !fn->is_definition)
       continue;
-    // `offset` is where the object starts, measured from the frame base, so
-    // the object occupies [offset, offset + size) and the frame is large
-    // enough by construction.
-    int top = 0;
+    // chibicc stacks a frame downward from its base register; this one grows
+    // upward from its base, so the same layout is used seen from the other end:
+    // offset = frame - offset_from_the_top. Two locals then differ in address
+    // exactly as they do in the C compiler this frontend is compared against --
+    // "&y - &x", and the padding between an int and the char declared after it,
+    // are both observable in C -- while every object stays aligned, because the
+    // frame is a multiple of the widest alignment any of them asks for.
+    //
+    // The rule for arrays of 16 bytes or more is chibicc's: the AMD64 System V
+    // ABI aligns them to 16.
+    int bottom = 0;
+    int align_max = 16;
     for (Obj *var = fn->locals; var; var = var->next) {
       int align = var->align < 1 ? 1 : var->align;
-      top = align_to(top, align);
-      var->offset = top;
-      top += var->ty->size;
+      if (var->ty->kind == TY_ARRAY && var->ty->size >= 16 && align < 16)
+        align = 16;
+      if (align > align_max)
+        align_max = align;
+      bottom += var->ty->size;
+      bottom = align_to(bottom, align);
+      var->offset = bottom; // from the top of the frame, for now
     }
-    fn->stack_size = align_to(top, 16);
+    int frame = align_to(bottom, align_max);
+    for (Obj *var = fn->locals; var; var = var->next)
+      var->offset = frame - var->offset;
+    fn->stack_size = frame;
   }
 }
-
 static void emit_type_array(const char **tys, int n) {
   int a = mp_begin_arr(out);
   for (int i = 0; i < n; i++)
@@ -1790,7 +1987,7 @@ static void emit_function(Obj *fn) {
   bool sret = is_aggregate(fn->ty->return_ty);
   int arg_base = 0;
   if (sret) {
-    add_local(PTR_MEM);
+    add_local(PTR_TY);
     arg_base = 1;
   }
   // chibicc keeps a local for the hidden return-buffer pointer at the head of
@@ -1801,15 +1998,15 @@ static void emit_function(Obj *fn) {
   if (sret && fn->ty->return_ty->size > 16 && first_param)
     first_param = first_param->next;
   for (Obj *p = first_param; p; p = p->next)
-    add_local(is_aggregate(p->ty) ? PTR_MEM : ir_ty(p->ty));
+    add_local(is_aggregate(p->ty) ? PTR_TY : ir_ty(p->ty));
   // A variadic function's last wasm parameter is the address of the caller's
   // argument buffer; a wasm signature is fixed, so the "..." arguments cannot
   // be parameters of their own.
   int va_param = -1;
   if (takes_varargs(fn->ty))
-    va_param = add_local(PTR_MEM);
+    va_param = add_local(PTR_TY);
   nparams = nlocals;
-  fp_local = new_temp("I32");
+  fp_local = new_temp(PTR_TY);
 
   int f = mp_begin_map(out);
   size_t fields = 0;
@@ -1820,11 +2017,13 @@ static void emit_function(Obj *fn) {
   // Prologue.
   if (frame_size) {
     OP(nj_op_localset(out, (uint32_t)fp_local,
-                      e_binary("Sub", "I32", e_global((uint32_t)sp_global, "I32"),
-                               e_i32(frame_size))));
-    OP(nj_op_globalset(out, (uint32_t)sp_global, e_local((uint32_t)fp_local, "I32")));
+                      as_type(e_binary("Sub", "I32", e_global((uint32_t)sp_global, "I32"),
+                                       e_i32(frame_size)),
+                              PTR_TY)));
+    OP(nj_op_globalset(out, (uint32_t)sp_global,
+                       as_type(e_local((uint32_t)fp_local, PTR_TY), "I32")));
   } else {
-    set_local((uint32_t)fp_local, e_global((uint32_t)sp_global, "I32"));
+    set_local((uint32_t)fp_local, as_type(e_global((uint32_t)sp_global, "I32"), PTR_TY));
   }
   int i = arg_base;
   for (Obj *p = first_param; p; p = p->next) {
@@ -1841,18 +2040,40 @@ static void emit_function(Obj *fn) {
     }
     i++;
   }
-  if (va_param >= 0)
+  if (va_param >= 0) {
     OP(nj_op_store(out, PTR_MEM, frame_addr(fn->va_buf->offset),
-                   e_local((uint32_t)va_param, PTR_MEM), 0, 0));
+                   e_local((uint32_t)va_param, PTR_TY), 0, 0));
+    // va_start builds a va_list from __va_buf__ (include/stdarg.h). chibicc has a
+    // second way to start one -- "*ap = *(__va_elem *)__va_area__", which copies
+    // the register save area its prologue filled -- and its own test suite uses
+    // it, so the same va_list is written at the head of that area too. The layout
+    // is builtin_va_list_type's (parse.c): gp_offset, fp_offset, then the two
+    // pointers, and both counters are already spent because everything past the
+    // named parameters travelled in memory.
+    E *area = frame_addr(fn->va_area->offset);
+    E *buf = e_local((uint32_t)va_param, PTR_TY);
+    OP(nj_op_store(out, "I32", area, e_i32(48), 0, 0));
+    OP(nj_op_store(out, "I32", area, e_i32(112), 4, 0));
+    OP(nj_op_store(out, "I64", area, e_convert(PTR_TY, "I64", e_local((uint32_t)va_param, PTR_TY)), 8, 0));
+    OP(nj_op_store(out, "I64", area, e_i64(0), 16, 0));
+    e_free(area);
+    e_free(buf);
+  }
 
   // A provided function has no body, only an empty one.
   if (fn->body)
     gen_stmt(fn->body);
 
-  if (fn->ty->return_ty->kind == TY_VOID)
+  // The body may run off its end, which C leaves undefined. chibicc emits nothing
+  // there, so the caller gets whatever the return register held; this emits a
+  // return of zero instead -- a value of the right type rather than a trap -- and
+  // it is dead code whenever the body really ends in a return. chibicc's own
+  // test suite has a char * function with no return statement at all.
+  Type *rty = fn->ty->return_ty;
+  if (rty->kind == TY_VOID || is_aggregate(rty))
     OP(nj_op_return_void(out));
   else
-    OP(nj_op_unreachable(out));
+    OP(nj_op_return(out, zero_of(ir_ty(rty))));
 
   mp_end_container(out, body, body_len);
   fields++;
