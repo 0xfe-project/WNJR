@@ -16,7 +16,7 @@ use crate::{
         jit::value_encoding::{
             localize, try_machine_raw_to_value_in_store, value_to_machine_raw_in_store,
         },
-        link::{value_matches_type, RefTypeOwner},
+        link::{value_matches_type, ExnInstance, RefTypeOwner},
         tag::TagIdentity,
         value::{machine_raw_to_ref, RefValue, Value},
     },
@@ -358,8 +358,13 @@ fn invoke_runtime_target(
             if !validate_host_throw_payload(tag, &exn_args, ctx) {
                 return Err(trap_error("host threw mistyped exception"));
             }
-            let handle = target.with_store_mut(|store| store.alloc_exn(tag, exn_args))?;
-            ctx.pending_escape = PendingEscape::Throw { exn: handle, tag };
+            // Nothing is registered: the object rides the escape chain and is
+            // freed when the catch that takes it clears the escape.
+            let exn = alloc::rc::Rc::new(ExnInstance {
+                tag,
+                fields: exn_args,
+            });
+            ctx.pending_escape = PendingEscape::Throw { exn, tag };
             return Ok(NativeCallStatus::Thrown);
         }
         Err(other) => return Err(other),

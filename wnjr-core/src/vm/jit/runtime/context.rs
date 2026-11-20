@@ -43,6 +43,7 @@ use crate::{
             },
             layout::local_call_info_abi_layout,
         },
+        link::ExnInstance,
         tag::TagIdentity,
         value::{RefValue, FUNCADDR_TOP},
     },
@@ -55,23 +56,46 @@ use crate::{
 pub(crate) enum PendingEscape {
     #[default]
     None,
-    /// Uncaught wasm exception — carries an `exnref` pool handle that
-    /// resolves through the shared reference registry to the payload.
-    Throw { exn: RefValue, tag: TagIdentity },
+    /// An in-flight wasm exception — owns the exception object directly.
+    ///
+    /// A throw that a `try_table` (or a `setjmp` lowering) catches never needs
+    /// an `exnref` handle: the dispatcher reads the payload through
+    /// `do_eh_payload` and drops the object at `do_eh_clear`. Keeping the
+    /// object here instead of in the shared reference registry is what makes a
+    /// throwing loop cost nothing: registry entries have no release path, so
+    /// every throw used to append one permanently.
+    Throw {
+        exn: alloc::rc::Rc<ExnInstance>,
+        tag: TagIdentity,
+    },
 }
 
 impl PendingEscape {
     #[inline]
-    pub(crate) fn into_error(self, world: usize) -> Option<WasmError> {
+    pub(crate) fn is_none(&self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// Turn an escaping exception into the host-visible error.
+    ///
+    /// This is one of the only two places where an exception object enters the
+    /// shared reference registry, and it only runs when the exception leaves
+    /// the wasm world: the embedder receives an `exnref` and may read the
+    /// payload through the instance after the call returned.
+    #[inline]
+    pub(crate) fn into_error(self, store: &mut JitInstance, world: usize) -> Option<WasmError> {
         match self {
             Self::None => None,
-            Self::Throw { exn, tag } => Some(WasmError {
-                repr: crate::error::ErrorRepr::Exception {
-                    exn: crate::RefValue::from_vm(exn, world),
-                    tag,
-                    module_tag_name: None,
-                },
-            }),
+            Self::Throw { exn, tag } => {
+                let handle = store.alloc_exn(tag, exn.fields.clone());
+                Some(WasmError {
+                    repr: crate::error::ErrorRepr::Exception {
+                        exn: crate::RefValue::from_vm(handle, world),
+                        tag,
+                        module_tag_name: None,
+                    },
+                })
+            }
         }
     }
 }

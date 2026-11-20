@@ -19,7 +19,7 @@ use crate::{
             absolutize, retag_for_container, try_machine_raw_to_value_in_store,
             value_to_machine_raw_in_store,
         },
-        link::{ref_type_matches, InstanceId, RefRegistryEntry, RefTypeOwner},
+        link::{ref_type_matches, ExnInstance, InstanceId, RefRegistryEntry, RefTypeOwner},
         tag::TagIdentity,
         value::{machine_raw_to_ref, ref_to_machine_raw, RefValue, Value},
     },
@@ -160,7 +160,7 @@ pub(super) fn do_eh_throw(
     start_slot: u16,
     slot_count: u16,
 ) -> Result<(), WasmError> {
-    let (tag_identity, exn_handle) = {
+    let exn = {
         let store = current_store_mut(ctx)?;
         let tag_inst = store
             .module()
@@ -182,11 +182,18 @@ pub(super) fn do_eh_throw(
             store,
             "eh_throw args span does not match tag arity",
         )?;
-        let exn_handle = store.alloc_exn(tag_inst.handle, fields);
-        (tag_inst.handle, exn_handle)
+        // The exception object stays on the escape chain: a caught throw reads
+        // its payload through `do_eh_payload` and drops it at `do_eh_clear`.
+        // Nothing is registered here, so a throwing loop allocates nothing it
+        // cannot free.
+        alloc::rc::Rc::new(ExnInstance {
+            tag: tag_inst.handle,
+            fields,
+        })
     };
 
-    raise_exception(ctx, tag_identity, exn_handle)
+    let tag_identity = exn.tag;
+    raise_exception(ctx, tag_identity, exn)
 }
 
 pub(super) fn do_eh_throw_ref(
@@ -200,44 +207,43 @@ pub(super) fn do_eh_throw_ref(
         return Err(trap_error("null reference"));
     }
 
-    let tag_identity = {
+    // An `exnref` operand is a guest-held reference, so it resolves through the
+    // registry. The object itself is moved onto the escape chain, not copied
+    // into a new registry slot.
+    let exn = {
         let store = current_store(ctx)?;
         let exn_idx = exn_handle
             .pooled_index()
             .ok_or_else(|| trap_error("invalid exception reference"))?;
         let ref_registry = store.clone_ref_registry();
         let registry = ref_registry.borrow();
-        let entry = registry
-            .get(exn_idx)
-            .cloned()
-            .ok_or_else(|| trap_error("invalid exception reference"))?;
-        match entry {
-            // Exception objects are immutable and can enter the registry only
-            // through the typed Wasm throw path or validated HostThrow path.
-            RefRegistryEntry::Exn(exn) => exn.tag,
+        match registry.get(exn_idx).cloned() {
+            Some(RefRegistryEntry::Exn(exn)) => exn,
             _ => return Err(trap_error("throw_ref operand is not an exception")),
         }
     };
 
-    raise_exception(ctx, tag_identity, exn_handle)
+    let tag_identity = exn.tag;
+    raise_exception(ctx, tag_identity, exn)
 }
 
 fn raise_exception(
     ctx: &mut NativeContext,
     tag_identity: TagIdentity,
-    exn_handle: RefValue,
+    exn: alloc::rc::Rc<ExnInstance>,
 ) -> Result<(), WasmError> {
     ctx.pending_escape = PendingEscape::Throw {
-        exn: exn_handle,
+        exn,
         tag: tag_identity,
     };
 
+    // The error only carries control flow: it is built and dropped on every
+    // throw, and the dispatcher above the call site decides whether the
+    // exception is caught. A real `exnref` exists only once the exception
+    // escapes to the host, which `PendingEscape::into_error` materializes.
     Err(WasmError {
         repr: crate::error::ErrorRepr::Exception {
-            exn: crate::RefValue::from_vm(
-                exn_handle,
-                current_store(ctx)?.instance_backref().self_id().world(),
-            ),
+            exn: crate::RefValue::null(),
             tag: tag_identity,
             module_tag_name: None,
         },
@@ -249,9 +255,9 @@ fn raise_exception(
 /// A cross-function throw leaves the exception here instead of in a wasm
 /// result, so a catch dispatcher at the call site reads it back through these
 /// helpers rather than through the callee return lane.
-fn pending_throw(ctx: &NativeContext) -> Option<(TagIdentity, RefValue)> {
+fn pending_throw(ctx: &NativeContext) -> Option<(TagIdentity, alloc::rc::Rc<ExnInstance>)> {
     match ctx.pending_escape {
-        PendingEscape::Throw { exn, tag } => Some((tag, exn)),
+        PendingEscape::Throw { ref exn, tag } => Some((tag, alloc::rc::Rc::clone(exn))),
         PendingEscape::None => None,
     }
 }
@@ -281,33 +287,17 @@ pub(super) fn do_eh_match(ctx: &mut NativeContext, tag_idx: u32) -> Result<u64, 
 /// area has a single result slot, and this path is cold enough that a second
 /// helper call costs nothing worth designing around.
 pub(super) fn do_eh_payload(ctx: &mut NativeContext, index: u32) -> Result<u64, WasmError> {
-    let Some((_, exn_handle)) = pending_throw(ctx) else {
+    let Some((_, exn)) = pending_throw(ctx) else {
         return Err(internal_error("eh_payload: no pending exception"));
-    };
-    let store = current_store(ctx)?;
-    let exn_idx = exn_handle
-        .pooled_index()
-        .ok_or_else(|| internal_error("eh_payload: pending exception has no pool handle"))?;
-    let ref_registry = store.clone_ref_registry();
-    let entry = ref_registry
-        .borrow()
-        .get(exn_idx)
-        .cloned()
-        .ok_or_else(|| internal_error("eh_payload: pending exception is not registered"))?;
-    let RefRegistryEntry::Exn(exn) = entry else {
-        return Err(internal_error("eh_payload: pending escape is not an exception"));
     };
     let value = exn
         .fields
         .get(index as usize)
         .cloned()
         .ok_or_else(|| internal_error("eh_payload: payload index out of range"))?;
-    drop(ref_registry);
-    Ok(value_to_machine_raw_in_store(
-        value,
-        active_gp_unit_bytes(),
-        current_store_mut(ctx)?,
-    ))
+    drop(exn);
+    let raw = value_to_machine_raw_in_store(value, active_gp_unit_bytes(), current_store_mut(ctx)?);
+    Ok(raw)
 }
 
 /// A handler is taking the pending exception.
