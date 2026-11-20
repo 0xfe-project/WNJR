@@ -1578,16 +1578,18 @@ impl WasiCtx {
 
         let mem = get_mem(caller)?;
 
-        // Seed from current time
-        let seed = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(d) => d.as_nanos() as u64,
-            Err(_) => 0xDEAD_BEEF_CAFE_BABE,
-        };
-        let mut state = if seed == 0 {
-            0xDEAD_BEEF_CAFE_BABE
-        } else {
-            seed
-        };
+        // The state lives as long as the context, seeded on first use. Seeding
+        // it per call, as this used to, made two calls that landed in the same
+        // tick of the host clock return identical bytes — a tick is coarser than
+        // a call into a JIT'd function, so a caller asking twice got one answer.
+        let mut state = self.rng;
+        if state == 0 {
+            state = match SystemTime::now().duration_since(UNIX_EPOCH) {
+                // Never zero: xorshift is a fixed point there.
+                Ok(d) => (d.as_nanos() as u64) | 1,
+                Err(_) => 0xDEAD_BEEF_CAFE_BABE,
+            };
+        }
 
         let start = buf_ptr as usize;
         let end = start + buf_len as usize;
@@ -1602,6 +1604,7 @@ impl WasiCtx {
             state ^= state << 17;
             *byte = (state & 0xFF) as u8;
         }
+        self.rng = state;
 
         results[0] = Value::I32(ERRNO_SUCCESS);
         Ok(())

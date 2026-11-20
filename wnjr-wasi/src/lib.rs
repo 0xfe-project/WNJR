@@ -73,6 +73,9 @@ pub struct WasiCtx {
     fds: HashMap<i32, FdEntry>,
     closed_preopens: HashSet<i32>,
     closed_stdio: HashSet<i32>,
+    /// State for random_get: 0 until the first call seeds it. It has to outlive
+    /// a call — see preview1.rs:random_get.
+    rng: u64,
 }
 
 impl WasiCtx {
@@ -90,6 +93,7 @@ impl WasiCtx {
             fds: HashMap::new(),
             closed_preopens: HashSet::new(),
             closed_stdio: HashSet::new(),
+            rng: 0,
         }
     }
 
