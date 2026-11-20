@@ -182,6 +182,11 @@ const REG_PLAN: RegPlan = RegPlan {
         gp(13),
         gp(14),
         gp(15),
+        // x30 carries values (see gp_dynamic) and BL/BLR writes it, so a C
+        // helper clobbers it like any other volatile lane. Leaving it out here
+        // let a value live across a helper call survive only by luck: the
+        // reload read the return address instead.
+        gp(30),
     ],
     gp_scratch: &[gp(16), gp(17)],
 
@@ -452,8 +457,12 @@ const fn preserved_io_size() -> u32 {
 pub(super) const PRESERVED_HELPER_GP_OFFSET: u32 = preserved_io_size();
 
 /// Byte offset of the FP save area within the preserved-helper frame.
+///
+/// The FP slots are whole Q registers, so this must stay 16-byte aligned: an
+/// odd GP count would otherwise put the first Q store on top of the last GP
+/// slot and silently drop that GP value.
 pub(super) const PRESERVED_HELPER_FP_OFFSET: u32 =
-    PRESERVED_HELPER_GP_OFFSET + PRESERVED_GP_COUNT as u32 * 8;
+    (PRESERVED_HELPER_GP_OFFSET + PRESERVED_GP_COUNT as u32 * 8).div_ceil(16) * 16;
 
 /// Stack frame size for the preserved-helper save area + I/O region,
 /// rounded up to 16-byte alignment.
@@ -485,6 +494,8 @@ mod tests {
             map_reg(MachineReg(MACHINE_FIXED_REG_COUNT + 22)).unwrap(),
             gp(29)
         );
-        assert!(!gp_dynamic_caller_saved_regs().contains(&gp(30)));
+        // x30 holds values and BL/BLR writes it, so the preserved-helper
+        // frame has to save it like the rest of the volatile subset.
+        assert!(gp_dynamic_caller_saved_regs().contains(&gp(30)));
     }
 }
