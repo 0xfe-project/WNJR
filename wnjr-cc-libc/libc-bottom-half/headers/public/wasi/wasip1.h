@@ -55,7 +55,10 @@ extern "C" {
 
 // TODO: Encoding this in witx.
 #define __WASI_DIRCOOKIE_START (UINT64_C(0))
-typedef __SIZE_TYPE__ __wasi_size_t;
+// Four bytes by the ABI's own definition, not by the C data model's: a size_t is
+// the pointer width here (eight, see above), and the structures that cross the
+// boundary still hold four-byte lengths.
+typedef uint32_t __wasi_size_t;
 
 _Static_assert(sizeof(__wasi_size_t) == 4, "witx calculated size");
 _Static_assert(_Alignof(__wasi_size_t) == 4, "witx calculated align");

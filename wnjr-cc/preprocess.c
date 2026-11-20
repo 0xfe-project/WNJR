@@ -1081,11 +1081,12 @@ void init_macros(void) {
   define_macro("__SIZEOF_PTRDIFF_T__", "8");
   define_macro("__SIZEOF_SHORT__", "2");
   define_macro("__SIZEOF_SIZE_T__", "8");
-  // size_t is four bytes: it is a length in the memory, and the WASI ABI's
-  // structures are laid out for ILP32 lengths. long stays eight bytes and so does
-  // uintptr_t, which has to hold a pointer.
-  define_macro("__SIZE_TYPE__", "unsigned int");
-  define_macro("__SSIZE_TYPE__", "int");
+  // size_t is the pointer width, eight bytes, because the data model is LP64: an
+  // object's size is an address difference, and a library that stores sizes and
+  // pointers in one word (dlmalloc) requires the two to be the same width. The
+  // WASI ABI's four-byte lengths are the ABI's own type, __wasi_size_t, not this.
+  define_macro("__SIZE_TYPE__", "unsigned long");
+  define_macro("__SSIZE_TYPE__", "long");
   define_macro("__STDC_HOSTED__", "1");
   define_macro("__STDC_NO_COMPLEX__", "1");
   define_macro("__STDC_UTF_16__", "1");

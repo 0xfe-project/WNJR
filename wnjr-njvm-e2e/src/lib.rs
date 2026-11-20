@@ -274,7 +274,13 @@ pub fn run_wnjr_sequence(
         let vals: Vec<Value> = args.iter().map(|a| a.to_value()).collect();
         let r = match world.invoke(*id, export, &vals) {
             Ok(vs) => Outcome::Ret(vs.iter().map(Arg::from_value).collect::<Result<_, _>>()?),
-            Err(e) if e.is_trap() || e.is_exception() => Outcome::Trap,
+            Err(e) if e.is_trap() || e.is_exception() => {
+                // A trap's reason is the first thing anyone debugging it needs, and
+                // the report only says "trap". stderr keeps it out of stdout, which
+                // is what the harnesses diff against the host build.
+                eprintln!("{export}: {e:?}");
+                Outcome::Trap
+            }
             Err(e) => return Err(format!("WNJR invoke {export}: {e:?}")),
         };
         if fresh_per_call || r == Outcome::Trap {

@@ -1,0 +1,4 @@
+size_t=8 ssize_t=8 ptrdiff_t=8 uintptr_t=8 ptr=8
+predefined_size_t=8 predefined_ptr=8
+wasi_size_t=4 wasi_iovec_t=8
+fails=0
