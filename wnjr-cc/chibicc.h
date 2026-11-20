@@ -2,7 +2,6 @@
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
-#include <glob.h>
 #include <libgen.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -14,7 +13,6 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
