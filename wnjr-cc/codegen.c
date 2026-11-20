@@ -330,6 +330,22 @@ static Obj *collapse_definitions(Obj *prog) {
     }
   }
 
+  // A weak alias is a definition that the program may replace. musl relies on
+  // this: exit.c writes weak_alias(dummy, __stdio_exit) so a program without a
+  // stdio still links, and stdio's own __stdio_exit.c defines the same name. When
+  // both are in the program the strong definition wins and the alias gives way,
+  // which is what a linker does with a weak definition; without this the module
+  // would export the name twice.
+  for (Obj *var = prog; var; var = var->next) {
+    if (!var->is_alias || var->is_static || !var->name)
+      continue;
+    Obj *strong = hashmap_get(canon, var->name);
+    if (!strong || strong == var)
+      continue;
+    var->is_alias = false;
+    var->is_definition = false;
+  }
+
   Obj head;
   Obj *cur = &head;
   for (Obj *var = prog; var;) {
@@ -520,11 +536,25 @@ static uint32_t case_id(Node *node) {
 
 // Materialize an expression into a local so it can be read more than once or
 // evaluated before something with a side effect runs.
+// Every local is set with a value of the type it was declared with: the IR
+// verifier requires it, and checking here names the construct that got it wrong
+// instead of leaving an instruction index to be decoded.
+static Token *cur_tok; // the node being generated, for messages like the one below
+
+static void set_local(uint32_t l, E *v) {
+  if (strcmp(local_ty[l], v->ty))
+    error_tok(cur_tok, "internal error: local %u is %s and is set with a %s", l,
+              local_ty[l], v->ty);
+  OP(nj_op_localset(out, l, v));
+}
+
+// Materialize an expression into a local so it can be read more than once or
+// evaluated before something with a side effect runs.
 static E *to_temp(E *e) {
   if (e->kind == E_LOCAL)
     return e;
   int l = new_temp(e->ty);
-  OP(nj_op_localset(out, l, e));
+  set_local(l, e);
   e_free(e);
   return e_local(l, local_ty[l]);
 }
@@ -647,6 +677,38 @@ static E *as_type(E *e, const char *want) {
   return e_convert(e->ty, want, e);
 }
 
+// A case label as a constant of the switch discriminant's type.
+static E *switch_const(int64_t v, const char *ty) {
+  if (!strcmp(ty, "I32") || !strcmp(ty, "U32"))
+    return as_type(e_i32((int32_t)v), ty);
+  return as_type(e_i64(v), ty);
+}
+
+// A zero of the same IR type, for the tests below. Converting the value to i32 and
+// comparing that would truncate a 64-bit one, and a float has to be compared as a
+// float, so the zero is made in the value's own type.
+static E *zero_of(const char *ty) {
+  if (!strcmp(ty, "F32"))
+    return e_f32(0);
+  if (!strcmp(ty, "F64"))
+    return e_f64(0);
+  if (!strcmp(ty, "I64") || !strcmp(ty, "U64"))
+    return as_type(e_i64(0), ty);
+  return as_type(e_i32(0), ty);
+}
+
+// The C truth value of a scalar, as an i32: is it non-zero. A comparison yields an
+// i32 whatever type it reads, and a NaN compares unequal to zero, which is the
+// answer C wants.
+static E *truthy(E *v) {
+  return e_binary("Ne", v->ty, v, zero_of(v->ty));
+}
+
+// Is it zero -- what a branch on "not" asks.
+static E *falsy(E *v) {
+  return e_binary("Eq", v->ty, v, zero_of(v->ty));
+}
+
 // The type two operands are brought to. Their generated types decide, which
 // keeps the emitted op and its operands consistent by construction.
 //
@@ -692,11 +754,11 @@ static E *guarded(const char *ty, E *cond, E *then_val, E *else_val) {
   int t = new_temp(ty);
   uint32_t l_else = fresh_label();
   uint32_t l_end = fresh_label();
-  OP(nj_op_jmpif(out, e_binary("Eq", "I32", cond, e_i32(0)), l_else));
-  OP(nj_op_localset(out, (uint32_t)t, then_val));
+  OP(nj_op_jmpif(out, falsy(cond), l_else));
+  set_local((uint32_t)t, then_val);
   OP(nj_op_jmp(out, l_end));
   OP(nj_op_label(out, l_else));
-  OP(nj_op_localset(out, (uint32_t)t, else_val));
+  set_local((uint32_t)t, else_val);
   OP(nj_op_label(out, l_end));
   return e_local((uint32_t)t, ty);
 }
@@ -729,13 +791,13 @@ static E *gen_logical(Node *node) {
   int t = new_temp("I32");
   uint32_t l_end = fresh_label();
   E *a = gen_expr(node->lhs);
-  OP(nj_op_localset(out, t, e_binary("Ne", "I32", a, e_i32(0))));
+  set_local(t, truthy(a));
   if (node->kind == ND_LOGAND)
     OP(nj_op_jmpif(out, e_binary("Eq", "I32", e_local(t, "I32"), e_i32(0)), l_end));
   else
     OP(nj_op_jmpif(out, e_local(t, "I32"), l_end));
   E *b = gen_expr(node->rhs);
-  OP(nj_op_localset(out, t, e_binary("Ne", "I32", b, e_i32(0))));
+  set_local(t, truthy(b));
   OP(nj_op_label(out, l_end));
   return e_local(t, "I32");
 }
@@ -791,13 +853,13 @@ static E *gen_cond(Node *node) {
   uint32_t l_else = fresh_label();
   uint32_t l_end = fresh_label();
   E *c = gen_expr(node->cond);
-  OP(nj_op_jmpif(out, e_binary("Eq", "I32", c, e_i32(0)), l_else));
+  OP(nj_op_jmpif(out, falsy(c), l_else));
   E *a = as_type(gen_expr(node->then), ty);
-  OP(nj_op_localset(out, t, a));
+  set_local(t, a);
   OP(nj_op_jmp(out, l_end));
   OP(nj_op_label(out, l_else));
   E *b = as_type(gen_expr(node->els), ty);
-  OP(nj_op_localset(out, t, b));
+  set_local(t, b);
   OP(nj_op_label(out, l_end));
   return e_local(t, ty);
 }
@@ -843,7 +905,7 @@ static E *gen_alloca(Node *node) {
                   e_binary("Sub", "I32", e_global((uint32_t)sp_global, "I32"), size),
                   e_i32(-16));
   int t = new_temp("I32");
-  OP(nj_op_localset(out, (uint32_t)t, p));
+  set_local((uint32_t)t, p);
   OP(nj_op_globalset(out, (uint32_t)sp_global, e_local((uint32_t)t, "I32")));
   return e_local((uint32_t)t, "I32");
 }
@@ -956,6 +1018,7 @@ static E *gen_call(Node *node) {
 static E *gen_expr(Node *node) {
   if (!node)
     return e_i32(0);
+  cur_tok = node->tok;
 
   switch (node->kind) {
   case ND_NULL_EXPR:
@@ -1024,7 +1087,7 @@ static E *gen_expr(Node *node) {
   case ND_ISNAN: {
     const char *oty = ir_ty(node->lhs->ty);
     int t = new_temp(oty);
-    OP(nj_op_localset(out, (uint32_t)t, gen_expr(node->lhs)));
+    set_local((uint32_t)t, gen_expr(node->lhs));
     // A comparison takes operands of one type and yields an i32, which is why
     // the result type and op_ty are set separately here (as gen_binary does).
     E *r = e_new(E_BINARY, "I32");
@@ -1054,7 +1117,7 @@ static E *gen_expr(Node *node) {
     const char *oty = ir_ty(node->lhs->ty);
     bool f32 = !strcmp(oty, "F32");
     int t = new_temp(oty);
-    OP(nj_op_localset(out, (uint32_t)t, gen_expr(node->lhs)));
+    set_local((uint32_t)t, gen_expr(node->lhs));
 #define V e_local((uint32_t)t, oty)
     // Constants are made per use, like any other node: the tree is freed by
     // ownership, so one node in two places is one node freed twice.
@@ -1099,8 +1162,8 @@ static E *gen_expr(Node *node) {
   case ND_FLOAT_CMP: {
     const char *oty = ir_ty(node->lhs->ty);
     int a = new_temp(oty), b = new_temp(oty);
-    OP(nj_op_localset(out, (uint32_t)a, gen_expr(node->lhs)));
-    OP(nj_op_localset(out, (uint32_t)b, gen_expr(node->rhs)));
+    set_local((uint32_t)a, gen_expr(node->lhs));
+    set_local((uint32_t)b, gen_expr(node->rhs));
 #define X e_local((uint32_t)a, oty)
 #define Y e_local((uint32_t)b, oty)
     if (node->fclass == FC_ISUNORDERED)
@@ -1123,8 +1186,8 @@ static E *gen_expr(Node *node) {
     bool wide = ty->size == 8;
     E *addr = to_temp(gen_expr(node->cas_addr));
     int a = new_temp(ity), b = new_temp(ity);
-    OP(nj_op_localset(out, (uint32_t)a, as_type(gen_expr(node->lhs), ity)));
-    OP(nj_op_localset(out, (uint32_t)b, as_type(gen_expr(node->rhs), ity)));
+    set_local((uint32_t)a, as_type(gen_expr(node->lhs), ity));
+    set_local((uint32_t)b, as_type(gen_expr(node->rhs), ity));
     const char *op = node->fclass == OVF_ADD   ? "Add"
                      : node->fclass == OVF_SUB ? "Sub"
                                                : "Mul";
@@ -1169,7 +1232,7 @@ static E *gen_expr(Node *node) {
     // The destination is evaluated once; its address is also the value, which is
     // what C's memcpy and memset return.
     int t = new_temp(PTR_MEM);
-    OP(nj_op_localset(out, (uint32_t)t, gen_expr(node->lhs)));
+    set_local((uint32_t)t, gen_expr(node->lhs));
     E *src = gen_expr(node->rhs);
     // A length is a size_t, which is eight bytes wide here, and both engine ops
     // take a 32-bit count.
@@ -1195,7 +1258,7 @@ static E *gen_expr(Node *node) {
     // once, in that order, before the op.
     E *addr = gen_expr(node->lhs);
     int expected = new_temp(vty);
-    OP(nj_op_localset(out, (uint32_t)expected, as_type(gen_expr(node->rhs), vty)));
+    set_local((uint32_t)expected, as_type(gen_expr(node->rhs), vty));
     E *replacement = as_type(gen_expr(node->cond), vty);
     int old = new_temp(vty);
     OP(nj_op_atomic(out, "Cmpxchg", (uint32_t)w, 0, addr, e_local((uint32_t)expected, vty),
@@ -1260,19 +1323,22 @@ static E *gen_expr(Node *node) {
   case ND_MEMORY_SIZE: {
     // memory.size yields an i32 page count; the C type is the eight-byte long.
     int t = new_temp("I32");
-    OP(nj_op_localset(out, (uint32_t)t, e_memsize()));
+    set_local((uint32_t)t, e_memsize());
     return e_convert("I32", ir_ty(node->ty), e_local((uint32_t)t, "I32"));
   }
 
   case ND_MEMORY_GROW: {
     E *delta = as_type(gen_expr(node->lhs), "I32");
     int t = new_temp("I32");
-    OP(nj_op_localset(out, (uint32_t)t, e_memgrow(delta)));
+    set_local((uint32_t)t, e_memgrow(delta));
     return e_convert("I32", ir_ty(node->ty), e_local((uint32_t)t, "I32"));
   }
 
+  // "!x" is "x == 0", in x's own type: an unsigned 32-bit value arrives as a U32
+  // and a 64-bit one as an I64 or U64, and a Binary takes both operands in the
+  // type it names.
   case ND_NOT:
-    return e_binary("Eq", "I32", gen_expr(node->lhs), e_i32(0));
+    return falsy(gen_expr(node->lhs));
 
   case ND_VAR:
   case ND_MEMBER:
@@ -1305,7 +1371,7 @@ static E *gen_expr(Node *node) {
     E *addr = to_temp(gen_addr(node->lhs));
     E *val = gen_expr(node->rhs);
     int t = new_temp(val->ty);
-    OP(nj_op_localset(out, (uint32_t)t, val));
+    set_local((uint32_t)t, val);
     e_free(val);
     OP(nj_op_store(out, mem_ty(node->lhs->ty), addr,
                    store_value(e_local((uint32_t)t, local_ty[t]), mem_ty(node->lhs->ty)), 0, 0));
@@ -1357,11 +1423,13 @@ static E *gen_expr(Node *node) {
     E *v = gen_expr(node->lhs);
     if (!is_scalar(node->ty))
       unsupported(node->tok, "a cast to a struct or union");
-    const char *from = ir_ty(node->lhs->ty);
-    const char *to = ir_ty(node->ty);
-    if (!strcmp(from, to))
-      return v;
-    return e_convert(from, to, v);
+    // The conversion starts from what the value actually is, not from the C type
+    // of the operand. The two can differ: an expression of pointer type whose
+    // value went through 64-bit arithmetic (a pointer difference, or a sum the
+    // usual conversions widened) arrives in a wider type than ir_ty names for
+    // its C type, and naming the C type as the source left the conversion lying
+    // about its input.
+    return as_type(v, ir_ty(node->ty));
   }
 
   case ND_COMMA: {
@@ -1404,6 +1472,7 @@ static E *gen_expr(Node *node) {
 static void gen_stmt(Node *node) {
   if (!node)
     return;
+  cur_tok = node->tok;
 
   switch (node->kind) {
   case ND_NULL_EXPR:
@@ -1438,7 +1507,7 @@ static void gen_stmt(Node *node) {
       e_free(src);
     } else if (v) {
       t = new_temp(v->ty);
-      OP(nj_op_localset(out, t, v));
+      set_local(t, v);
       e_free(v);
     }
     if (frame_size)
@@ -1457,7 +1526,7 @@ static void gen_stmt(Node *node) {
     uint32_t l_else = fresh_label();
     uint32_t l_end = fresh_label();
     E *c = gen_expr(node->cond);
-    OP(nj_op_jmpif(out, e_binary("Eq", "I32", c, e_i32(0)), l_else));
+    OP(nj_op_jmpif(out, falsy(c), l_else));
     gen_stmt(node->then);
     OP(nj_op_jmp(out, l_end));
     OP(nj_op_label(out, l_else));
@@ -1475,7 +1544,7 @@ static void gen_stmt(Node *node) {
     OP(nj_op_label(out, l_begin));
     if (node->cond) {
       E *c = gen_expr(node->cond);
-      OP(nj_op_jmpif(out, e_binary("Eq", "I32", c, e_i32(0)), l_end));
+      OP(nj_op_jmpif(out, falsy(c), l_end));
     }
     gen_stmt(node->then);
     OP(nj_op_label(out, l_cont));
@@ -1494,7 +1563,7 @@ static void gen_stmt(Node *node) {
     OP(nj_op_label(out, l_cont));
     {
       E *c = gen_expr(node->cond);
-      OP(nj_op_jmpif(out, c, l_begin));
+      OP(nj_op_jmpif(out, truthy(c), l_begin));
     }
     OP(nj_op_label(out, l_end));
     return;
@@ -1506,6 +1575,10 @@ static void gen_stmt(Node *node) {
       unsupported(node->tok, "a switch on a non-integer");
     E *sv = to_temp(gen_expr(node->cond));
     int s_local = (int)sv->idx;
+    // The comparisons are made in the discriminant's own type. A switch on a
+    // 64-bit value would otherwise read the temp as an i32 and compare a
+    // truncated case label.
+    const char *sty = sv->ty;
     e_free(sv);
 
     // Each case arm gets a label; dispatch is a comparison chain, so arms stay
@@ -1517,12 +1590,13 @@ static void gen_stmt(Node *node) {
 
     for (Node *n = node->case_next; n; n = n->case_next) {
       uint32_t id = case_id(n);
+      E *begin = switch_const(n->begin, sty);
       if (n->begin == n->end) {
-        OP(nj_op_jmpif(out, e_binary("Eq", "I32", e_local(s_local, "I32"), e_i32((int32_t)n->begin)),
-                       id));
+        OP(nj_op_jmpif(out, e_binary("Eq", sty, e_local(s_local, sty), begin), id));
       } else {
-        E *ge = e_binary("Ge", "I32", e_local(s_local, "I32"), e_i32((int32_t)n->begin));
-        E *le = e_binary("Le", "I32", e_local(s_local, "I32"), e_i32((int32_t)n->end));
+        E *end = switch_const(n->end, sty);
+        E *ge = e_binary("Ge", sty, e_local(s_local, sty), begin);
+        E *le = e_binary("Le", sty, e_local(s_local, sty), end);
         OP(nj_op_jmpif(out, e_binary("And", "I32", ge, le), id));
       }
     }
@@ -1750,7 +1824,7 @@ static void emit_function(Obj *fn) {
                                e_i32(frame_size))));
     OP(nj_op_globalset(out, (uint32_t)sp_global, e_local((uint32_t)fp_local, "I32")));
   } else {
-    OP(nj_op_localset(out, (uint32_t)fp_local, e_global((uint32_t)sp_global, "I32")));
+    set_local((uint32_t)fp_local, e_global((uint32_t)sp_global, "I32"));
   }
   int i = arg_base;
   for (Obj *p = first_param; p; p = p->next) {
@@ -1799,6 +1873,9 @@ static void emit_function(Obj *fn) {
   fields++;
 
   mp_key(out, "locals");
+  if (getenv("WNJRCC_LOCALS"))
+    fprintf(stderr, "TRACE %s: nparams=%d nlocals=%d l30=%s l27=%s\n", fn->name, nparams, nlocals,
+            nlocals > 30 ? local_ty[30] : "-", nlocals > 27 ? local_ty[27] : "-");
   emit_type_array(local_ty + nparams, nlocals - nparams);
   fields++;
 

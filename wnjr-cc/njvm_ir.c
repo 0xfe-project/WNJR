@@ -57,9 +57,24 @@ E *e_f64(uint64_t bits) {
   return e;
 }
 
+// The comparisons of the IR (BinaryOp in wnjr-core/src/njvm/verify.rs). wasm has
+// no separate unsigned comparison instruction: these take both operands in the
+// named type, which is what the signedness of that type selects, and answer an
+// i32 whatever it is.
+static int is_cmp_op(const char *op) {
+  return !strcmp(op, "Eq") || !strcmp(op, "Ne") || !strcmp(op, "Lt") ||
+         !strcmp(op, "Le") || !strcmp(op, "Gt") || !strcmp(op, "Ge");
+}
+
 E *e_binary(const char *op, const char *ty, E *a, E *b) {
-  E *e = e_alloc(E_BINARY, ty);
+  // The third argument reaches the wire as the operand type, op_ty. The
+  // expression's own type is what the instruction leaves on the stack, so a
+  // comparison is an i32 and everything else computes in the named type. Without
+  // this a comparison of two unsigned words claimed to be a U32, and every
+  // consumer that trusted that type planted a value of the wrong one.
+  E *e = e_alloc(E_BINARY, is_cmp_op(op) ? "I32" : ty);
   e->op = op;
+  e->op_ty = ty;
   e->a = a;
   e->b = b;
   return e;
@@ -166,6 +181,11 @@ void nj_emit_expr(Mp *m, const E *e) {
     return;
   }
   case E_BINARY: {
+    // Both operands are read in the type the operation names (op_ty), so that is
+    // the type each of them has to have.
+    if (strcmp(e->op_ty, e->a->ty) || strcmp(e->op_ty, e->b->ty))
+      error("internal error: %s in %s with operands of %s and %s", e->op, e->op_ty, e->a->ty,
+            e->b->ty);
     int mk = mp_variant(m, "Binary");
     int f = mp_begin_map(m);
     size_t n = 0;
@@ -203,6 +223,12 @@ void nj_emit_expr(Mp *m, const E *e) {
     return;
   }
   case E_CONVERT: {
+    // A conversion names the type it starts from, and that has to be the child's
+    // type: this is the check that would have caught a value of one type being
+    // converted from another, which the verifier only sees after the fact and
+    // without a source location.
+    if (strcmp(e->op, e->a->ty))
+      error("internal error: convert from %s of a %s expression", e->op, e->a->ty);
     int mk = mp_variant(m, "Convert");
     int f = mp_begin_map(m);
     size_t n = 0;

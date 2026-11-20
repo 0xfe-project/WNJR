@@ -1174,8 +1174,23 @@ static void array_initializer1(Token **rest, Token *tok, Initializer *init) {
   }
 }
 
+// A designated initializer may name a member of an enclosing aggregate, and the
+// comma in front of it belongs to that aggregate's list: in
+// "struct { struct { int tag; } u; int x; } v = { .u.tag = 1, .x = 2 };"
+// the second designator is v's, not u's. chibicc's loops below look for a
+// designator before they consume the separator, so they never see one behind a
+// comma, and the comma was parsed as the start of an initializer.
+static bool designator_after_comma(Token *tok) {
+  return equal(tok, ",") && (equal(tok->next, "[") || equal(tok->next, "."));
+}
+
 // array-initializer2 = initializer ("," initializer)*
 static void array_initializer2(Token **rest, Token *tok, Initializer *init, int i) {
+  if (designator_after_comma(tok)) {
+    *rest = tok;
+    return;
+  }
+
   if (init->is_flexible) {
     int len = count_array_init_elements(tok, init->ty);
     *init = *new_initializer(array_of(init->ty->base, len), false);
@@ -1226,6 +1241,11 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
 
 // struct-initializer2 = initializer ("," initializer)*
 static void struct_initializer2(Token **rest, Token *tok, Initializer *init, Member *mem) {
+  if (designator_after_comma(tok)) {
+    *rest = tok;
+    return;
+  }
+
   bool first = true;
 
   for (; mem && !is_end(tok); mem = mem->next) {
