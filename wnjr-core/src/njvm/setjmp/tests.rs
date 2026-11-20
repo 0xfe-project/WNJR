@@ -119,6 +119,38 @@ fn across_two_calls() {
     assert_eq!(run_i32(&m, vec![]), 105);
 }
 
+/// Recursion through a setjmp function (the known limit in the module docs).
+///
+/// `f(d)` keeps a per-activation jmp_buf at `16 + 16*d`. `f(1)` calls `f(0)`,
+/// and `f(0)` longjmps to `f(1)`'s buffer with 7.
+///
+/// C semantics: control resumes in the outer activation `f(1)`, which returns
+/// `1*100 + 7 = 107`.
+///
+/// Actual behaviour: the jmp_buf names the site, not the activation, so the
+/// catch is taken by the innermost activation of that site. `f(0)` resumes
+/// and returns `0*100 + 7 = 7` to `f(1)`, which adds 9000 on the way out.
+/// This test pins the 9007 so the limit is visible and cannot change silently.
+/// If it ever returns 107 the limit is gone: update the module docs and the
+/// BLUE notes, and flip the assertion.
+#[test]
+fn recursive_longjmp_resumes_the_innermost_activation() {
+    let buf = add(c(16), Expr::binary(BinaryOp::Mul, get(0), c(16), Type::I32));
+    let body = vec![
+        Op::Setjmp { buf, dest: 1 },
+        Op::JmpIf { cond: get(1), target: 1 },
+        Op::JmpIf { cond: get(0), target: 2 },
+        Op::Longjmp { buf: c(32), val: c(7) },
+        label(2),
+        Op::LocalSet { idx: 2, val: Expr::Call { func_idx: 0, args: vec![add(get(0), c(-1))] } },
+        ret(add(get(2), c(9000))),
+        label(1),
+        ret(add(Expr::binary(BinaryOp::Mul, get(0), c(100), Type::I32), get(1))),
+    ];
+    let m = module(vec![func(vec![Type::I32], vec![Type::I32], vec![Type::I32, Type::I32], body)]);
+    assert_eq!(run_i32(&m, vec![Value::I32(1)]), 9007);
+}
+
 /// Two sites, each longjmp'd to once, the later longjmp to the earlier site:
 /// `r1 = setjmp(b1); if (r1) return r1*100 + r2;
 ///  r2 = setjmp(b2); if (r2) g(b1, 11); g(b2, 22);` -> 1122.

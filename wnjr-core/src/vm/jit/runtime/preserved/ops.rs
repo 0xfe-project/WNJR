@@ -241,6 +241,13 @@ fn raise_exception(
     // throw, and the dispatcher above the call site decides whether the
     // exception is caught. A real `exnref` exists only once the exception
     // escapes to the host, which `PendingEscape::into_error` materializes.
+    //
+    // The `exn` field below is therefore `RefValue::null()` and must never be
+    // read. Its only consumer is `finish_preserved_result` (preserved/entry.rs),
+    // which matches `ErrorRepr::Exception { .. }`, maps it to
+    // `NativeCallStatus::Thrown` and drops it. `WasmError::exception()` would
+    // hand this null to an embedder, so this error must not be returned from
+    // any public entry point: the host-facing one is built by `into_error`.
     Err(WasmError {
         repr: crate::error::ErrorRepr::Exception {
             exn: crate::RefValue::null(),
@@ -295,7 +302,6 @@ pub(super) fn do_eh_payload(ctx: &mut NativeContext, index: u32) -> Result<u64, 
         .get(index as usize)
         .cloned()
         .ok_or_else(|| internal_error("eh_payload: payload index out of range"))?;
-    drop(exn);
     let raw = value_to_machine_raw_in_store(value, active_gp_unit_bytes(), current_store_mut(ctx)?);
     Ok(raw)
 }

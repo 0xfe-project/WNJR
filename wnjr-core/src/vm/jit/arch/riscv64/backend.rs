@@ -20,7 +20,7 @@ use crate::{
             shared_64::{EmittedFunction64, ModuleLinkBackend64},
         },
         jit::machine::machine_ir::{
-            MachineAddr, MachineBlockId, MachineBlockParam, MachineBranchCond, MachineCallArgs,
+            EhHelperOp, MachineAddr, MachineBlockId, MachineBlockParam, MachineBranchCond, MachineCallArgs,
             MachineCallResults, MachineCallTarget, MachineCompareKind, MachineConstId,
             MachineConvertOp, MachineFloatBinaryOp, MachineFloatUnaryOp, MachineFloatWidth,
             MachineInst, MachineInstKind, MachineIntBinaryOp, MachineIntUnaryOp, MachineIntWidth,
@@ -45,6 +45,7 @@ use crate::vm::jit::arch::common::{
     helpers::{convert_result_float_width, is_fallthrough_edge, trap_code},
     types::DirectCallPatch,
 };
+use crate::vm::jit::runtime::common::NativeCallStatus;
 use crate::vm::jit::runtime::preserved::{io as preserved_io, op as preserved_op};
 
 const STACK_SLOT_BYTES: i32 = 8;
@@ -1263,6 +1264,7 @@ impl<'a> Riscv64Backend<'a> {
                 lhs,
                 rhs,
             } => self.lower_float_compare(*width, *kind, *dst, *lhs, *rhs),
+            MachineInstKind::EhHelper { op, dst, imm } => self.lower_eh_helper(*op, *dst, *imm),
             MachineInstKind::EhThrow { tag_idx, args } => self.lower_preserved_no_result(
                 preserved_op::EH_THROW,
                 *tag_idx,
@@ -3300,6 +3302,42 @@ impl<'a> Riscv64Backend<'a> {
         Ok(())
     }
 
+    /// Emit one pending-exception helper call.
+    ///
+    /// `Match`, `Payload` and `ExnRef` leave their result in `dst`; `Clear` takes
+    /// none. `Rethrow` always fails, and `emit_preserved_call_and_close` turns
+    /// that failure into this function's error tail, which is how the exception
+    /// reaches an outer call site's dispatcher.
+    fn lower_eh_helper(
+        &mut self,
+        op: EhHelperOp,
+        dst: MachineReg,
+        imm: u32,
+    ) -> Result<(), WasmError> {
+        self.emit_preserved_frame_open();
+        self.emit_io_store_imm(preserved_io::IMM0, imm);
+        match op {
+            EhHelperOp::Match | EhHelperOp::Payload | EhHelperOp::ExnRef => {
+                let op_code = match op {
+                    EhHelperOp::Match => preserved_op::EH_MATCH,
+                    EhHelperOp::Payload => preserved_op::EH_PAYLOAD,
+                    _ => preserved_op::EH_PENDING_EXN_REF,
+                };
+                let dst_gp = self.map_gp_reg(dst)?;
+                let result_scratch_idx = self.gp_scratch.alloc();
+                let result_scratch = self.gp_scratch.reg(result_scratch_idx);
+                self.emit_preserved_call_and_close(op_code, Some(result_scratch_idx));
+                self.emit_mv(dst_gp, result_scratch);
+                self.gp_scratch.free_index(result_scratch_idx);
+            }
+            EhHelperOp::Clear => self.emit_preserved_call_and_close(preserved_op::EH_CLEAR, None),
+            EhHelperOp::Rethrow => {
+                self.emit_preserved_call_and_close(preserved_op::EH_RETHROW, None)
+            }
+        }
+        Ok(())
+    }
+
     fn lower_preserved_result(
         &mut self,
         op_code: u32,
@@ -3623,7 +3661,16 @@ impl<'a> Riscv64Backend<'a> {
                 args,
                 results,
                 success,
-            } => self.lower_call(target, *frame_delta, args, results, success, fallthrough),
+                thrown,
+            } => self.lower_call(
+                target,
+                *frame_delta,
+                args,
+                results,
+                success,
+                thrown.as_ref(),
+                fallthrough,
+            ),
             MachineTerminator::TailCall { target, args } => self.lower_tail_call(target, args),
         }
     }
@@ -3701,6 +3748,7 @@ impl<'a> Riscv64Backend<'a> {
         args: &MachineCallArgs,
         results: &MachineCallResults,
         success: &crate::vm::jit::machine::machine_ir::MachineEdge,
+        thrown: Option<&crate::vm::jit::machine::machine_ir::MachineEdge>,
         fallthrough: Option<MachineBlockId>,
     ) -> Result<(), WasmError> {
         let fp = abi::map_fixed_reg(MACHINE_FP_REG);
@@ -3741,12 +3789,30 @@ impl<'a> Riscv64Backend<'a> {
             }
         }
 
-        self.emit_branch_to(
-            enc::Cond::Ne,
-            abi::C_RET0,
-            abi::zero_reg(),
-            body_local_error_label,
-        );
+        // C_RET0 holds 0 (success), 1 (trap), or 2 (an exception is being
+        // unwound). The callee's error tail has already popped the call record
+        // and restored fp, so a thrown edge starts from a balanced stack.
+        // Without a dispatcher every non-zero status is fatal; with one,
+        // exactly status 2 is routed to the catch dispatcher.
+        if let Some(thrown_edge) = thrown {
+            let ok_label = self.core.new_label();
+            self.emit_branch_to(enc::Cond::Eq, abi::C_RET0, abi::zero_reg(), ok_label);
+            let thrown_label = self.core.emit_edge(thrown_edge.target, &thrown_edge.args)?;
+            {
+                let status_two = self.gp_scratch.scoped_alloc().detach();
+                self.materialize_u64(*status_two, NativeCallStatus::Thrown as u64);
+                self.emit_branch_to(enc::Cond::Eq, abi::C_RET0, *status_two, thrown_label);
+            }
+            self.emit_jal(abi::zero_reg(), body_local_error_label);
+            self.core.bind_label(ok_label);
+        } else {
+            self.emit_branch_to(
+                enc::Cond::Ne,
+                abi::C_RET0,
+                abi::zero_reg(),
+                body_local_error_label,
+            );
+        }
         if !continuation_is_fallthrough {
             self.emit_jal(abi::zero_reg(), continuation_label);
         }

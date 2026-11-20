@@ -28,6 +28,7 @@ use crate::vm::jit::arch::common::template::{
     decode_template_chain_next, encode_template_chain_next, TemplateBranchSense,
 };
 use crate::vm::jit::arch::common::types::DirectCallPatch;
+use crate::vm::jit::runtime::common::NativeCallStatus;
 use crate::vm::jit::runtime::{runtime_call::call_runtime_entry_ptr, trap::raise_trap};
 
 fn scalar_fp_width(ty: MachineStorageType) -> Result<MachineFloatWidth, WasmError> {
@@ -170,7 +171,16 @@ impl<'a> X86_64Backend<'a> {
                 args,
                 results,
                 success,
-            } => self.lower_call(target, *frame_delta, args, results, success, fallthrough),
+                thrown,
+            } => self.lower_call(
+                target,
+                *frame_delta,
+                args,
+                results,
+                success,
+                thrown.as_ref(),
+                fallthrough,
+            ),
             MachineTerminator::TailCall { target, args } => self.lower_tail_call(target, args),
         }
     }
@@ -668,6 +678,7 @@ impl<'a> X86_64Backend<'a> {
         args: &MachineCallArgs,
         results: &MachineCallResults,
         success: &MachineEdge,
+        thrown: Option<&MachineEdge>,
         fallthrough: Option<MachineBlockId>,
     ) -> Result<(), WasmError> {
         let body_local_error_label = self.core.body_local_error_label;
@@ -700,10 +711,26 @@ impl<'a> X86_64Backend<'a> {
         // propagation; the caller's error tail expects its own frame.
         self.adjust_frame_pointer_by_delta(frame_delta, false)?;
 
-        // C_RET0 holds 0 (success) or trap kind (error). Status check
-        // propagates to body_local_error_label.
+        // C_RET0 holds 0 (success), 1 (trap), or 2 (an exception is being
+        // unwound). Without a dispatcher every non-zero status is fatal; with
+        // one, exactly status 2 is routed to the catch dispatcher and any
+        // other non-zero status still reaches the error tail.
         enc::test_rr_64(&mut self.core.text, super::abi::C_RET0, super::abi::C_RET0);
-        self.emit_jcc(Cc::NE, body_local_error_label);
+        if let Some(thrown_edge) = thrown {
+            let ok_label = self.core.new_label();
+            self.emit_jcc(Cc::E, ok_label);
+            let thrown_label = self.core.emit_edge(thrown_edge.target, &thrown_edge.args)?;
+            enc::cmp_ri_64(
+                &mut self.core.text,
+                super::abi::C_RET0,
+                NativeCallStatus::Thrown as i32,
+            );
+            self.emit_jcc(Cc::E, thrown_label);
+            self.emit_jmp(body_local_error_label);
+            self.core.bind_label(ok_label);
+        } else {
+            self.emit_jcc(Cc::NE, body_local_error_label);
+        }
 
         self.lower_call_result_placement(frame_delta, results)?;
 
