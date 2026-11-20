@@ -130,6 +130,16 @@ impl core::fmt::Display for VerifyError {
 /// (functions in order; within a function, labels, then ops in order, then
 /// the CFG).
 pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
+    // A data fixup is a pre-lowering marker like `Expr::LabelAddr`: it says a
+    // word still waits for a computed-goto label number, which only
+    // `computed_goto::lower_module` assigns.
+    if let Some(fixup) = module.data_label_fixups.first() {
+        return Err(VerifyError {
+            func: fixup.function,
+            at: Vec::new(),
+            kind: VerifyErrorKind::UnloweredComputedGoto,
+        });
+    }
     let env = Env::new(module);
     for (i, func) in module.functions.iter().enumerate() {
         let idx = env.imported_funcs + i as u32;

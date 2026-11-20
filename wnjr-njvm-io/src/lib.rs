@@ -26,8 +26,8 @@
 //!
 //! - A **struct** is a map from field-name string to value. `Module`,
 //!   `Function`, `FunctionType`, `Import`, `Export`, `Global`, `Tag`,
-//!   `DataSegment`, `ElementSegment`, `TableType`, `MemoryType`, `GlobalType`
-//!   are structs. Field order is not significant to the reader, but the Rust
+//!   `DataSegment`, `DataLabelFixup`, `ElementSegment`, `TableType`,
+//!   `MemoryType`, `GlobalType` are structs. Field order is not significant to the reader, but the Rust
 //!   writer emits them in declaration order.
 //! - A **fieldless enum variant** (e.g. `Type::I32`, `Op::Nop`,
 //!   `Op::Unreachable`, `Op::MemorySize`, `SegmentMode::Passive`) is just

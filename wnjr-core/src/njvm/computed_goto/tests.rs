@@ -3,6 +3,7 @@
 use super::*;
 use crate::collections::{vec, Vec};
 use crate::njvm::builder::FunctionBuilder;
+use crate::njvm::module::{DataLabelFixup, DataSegment, SegmentMode};
 use alloc::collections::BTreeSet;
 
 fn c32(n: i32) -> Expr {
@@ -349,4 +350,96 @@ fn module_ranges_are_disjoint() {
     // wrap to huge unsigned values and hit the default trap.
     assert!(matches!(&out.functions[2].body[2],
         Op::BrTable { index: Expr::Binary { rhs, .. }, .. } if **rhs == c32(3)));
+}
+
+// ── Data label fixups ───────────────────────────────────────────────────────
+
+/// A static initialiser that names labels: the data words hold the numbers the
+/// lowering assigns, and the fixup list is emptied.
+#[test]
+fn data_fixups_are_filled_with_the_label_numbers() {
+    let mut fb = FunctionBuilder::new(vec![], vec![], vec![Type::I32]);
+    fb.label(0, vec![]);
+    fb.push_op(Op::LocalSet { idx: 0, val: Expr::LabelAddr(1) });
+    fb.push_op(Op::LocalSet { idx: 0, val: Expr::LabelAddr(2) });
+    fb.push_op(Op::GotoIndirect { target: Expr::LocalGet(0) });
+    for l in [1, 2] { fb.label(l, vec![]); fb.push_op(Op::Return { vals: vec![] }); }
+
+    let mut m = Module::new();
+    m.functions.push(fb.build());
+    m.data.push(DataSegment {
+        mode: SegmentMode::Passive,
+        bytes: vec![0, 0, 0, 0, 0, 0, 0, 0],
+    });
+    m.data_label_fixups.push(DataLabelFixup { segment: 0, offset: 0, function: 0, label: 1 });
+    m.data_label_fixups.push(DataLabelFixup { segment: 0, offset: 4, function: 0, label: 2 });
+
+    let out = lower_module(&m).unwrap();
+    // Numbers are 1 and 2, little-endian, and nothing is left waiting.
+    assert_eq!(out.data[0].bytes, vec![1, 0, 0, 0, 2, 0, 0, 0]);
+    assert!(out.data_label_fixups.is_empty());
+    // Lowering again is a no-op for the data: there is nothing left to fill in.
+    assert_eq!(lower_module(&out).unwrap().data[0].bytes, out.data[0].bytes);
+}
+
+/// The numbers a fixup gets are the lowered ones, not the input ids: a second
+/// function starts above the first one's range.
+#[test]
+fn data_fixup_uses_the_module_wide_number() {
+    let one = |taken: &[LabelId]| {
+        let mut fb = FunctionBuilder::new(vec![], vec![], vec![Type::I32]);
+        fb.label(0, vec![]);
+        for &l in taken { fb.push_op(Op::LocalSet { idx: 0, val: Expr::LabelAddr(l) }); }
+        fb.push_op(Op::GotoIndirect { target: Expr::LocalGet(0) });
+        for &l in taken { fb.label(l, vec![]); fb.push_op(Op::Return { vals: vec![] }); }
+        fb.build()
+    };
+    let mut m = Module::new();
+    m.functions.push(one(&[1, 2]));
+    m.functions.push(one(&[1]));
+    m.data.push(DataSegment { mode: SegmentMode::Passive, bytes: vec![0, 0, 0, 0] });
+    // Function 1 names its own label 1, which is the third number overall.
+    m.data_label_fixups.push(DataLabelFixup { segment: 0, offset: 0, function: 1, label: 1 });
+    assert_eq!(lower_module(&m).unwrap().data[0].bytes, vec![3, 0, 0, 0]);
+}
+
+#[test]
+fn data_fixup_for_a_label_the_function_does_not_name_is_refused() {
+    let mut fb = FunctionBuilder::new(vec![], vec![], vec![Type::I32]);
+    fb.label(0, vec![]);
+    fb.push_op(Op::LocalSet { idx: 0, val: Expr::LabelAddr(1) });
+    fb.push_op(Op::GotoIndirect { target: Expr::LocalGet(0) });
+    fb.label(1, vec![]);
+    fb.push_op(Op::Return { vals: vec![] });
+    let mut m = Module::new();
+    m.functions.push(fb.build());
+    m.data.push(DataSegment { mode: SegmentMode::Passive, bytes: vec![0, 0, 0, 0] });
+    // Label 2 exists nowhere: the frontend forgot to declare it to the body.
+    m.data_label_fixups.push(DataLabelFixup { segment: 0, offset: 0, function: 0, label: 2 });
+    assert_eq!(lower_module(&m).unwrap_err(), ComputedGotoError::UnknownLabel(2));
+}
+
+/// A fixup that points outside the data, or at a function the module does not
+/// have, is a frontend bug and says so instead of writing anywhere.
+#[test]
+fn data_fixup_outside_the_data_is_refused() {
+    let one_fn = || {
+        let mut fb = FunctionBuilder::new(vec![], vec![], vec![Type::I32]);
+        fb.label(0, vec![]);
+        fb.push_op(Op::LocalSet { idx: 0, val: Expr::LabelAddr(1) });
+        fb.push_op(Op::GotoIndirect { target: Expr::LocalGet(0) });
+        fb.label(1, vec![]);
+        fb.push_op(Op::Return { vals: vec![] });
+        fb.build()
+    };
+    let base = |fixup: DataLabelFixup| {
+        let mut m = Module::new();
+        m.functions.push(one_fn());
+        m.data.push(DataSegment { mode: SegmentMode::Passive, bytes: vec![0; 4] });
+        m.data_label_fixups.push(fixup);
+        lower_module(&m).unwrap_err()
+    };
+    assert_eq!(base(DataLabelFixup { segment: 1, offset: 0, function: 0, label: 1 }), ComputedGotoError::FixupOutOfRange);
+    assert_eq!(base(DataLabelFixup { segment: 0, offset: 2, function: 0, label: 1 }), ComputedGotoError::FixupOutOfRange);
+    assert_eq!(base(DataLabelFixup { segment: 0, offset: 0, function: 7, label: 1 }), ComputedGotoError::UnknownLabel(1));
 }

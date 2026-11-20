@@ -5,7 +5,8 @@ use crate::collections::{vec, Vec};
 use crate::njvm::{
     lower_function, verify_module, BinaryOp, Catch, ConstVal, Expr, Function, FunctionBuilder,
     FunctionType, Global, GlobalType, InitExpr, LabelId, MemType, Module, ModuleBuilder, Op,
-    OpName, TableType, Tag, Type, UnaryOp, VerifyError, VerifyErrorKind,
+    DataLabelFixup, DataSegment, OpName, SegmentMode, TableType, Tag, Type, UnaryOp, VerifyError,
+    VerifyErrorKind,
 };
 
 fn c32(v: i32) -> Expr {
@@ -491,4 +492,25 @@ fn error_names_the_failing_function() {
     let e = verify_module(&module(vec![good.clone(), good, bad])).unwrap_err();
     assert_eq!((e.func, e.at), (2, vec![2]));
     assert_eq!(e.kind, VerifyErrorKind::UndeclaredLabel { label: 0 });
+}
+
+/// A data word that still waits for a computed-goto label number is a
+/// pre-lowering marker like the two above: only lower_module can fill it in.
+#[test]
+fn data_label_fixup_is_an_unlowered_marker() {
+    let body = vec![
+        label(0),
+        Op::LocalSet { idx: 0, val: Expr::LabelAddr(1) },
+        label(1),
+        ret(),
+    ];
+    let mut m = module(vec![func(vec![], vec![], vec![Type::I32], body)]);
+    m.data.push(DataSegment { mode: SegmentMode::Passive, bytes: vec![0; 4] });
+    m.data_label_fixups.push(DataLabelFixup { segment: 0, offset: 0, function: 0, label: 1 });
+    let e = verify_module(&m).unwrap_err();
+    assert_eq!(e.kind, VerifyErrorKind::UnloweredComputedGoto);
+    assert_eq!(e.at, vec![]);
+    // Lowering empties the list, and then the same module verifies.
+    let lowered = crate::njvm::computed_goto::lower_module(&m).unwrap();
+    assert!(lowered.data_label_fixups.is_empty());
 }

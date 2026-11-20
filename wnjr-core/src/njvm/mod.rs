@@ -28,8 +28,8 @@ pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use computed_goto::{lower_function, lower_module, ComputedGotoError, Dispatch, Lowered};
 pub use expr::Expr;
 pub use module::{
-    DataSegment, ElementSegment, Export, ExportKind, Function, FunctionType, Global, GlobalType,
-    Import, ImportKind, InitExpr, MemoryType, Module, SegmentMode, TableType, Tag,
+    DataLabelFixup, DataSegment, ElementSegment, Export, ExportKind, Function, FunctionType, Global,
+    GlobalType, Import, ImportKind, InitExpr, MemoryType, Module, SegmentMode, TableType, Tag,
 };
 pub use op::{Catch, LabelId, Op};
 pub use types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};

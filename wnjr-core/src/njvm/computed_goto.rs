@@ -68,6 +68,8 @@ pub enum ComputedGotoError {
     LabelWithParams(LabelId),
     /// Label numbers do not fit in 32 bits (`base` too large).
     NumberOverflow,
+    /// A data fixup names a segment or a byte range the module does not have.
+    FixupOutOfRange,
 }
 
 /// The dispatch machinery that [`lower_function`] added to a function.
@@ -192,15 +194,49 @@ pub fn lower_function(func: &Function, base: u32) -> Result<Lowered, ComputedGot
 
 /// Lower every function of a module, giving each a disjoint range of label
 /// numbers so a label value used in the wrong function traps.
+///
+/// This is also what resolves [`DataLabelFixup`]s: a static initialiser that
+/// named a label (`static void *p[] = {&&a};`) needs the number the lowering
+/// just assigned, so the word is written here and the fixup list is emptied. A
+/// module that still has a fixup after this was never lowered, and the verifier
+/// says so.
 pub fn lower_module(module: &Module) -> Result<Module, ComputedGotoError> {
     let mut out = module.clone();
     let mut base: u32 = 0;
+    let mut numbers: Vec<Option<Vec<(LabelId, i32)>>> = Vec::new();
     for f in out.functions.iter_mut() {
         let l = lower_function(f, base)?;
         if let Some(d) = &l.dispatch {
             base = base.checked_add(d.numbers.len() as u32).ok_or(ComputedGotoError::NumberOverflow)?;
+            numbers.push(Some(d.numbers.clone()));
+        } else {
+            numbers.push(None);
         }
         *f = l.function;
+    }
+
+    // Data words last: they are indexed by the numbers the loop above produced.
+    let fixups = core::mem::take(&mut out.data_label_fixups);
+    for fixup in &fixups {
+        let table = numbers
+            .get(fixup.function as usize)
+            .and_then(|entry| entry.as_ref())
+            .ok_or(ComputedGotoError::UnknownLabel(fixup.label))?;
+        let number = table
+            .iter()
+            .find(|(label, _)| *label == fixup.label)
+            .map(|(_, number)| *number)
+            .ok_or(ComputedGotoError::UnknownLabel(fixup.label))?;
+        let segment = out
+            .data
+            .get_mut(fixup.segment as usize)
+            .ok_or(ComputedGotoError::FixupOutOfRange)?;
+        let at = fixup.offset as usize;
+        let word = segment
+            .bytes
+            .get_mut(at..at + 4)
+            .ok_or(ComputedGotoError::FixupOutOfRange)?;
+        word.copy_from_slice(&number.to_le_bytes());
     }
     Ok(out)
 }

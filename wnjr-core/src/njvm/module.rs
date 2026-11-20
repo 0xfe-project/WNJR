@@ -10,7 +10,7 @@ use alloc::string::String;
 
 use crate::collections::Vec;
 
-use super::op::Op;
+use super::op::{LabelId, Op};
 use super::types::{ConstVal, Type};
 
 /// A function in NJVM-IR.
@@ -133,6 +133,32 @@ pub struct DataSegment {
     pub bytes: Vec<u8>,
 }
 
+/// A 32-bit word of a data segment that is a computed-goto label value.
+///
+/// A C frontend can write "&&L" into a static initialiser ("static void *p[] =
+/// {&&a, &&b};"). The word cannot be resolved when the segment is built, because
+/// a label number is only assigned when the function is lowered: it is
+/// "base + 1 + i", and "base" depends on how many address-taken labels the
+/// functions before it have. So the segment holds a zero and this record says
+/// what belongs there; `computed_goto::lower_module` writes the number in and
+/// clears the list.
+///
+/// A module still carrying a fixup has not been lowered, which the verifier
+/// reports as `UnloweredComputedGoto` -- the same verdict an `Expr::LabelAddr` or
+/// `Op::GotoIndirect` gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct DataLabelFixup {
+    /// Index into `Module::data`.
+    pub segment: u32,
+    /// Byte offset of the little-endian 32-bit word inside that segment.
+    pub offset: u32,
+    /// Index into `Module::functions`: the function whose label this is. A
+    /// label value only means something inside its own function.
+    pub function: u32,
+    /// The label, numbered as that function's input body numbers its labels.
+    pub label: LabelId,
+}
+
 /// An exception tag: the types of the values a `throw` carries.
 /// setjmp/longjmp use one module-level tag.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -197,6 +223,10 @@ pub struct Module {
     pub start: Option<u32>,
     pub elements: Vec<ElementSegment>,
     pub data: Vec<DataSegment>,
+    /// Data words waiting for a computed-goto label number (see
+    /// `DataLabelFixup`). Empty in a lowered module.
+    #[serde(default)]
+    pub data_label_fixups: Vec<DataLabelFixup>,
     /// Global index of the conventional mutable i32 `stack_pointer`.
     pub stack_pointer: Option<u32>,
     /// Global index of the conventional mutable i32 `tls_base`.
@@ -218,6 +248,7 @@ impl Module {
             start: None,
             elements: Vec::new(),
             data: Vec::new(),
+            data_label_fixups: Vec::new(),
             stack_pointer: None,
             tls_base: None,
         }
