@@ -44,29 +44,9 @@ cargo build --offline -q --manifest-path "$root/Cargo.toml" -p wnjr-njvm-e2e --b
   || { echo "FAIL: cannot build njvm-run"; exit 1; }
 [ -x "$runner" ] || { echo "FAIL: $runner missing"; exit 1; }
 
-# The parts of wnjr-cc-libc that are not part of one program, and why.
-skip_unit="libc-top-half/musl/src/env/__init_tls.c
-libc-top-half/musl/src/thread/wasi-threads/pthread_create.c
-dlmalloc/src/dlmalloc.c
-libc-bottom-half/crt/crt1-command.c
-libc-bottom-half/sources/__main_void.c"
-
-units=""
-while IFS= read -r f; do
-  p=${f#./}
-  for s in $skip_unit; do [ "$p" = "$s" ] && continue 2; done
-  units="$units $libc/$p"
-done < <(cd "$libc" && find . -name "*.c" | LC_ALL=C sort)
-
-incs=""
-for d in libc-top-half/musl/src/include libc-top-half/musl/src/internal \
-         libc-top-half/musl/arch/wasm32 libc-top-half/musl/arch/generic \
-         libc-top-half/musl/include libc-top-half/headers/private \
-         libc-bottom-half/headers/public libc-bottom-half/headers/private \
-         libc-bottom-half/cloudlibc/src libc-bottom-half/cloudlibc/src/include \
-         generated/include dlmalloc/include include; do
-  incs="$incs -I$libc/$d"
-done
+. "$here/libc-units.sh"
+libc_units "$libc"
+libc_incs "$libc"
 
 # A case this frontend cannot take, and why. A skipped case is printed on every
 # run and reported apart, never as a pass.

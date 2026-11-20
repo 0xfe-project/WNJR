@@ -243,8 +243,12 @@ pub fn result_kinds(module: &Module, export: &str) -> Result<Vec<Kind>, String> 
 /// snapshot the CLI gives every module. argv is fixed so that a test reading it
 /// gets the same answer on every run.
 fn wasi_imports() -> std::vec::Vec<wnjr_core::Import> {
+    // A preopen of the working directory, so a case can open, stat and read a
+    // file the harness wrote beside it: without one, a libc's whole path layer
+    // is unreachable and "close enough" testing stops at printf.
     let ctx = wnjr_wasi::WasiContextBuilder::new()
         .args(["njvm-run"])
+        .preopen_dir(".", std::path::Path::new("."))
         .build();
     wnjr_wasi::wasi_imports_with_config(ctx, None)
 }

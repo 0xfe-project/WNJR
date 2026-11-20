@@ -1,0 +1,7 @@
+data: size=1234 reg=1 dir=0
+dir: dir=1 reg=0
+absent: ret=-1
+tm: 2023-11-14 22:13:20 wday=2 yday=317 isdst=0
+ctime: Tue Nov 14 22:13:20 2023
+split: dir=/usr/lib base=libc.a
+fails=0
