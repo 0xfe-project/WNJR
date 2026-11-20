@@ -103,6 +103,11 @@ static int cur_tu;
 // Points to the function object the parser is currently parsing.
 static Obj *current_fn;
 
+// Set by eval2 when the constant it evaluated names a computed-goto label:
+// what that word holds is a label number, not the address of an object, and
+// only the lowering pass can say which number (see DataLabelFixup).
+static bool eval_gave_label;
+
 // Lists of all goto statements and labels in the curent function.
 static Node *gotos;
 static Node *labels;
@@ -1548,6 +1553,7 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int off
   }
 
   char **label = NULL;
+  eval_gave_label = false;
   uint64_t val = eval2(init->expr, &label);
 
   if (!label) {
@@ -1559,6 +1565,7 @@ write_gvar_data(Relocation *cur, Initializer *init, Type *ty, char *buf, int off
   rel->offset = offset;
   rel->label = label;
   rel->addend = val;
+  rel->owner = eval_gave_label ? current_fn : NULL;
   cur->next = rel;
   return cur->next;
 }
@@ -2066,6 +2073,7 @@ static int64_t eval2(Node *node, char ***label) {
     return eval_rval(node->lhs, label);
   case ND_LABEL_VAL:
     *label = &node->unique_label;
+    eval_gave_label = true;
     return 0;
   case ND_MEMBER:
     if (!label)
@@ -3582,9 +3590,6 @@ static Node *primary(Token **rest, Token *tok) {
       {"__sync_fetch_and_and", "And"}, {"__sync_fetch_and_or", "Or"},
       {"__sync_fetch_and_xor", "Xor"}, {"__sync_lock_test_and_set", "Xchg"},
       {"__sync_lock_release", "Store"},
-      // this frontend's own <stdatomic.h> spells atomic_exchange this way, and it
-      // is the same atomic exchange the line above is.
-      {"__builtin_atomic_exchange", "Xchg"},
     };
     for (int i = 0; i < sizeof(rmw) / sizeof(*rmw); i++) {
       if (!equal(tok, rmw[i].name))

@@ -71,6 +71,46 @@ static LabelEnt *labels;
 static int nlabels;
 static int label_cap;
 
+// The function whose body is being emitted, and every label it names. A static
+// initialiser may name a label of the function it is written in ("static void
+// *p[] = {&&a};"), and that function's own table is gone by the time the data
+// segment is written, so the (function, name) -> id pairs are kept module-wide.
+typedef struct {
+  Obj *fn;
+  const char *name;
+  uint32_t id;
+} LabelRec;
+static LabelRec *label_recs;
+static int nlabel_recs;
+static int label_rec_cap;
+static Obj *emitting_fn;
+
+// A label a static initialiser of a function names ("static void *p[] = {&&a};"):
+// which functions name which labels. A label value carries a number only if the
+// function's body names the label somewhere, and a label taken in an initialiser
+// is named nowhere in the body, so the body has to be told about it (see
+// emit_function).
+typedef struct {
+  Obj *fn;
+  const char *name;
+} StaticLabelRef;
+static StaticLabelRef *static_label_refs;
+static int nstatic_label_refs;
+static int static_label_ref_cap;
+
+// A data word that is a computed-goto label number. The number depends on which
+// labels a function takes the address of, so it is only known after every body
+// has been emitted; the word is left zero and this says what belongs there.
+typedef struct {
+  uint32_t segment;
+  uint32_t offset;
+  uint32_t function;
+  uint32_t label;
+} LabelFixup;
+static LabelFixup *label_fixups;
+static int nlabel_fixups;
+static int label_fixup_cap;
+
 // case node -> IR label id.
 typedef struct {
   Node *node;
@@ -542,11 +582,69 @@ static uint32_t label_id(const char *name) {
   }
   labels[nlabels].name = name;
   labels[nlabels].id = next_label++;
+  if (nlabel_recs == label_rec_cap) {
+    label_rec_cap = label_rec_cap ? label_rec_cap * 2 : 64;
+    label_recs = realloc(label_recs, label_rec_cap * sizeof(*label_recs));
+    if (!label_recs)
+      error("out of memory");
+  }
+  label_recs[nlabel_recs].fn = emitting_fn;
+  label_recs[nlabel_recs].name = name;
+  label_recs[nlabel_recs].id = labels[nlabels].id;
+  nlabel_recs++;
   return labels[nlabels++].id;
 }
 
 static uint32_t fresh_label(void) {
   return next_label++;
+}
+
+// The id a label of `fn` was given, if that function names it.
+static bool label_id_of(Obj *fn, const char *name, uint32_t *id) {
+  for (int i = 0; i < nlabel_recs; i++)
+    if (label_recs[i].fn == fn && !strcmp(label_recs[i].name, name)) {
+      *id = label_recs[i].id;
+      return true;
+    }
+  return false;
+}
+
+static void push_static_label_ref(Obj *fn, const char *name) {
+  for (int i = 0; i < nstatic_label_refs; i++)
+    if (static_label_refs[i].fn == fn && !strcmp(static_label_refs[i].name, name))
+      return;
+  if (nstatic_label_refs == static_label_ref_cap) {
+    static_label_ref_cap = static_label_ref_cap ? static_label_ref_cap * 2 : 8;
+    static_label_refs =
+        realloc(static_label_refs, (size_t)static_label_ref_cap * sizeof(*static_label_refs));
+    if (!static_label_refs)
+      error("out of memory");
+  }
+  static_label_refs[nstatic_label_refs].fn = fn;
+  static_label_refs[nstatic_label_refs].name = name;
+  nstatic_label_refs++;
+}
+
+// A &&L value as an expression.
+static E *e_label_addr(uint32_t id) {
+  E *e = e_new(E_LABELADDR, "I32");
+  e->idx = id;
+  return e;
+}
+
+static void push_label_fixup(uint32_t segment, uint32_t offset, uint32_t function,
+                             uint32_t label) {
+  if (nlabel_fixups == label_fixup_cap) {
+    label_fixup_cap = label_fixup_cap ? label_fixup_cap * 2 : 8;
+    label_fixups = realloc(label_fixups, (size_t)label_fixup_cap * sizeof(*label_fixups));
+    if (!label_fixups)
+      error("out of memory");
+  }
+  label_fixups[nlabel_fixups].segment = segment;
+  label_fixups[nlabel_fixups].offset = offset;
+  label_fixups[nlabel_fixups].function = function;
+  label_fixups[nlabel_fixups].label = label;
+  nlabel_fixups++;
 }
 
 static void add_case(Node *node, uint32_t id) {
@@ -1427,11 +1525,16 @@ static E *gen_expr(Node *node) {
     return e_local((uint32_t)ok, "I32");
   }
 
+  case ND_EXCH:
   case ND_ATOMIC_RMW: {
     int w = atomic_width(node->lhs);
     const char *vty = w == 8 ? "I64" : "I32";
     E *addr = gen_expr(node->lhs);
-    bool store = !strcmp(node->atomic_op, "Store");
+    // An atomic exchange is one member of this family. chibicc gives it a node
+    // kind of its own (ND_EXCH, from __builtin_atomic_exchange) with no operand
+    // naming the operation, so the name is supplied here.
+    const char *op = node->kind == ND_EXCH ? "Xchg" : node->atomic_op;
+    bool store = !strcmp(op, "Store");
     E *val = store ? e_new(E_CONST_I32, vty) : as_type(gen_expr(node->rhs), vty);
     if (store) {
       // __sync_lock_release(p) stores zero and yields nothing.
@@ -1440,7 +1543,7 @@ static E *gen_expr(Node *node) {
       return e_new(E_CONST_I32, "I32");
     }
     int old = new_temp(vty);
-    OP(nj_op_atomic(out, node->atomic_op, (uint32_t)w, 0, addr, val, NULL, old));
+    OP(nj_op_atomic(out, op, (uint32_t)w, 0, addr, val, NULL, old));
     return narrow_atomic_result(as_type(e_local((uint32_t)old, vty), ir_ty(node->ty)),
                                 node->lhs->ty->base);
   }
@@ -1631,11 +1734,8 @@ static E *gen_expr(Node *node) {
     return gen_expr(last->lhs);
   }
 
-  case ND_LABEL_VAL: {
-    E *e = e_new(E_LABELADDR, "I32");
-    e->idx = label_id(node->unique_label);
-    return e;
-  }
+  case ND_LABEL_VAL:
+    return e_label_addr(label_id(node->unique_label));
 
   case ND_VLA_PTR:
     return gen_addr(node);
@@ -1918,8 +2018,12 @@ static void resolve_relocations(Obj *prog) {
     if (var->is_function || !var->is_definition)
       continue;
     for (Relocation *rel = var->rel; rel; rel = rel->next) {
-      // parse.c puts a computed-goto label here as its own name, and a label is
-      // not an object: the program has no symbol for it.
+      // A computed-goto label is not an object: what the word holds is the
+      // number the lowering pass gives the label, not an address. parse.c has
+      // said which function it belongs to, and the data segment keeps the word
+      // at zero until lower_module writes the number (see LabelFixup).
+      if (rel->owner)
+        continue;
       Obj *target = find_symbol(*rel->label, var->tu);
       if (!target) {
         note_missing(var->tok, *rel->label);
@@ -1976,6 +2080,7 @@ static void emit_type_array(const char **tys, int n) {
 
 
 static void emit_function(Obj *fn) {
+  emitting_fn = fn;
   reset_locals();
   reset_labels();
   body_len = 0;
@@ -2060,6 +2165,13 @@ static void emit_function(Obj *fn) {
     e_free(buf);
   }
 
+  // A label this function's static initialisers name but no expression takes the
+  // address of: name it here, as a dropped address, so the lowering gives it a
+  // number. Without this the initialiser's word would have no number to hold.
+  for (int r = 0; r < nstatic_label_refs; r++)
+    if (static_label_refs[r].fn == fn)
+      OP(nj_op_drop(out, e_label_addr(label_id(static_label_refs[r].name))));
+
   // A provided function has no body, only an empty one.
   if (fn->body)
     gen_stmt(fn->body);
@@ -2116,6 +2228,19 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   heap_end_obj->offset = (int)MEMORY_END;
   build_symbols(prog);
   assign_lvar_offsets(prog);
+  nlabel_recs = 0;
+  nlabel_fixups = 0;
+
+  // Which labels the function bodies have to name even though no expression in
+  // them does: the ones a static initialiser of theirs takes the address of.
+  nstatic_label_refs = 0;
+  for (Obj *var = prog; var; var = var->next) {
+    if (var->is_function || !var->is_definition || !var->init_data)
+      continue;
+    for (Relocation *rel = var->rel; rel; rel = rel->next)
+      if (rel->owner)
+        push_static_label_ref(rel->owner, *rel->label);
+  }
 
   // Function indices first: a body may call a function defined later. A static
   // function is still part of the module; it is only left out of the exports.
@@ -2412,9 +2537,43 @@ void njvm_emit_module(Obj *prog, Mp *m) {
         mp_uint(out, (unsigned char)var->init_data[i]);
       mp_end_container(out, bytes, (size_t)var->ty->size);
       mp_end_container(out, seg, 2);
+      // A word of this initialiser that is a computed-goto label number: say
+      // where it is and which label it names. Every body has been emitted by
+      // now, so the label's id is known.
+      for (Relocation *rel = var->rel; rel; rel = rel->next) {
+        if (!rel->owner)
+          continue;
+        uint32_t id;
+        if (!label_id_of(rel->owner, *rel->label, &id))
+          error_tok(var->tok,
+                    "wnjr-cc: %s is not a label of %s, which this initialiser "
+                    "names it from",
+                    *rel->label, rel->owner->name ? rel->owner->name : "a function");
+        push_label_fixup((uint32_t)nseg, (uint32_t)rel->offset,
+                         (uint32_t)(rel->owner->offset - nimports), id);
+      }
       nseg++;
     }
     mp_end_container(out, a, nseg);
+  }
+  fields++;
+
+  mp_key(out, "data_label_fixups");
+  {
+    int a = mp_begin_arr(out);
+    for (int i = 0; i < nlabel_fixups; i++) {
+      int f = mp_begin_map(out);
+      mp_key(out, "segment");
+      mp_uint(out, label_fixups[i].segment);
+      mp_key(out, "offset");
+      mp_uint(out, label_fixups[i].offset);
+      mp_key(out, "function");
+      mp_uint(out, label_fixups[i].function);
+      mp_key(out, "label");
+      mp_uint(out, label_fixups[i].label);
+      mp_end_container(out, f, 4);
+    }
+    mp_end_container(out, a, (size_t)nlabel_fixups);
   }
   fields++;
 

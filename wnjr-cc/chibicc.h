@@ -202,6 +202,12 @@ struct Relocation {
   int offset;
   char **label;
   long addend;
+  // The function whose computed-goto label this word names, when the
+  // initialiser named one ("static void *p[] = {&&a};"). A label number only
+  // means something inside its own function, so the fixup has to say which,
+  // and it is the enclosing function of the declaration being initialised.
+  // NULL for an ordinary object or function address.
+  Obj *owner;
 };
 
 // AST node
