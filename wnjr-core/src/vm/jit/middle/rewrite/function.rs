@@ -266,11 +266,33 @@ fn resolve_try_scopes(
                 resolved = false;
                 break;
             };
+            // A catch handler starts by binding the payload into locals, one
+            // `local.set` per value, popping the top of the stack first. Those
+            // locals are the only channel that carries the payload into the
+            // handler when the throw came from another function: the values
+            // have to be written into their frame homes before the handler
+            // runs, and nothing else in the machine program names them.
+            let mut payload_locals = collections::Vec::new();
+            if let Some(block) = cfg.blocks.get(handler.0 as usize) {
+                for op_index in block.range.clone() {
+                    if payload_locals.len() == clause.payload_arity as usize {
+                        break;
+                    }
+                    match semantic.ops.get(op_index).map(|op| &op.kind) {
+                        Some(SemanticOpKind::LocalSet { idx }) => payload_locals.push(*idx),
+                        // The block starts at the End that opened it; that is
+                        // not a value, so it does not end the binding run.
+                        Some(SemanticOpKind::End) | None => {}
+                        _ => break,
+                    }
+                }
+            }
             catches.push(SsaCatch {
                 tag_idx: clause.tag_idx,
                 payload_arity: clause.payload_arity,
                 forwards_exn: clause.forwards_exn,
                 handler: SsaTarget(handler.0),
+                payload_locals,
             });
         }
         // A region whose handler could not be resolved, or that has no
@@ -350,7 +372,7 @@ pub(crate) fn rewrite_function(
     // Resolve the function's `try_table` regions while `semantic` is still
     // alive: the middle end needs, per block, the handler a throw raised across
     // a call inside that block would resume at.
-    let (try_scopes, block_try_scope) = resolve_try_scopes(&semantic, cfg);
+    let (try_scopes, mut block_try_scope) = resolve_try_scopes(&semantic, cfg);
 
     let setup = planner.function_setup();
     let mut values = ValueAlloc::default();
@@ -374,6 +396,9 @@ pub(crate) fn rewrite_function(
     let mut block_exit_cached_slots = collections::Vec::with_capacity(original_block_count);
     let mut extra_blocks = collections::Vec::new();
     let mut extra_block_cached_slots = collections::Vec::new();
+    // Synthetic blocks a block's lowering splits off belong to the same region
+    // as the block they came from: a call inside one may still raise across it.
+    let mut extra_block_try_scopes = collections::Vec::new();
     let mut extra_block_requirement_spans = collections::Vec::new();
     let mut extra_block_exit_cached_slots = collections::Vec::new();
     for (block_index, cfg_block) in cfg.blocks.iter().enumerate() {
@@ -458,13 +483,19 @@ pub(crate) fn rewrite_function(
         }
         extra_block_cached_slots.extend(lowered.extra_block_cached_slots);
         extra_block_exit_cached_slots.extend(lowered.extra_block_exit_cached_slots);
+        let extra_scope = block_try_scope
+            .get(cfg_block.id.0 as usize)
+            .copied()
+            .flatten();
         for mut block in lowered.extra_blocks {
+            extra_block_try_scopes.push(extra_scope);
             shrink_ssa_block_storage(&mut block);
             extra_blocks.push(block);
         }
     }
     blocks.reserve_exact(extra_blocks.len());
     blocks.extend(extra_blocks);
+    block_try_scope.extend(extra_block_try_scopes);
     block_entry_cached_cells.reserve_exact(extra_block_cached_slots.len());
     block_entry_cached_cells.extend(extra_block_cached_slots);
     block_entry_requirement_spans.reserve_exact(extra_block_requirement_spans.len());

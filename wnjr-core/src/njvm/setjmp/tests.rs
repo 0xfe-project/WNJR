@@ -62,7 +62,12 @@ fn run(m: &Module, calls: &[Vec<Value>]) -> Vec<Result<Vec<Value>, ()>> {
     let engine = Engine::new(Config::new()).expect("engine");
     let mut world = RuntimeWorld::new();
     let id = world.instantiate(&engine, module, &[]).expect("instantiate");
-    let out = calls.iter().map(|a| world.invoke(id, "f", a).map_err(|_| ())).collect();
+    let out = calls
+        .iter()
+        .map(|a| {
+            world.invoke(id, "f", a).map_err(|_| ())
+        })
+        .collect();
     world.free(id).expect("free");
     out
 }
@@ -324,4 +329,97 @@ fn engine_catches_throw_from_real_call() {
     let nops = ["nop"; 40].join(" ");
     let r = catch_from_callee(&std::format!("{nops} {THROW_IF}"));
     assert_eq!(r.expect("caught"), vec![Value::I32(23)]);
+}
+
+/// Run a whole wat module's export "f".
+fn invoke_wat(src: &str) -> Result<Vec<Value>, crate::WasmError> {
+    let bytes = wat::parse_str(src).expect("parse wat");
+    let m = crate::Module::new("probe", &bytes).expect("validate");
+    let engine = Engine::new(Config::new()).expect("engine");
+    let mut world = RuntimeWorld::new();
+    let id = world.instantiate(&engine, m, &[]).expect("instantiate");
+    let r = world.invoke(id, "f", &[]);
+    world.free(id).expect("free");
+    r
+}
+
+/// A live local survives a call, and survives a throw that call raised and the
+/// caller caught. The second half is what the setjmp lowering depends on: the
+/// resume point reads locals that were never passed in registers along the
+/// exception edge.
+#[test]
+fn locals_survive_a_call_and_a_caught_throw() {
+    let normal = r#"(module
+      (func $id (param i32) (result i32) (local.get 0))
+      (func (export "f") (result i32)
+        (local $x i32) (local $y i32) (local $z i32)
+        (local.set $x (i32.const 111))
+        (local.set $y (i32.const 7))
+        (local.set $z (call $id (i32.const 222)))
+        (i32.add (i32.add (local.get $x) (local.get $y)) (local.get $z))))"#;
+    let thrown = r#"(module (tag $t)
+      (func $thr (throw $t))
+      (func (export "f") (result i32)
+        (local $x i32) (local $y i32) (local $z i32)
+        (local.set $x (i32.const 111))
+        (local.set $y (i32.const 7))
+        (block $h
+          (try_table (catch $t $h) (call $thr))
+          (return (i32.const 0)))
+        (i32.add (i32.add (local.get $x) (local.get $y)) (i32.const 3))))"#;
+    // Same, but the thrower is a register-hungry body rather than a bare throw.
+    let thrown_busy = r#"(module (tag $t)
+      (func $thr (param i32 i32 i32) (result i32) (local i32) (local i32) (local i32) (local i32)
+        (local.set 3 (i32.add (local.get 0) (local.get 1)))
+        (local.set 4 (i32.mul (local.get 3) (local.get 2)))
+        (local.set 5 (i32.sub (local.get 4) (local.get 0)))
+        (local.set 6 (i32.add (local.get 5) (local.get 1)))
+        (if (i32.eqz (local.get 6)) (then (return (local.get 6))))
+        (throw $t))
+      (func (export "f") (result i32)
+        (local $x i32) (local $y i32) (local $z i32)
+        (local.set $x (i32.const 111))
+        (local.set $y (i32.const 7))
+        (block $h
+          (try_table (catch $t $h) (drop (call $thr (i32.const 3) (i32.const 5) (i32.const 9))))
+          (return (i32.const 0)))
+        (i32.add (i32.add (local.get $x) (local.get $y)) (i32.const 3))))"#;
+    let c = invoke_wat(thrown_busy);
+    let a = invoke_wat(normal);
+    let b = invoke_wat(thrown);
+    assert_eq!(a.expect("normal"), vec![Value::I32(340)]);
+    assert_eq!(b.expect("thrown"), vec![Value::I32(121)]);
+    assert_eq!(c.expect("busy"), vec![Value::I32(121)]);
+}
+
+/// One pass of the setjmp-in-a-loop shape, returning what the resume point
+/// sees: 210 means i reached 2 and sum 10, i.e. both locals crossed the throw
+/// with the values they had at the call.
+#[test]
+fn resume_sees_locals_from_before_the_call() {
+    let (i, r, sum) = (0, 1, 2);
+    let inc = |l: u32, e: Expr| Op::LocalSet { idx: l, val: add(get(l), e) };
+    let main = func(
+        vec![],
+        vec![Type::I32],
+        vec![Type::I32, Type::I32, Type::I32],
+        vec![
+            Op::LocalSet { idx: i, val: c(0) },
+            Op::LocalSet { idx: sum, val: c(0) },
+            label(0),
+            Op::JmpIf { cond: Expr::binary(BinaryOp::Ge, get(i), c(3), Type::I32), target: 9 },
+            setjmp(16, r),
+            inc(sum, get(r)),
+            inc(i, c(1)),
+            Op::JmpIf { cond: get(r), target: 7 },
+            call(1, vec![c(16), c(10)]),
+            Op::Jmp { target: 0 },
+            label(7),
+            ret(add(Expr::binary(BinaryOp::Mul, get(i), c(100), Type::I32), get(sum))),
+            label(9),
+            ret(c(-1)),
+        ],
+    );
+    let m = module(vec![main, longjmper()]);
+    assert_eq!(run_i32(&m, vec![]), 210);
 }

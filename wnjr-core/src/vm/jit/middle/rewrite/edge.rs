@@ -321,6 +321,8 @@ fn materialize_repair_block(
     program
         .block_entry_cached_cells
         .push(pred_exit.to_vec().into());
+    let target_scope = program.block_try_scope.get(target_id).copied().flatten();
+    program.block_try_scope.push(target_scope);
     repair_blocks.insert(key, repair_id);
     Some(repair_id)
 }
@@ -394,6 +396,7 @@ fn maybe_repair_entry(
     program
         .block_entry_cached_cells
         .push(collections::Vec::new());
+    program.block_try_scope.push(None);
     program.entry = repair_id;
 }
 

@@ -589,7 +589,7 @@ fn decode_view<'a>(inst: SsaInst, program: &'a SsaProgram, block: &'a SsaBlock) 
 /// The tag is carried as the function's tag *index*; its `TagIdentity` is
 /// minted per instance and must be resolved at run time, so nothing here is
 /// baked into generated code.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SsaCatch {
     /// `None` for the `catch_all` / `catch_all_ref` forms.
     pub tag_idx: Option<u32>,
@@ -599,6 +599,10 @@ pub(crate) struct SsaCatch {
     pub forwards_exn: bool,
     /// The handler, already resolved to a block id.
     pub handler: SsaTarget,
+    /// The locals the handler binds the payload into, in the order the wasm
+    /// stack pops them — that is, the *reverse* of payload order. Empty when
+    /// the handler does not bind through locals.
+    pub payload_locals: collections::Vec<u16>,
 }
 
 /// One `try_table` region, as an SSA block sees it.

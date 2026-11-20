@@ -617,6 +617,20 @@ fn merge_goto_successor(
 
     pred.ops.extend(merged_ops);
     pred.terminator = merged_terminator;
+    // The merged block runs the successor's ops, so it sits in the successor's
+    // try region. A repair block that is not in a region yet inherits it here;
+    // without this a call inside the successor loses the handler a throw would
+    // resume at.
+    let pred_scope = program.block_try_scope.get(pred_index).copied().flatten();
+    let succ_scope = program
+        .block_try_scope
+        .get(succ_index)
+        .copied()
+        .flatten()
+        .or(pred_scope);
+    if let Some(slot) = program.block_try_scope.get_mut(pred_index) {
+        *slot = succ_scope;
+    }
     Some(succ_index)
 }
 
