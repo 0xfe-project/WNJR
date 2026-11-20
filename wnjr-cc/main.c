@@ -1,7 +1,8 @@
-// wnjr-cc: C front-end for WNJR (modes: -E, --dump-ast)
+// wnjr-cc: C front-end for WNJR (modes: -E, --dump-ast, --emit-njvm)
 // Based on chibicc by Rui Ueyama (MIT license, see LICENSE)
 
 #include "chibicc.h"
+#include "njvm.h"
 
 StringArray include_paths;
 bool opt_fcommon = true;
@@ -11,9 +12,10 @@ char *base_file;
 static char *opt_o;
 static bool opt_E;
 static bool opt_dump_ast;
+static bool opt_emit_njvm;
 
 static void usage(int status) {
-  fprintf(stderr, "wnjr-cc (-E | --dump-ast) [-o <path>] [-I<dir>] [-D<m>] <file>\n");
+  fprintf(stderr, "wnjr-cc (-E | --dump-ast | --emit-njvm) [-o <path>] [-I<dir>] [-D<m>] <file>\n");
   exit(status);
 }
 
@@ -95,6 +97,11 @@ static void parse_args(int argc, char **argv) {
       continue;
     }
 
+    if (!strcmp(argv[i], "--emit-njvm")) {
+      opt_emit_njvm = true;
+      continue;
+    }
+
     if (!strcmp(argv[i], "-I")) {
       if (i + 1 >= argc)
         usage(1);
@@ -146,8 +153,8 @@ static void parse_args(int argc, char **argv) {
 
   if (!input_path)
     error("no input files");
-  if (opt_E == opt_dump_ast)
-    error("exactly one of -E or --dump-ast is required");
+  if ((int)opt_E + (int)opt_dump_ast + (int)opt_emit_njvm != 1)
+    error("exactly one of -E, --dump-ast or --emit-njvm is required");
 }
 
 int main(int argc, char **argv) {
@@ -163,6 +170,24 @@ int main(int argc, char **argv) {
   if (!tok)
     error("%s: cannot open file: %s", input_path, strerror(errno));
   tok = preprocess(tok);
+
+  if (opt_emit_njvm) {
+    Obj *prog = parse(tok);
+    Mp mp;
+    mp_init(&mp);
+    njvm_emit_module(prog, &mp);
+    FILE *out = stdout;
+    if (opt_o) {
+      out = fopen(opt_o, "wb");
+      if (!out)
+        error("cannot open output file: %s: %s", opt_o, strerror(errno));
+    }
+    mp_write_file(&mp, out);
+    if (out != stdout)
+      fclose(out);
+    mp_free(&mp);
+    return 0;
+  }
 
   if (opt_o && !freopen(opt_o, "w", stdout))
     error("cannot open output file: %s: %s", opt_o, strerror(errno));

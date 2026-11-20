@@ -57,6 +57,37 @@ allocator. Two properties make the codegen what it is:
   [`ALGORITHM4`](docs/ALGORITHM4.md) is a region-based cost-optimal cache
   residency allocator that runs per function at JIT scale.
 
+## The C frontend
+
+`wnjr-cc` compiles C to **NJVM-IR**, the language frontends' interchange
+format, and does not touch wasm directly: the transform path lowers the IR to
+wasm bytes and hands them to the engine unchanged. It is a C program with its
+own `Makefile`, based on [chibicc](https://github.com/rui314/chibicc) (MIT).
+
+```bash
+make -C wnjr-cc
+wnjr-cc/wnjr-cc --emit-njvm -o prog.njvm prog.c   # IR as MessagePack
+./target/debug/njvm-run prog.njvm main             # read, lower, run on WNJR
+make -C wnjr-cc test                              # -E and --dump-ast vs chibicc
+wnjr-cc/test/e2e.sh                               # C -> IR -> WNJR vs the host cc
+```
+
+Every C object lives in linear memory at a frame-relative address (the
+prologue sets `fp = sp - frame_size`, `sp = fp`; each `return` restores it), so
+taking the address of anything needs no special case, and the function body is
+a flat CFG of labels and jumps — the shape the IR verifier wants. `goto *p`
+and `&&label` go in as `Op::GotoIndirect` / `Expr::LabelAddr` and are lowered
+by `njvm/computed_goto.rs`. The interchange format is documented in
+`wnjr-njvm-io/src/lib.rs`; the C writer produces byte-identical output.
+
+Implemented today: integer and floating-point arithmetic, comparisons,
+conversions, pointers, arrays, structs and unions (as memory), `if`/`for`/
+`while`/`do`, `switch` (including `case 1 ... 5`), `goto`, computed goto,
+recursion, and calls to functions defined in the same translation unit.
+Not yet: globals and string literals (no data segments), struct arguments and
+returns by value, function pointers, VLAs, bitfields, `_Atomic`, `asm`, and
+anything needing libc — there are no imports yet.
+
 ## WebAssembly compatibility
 
 Validated against the official
@@ -141,6 +172,14 @@ python3 bench/wasi/run_tests.py
 
 # Rebuild the benchmark wasm binaries from source (needs wasi-sdk clang)
 make -C bench/wasi
+```
+
+The C frontend's end-to-end check compares every call against the host C
+compiler; it needs a built `wnjr-cc` and writes its scratch files under
+`$TMPDIR/wnjr-cc-e2e`:
+
+```bash
+make -C wnjr-cc && wnjr-cc/test/e2e.sh
 ```
 
 Diagnostics are environment variables:

@@ -1,0 +1,29 @@
+# <function> [arg...] — every function takes only ints. The harness derives the
+# expected values from the host C compiler, so there are no hand-written
+# numbers here.
+arith 3 4
+compare 3 4
+compare 4 4
+loop_sum 20
+while_do 5
+fib 15
+sw 0
+sw 3
+sw 8
+sw 99
+sw_fall 1
+sw_fall 3
+sw_fall 9
+goto_loops 10
+computed -1
+computed 5
+computed_loop 10
+array_sum 8
+pointer_walk 2
+struct_ops 5
+max_of 3 9
+logic 1 0
+logic 0 0
+logic 2 3
+charish 7
+floatish 9
