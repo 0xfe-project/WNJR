@@ -50,7 +50,7 @@ fn run() -> Result<(), String> {
     }
     let export = args.get(1).cloned().unwrap_or_else(|| "main".to_string());
     let mut inputs = Vec::new();
-    for a in &args[2..] {
+    for a in args.get(2..).unwrap_or(&[]) {
         let v: i32 = a.parse().map_err(|_| format!("bad i32 argument {a:?}"))?;
         inputs.push(Arg::I32(v));
     }
@@ -106,10 +106,25 @@ fn batch(path: &str, calls_path: &str) -> Result<(), String> {
 
     let bytes = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let module = wnjr_njvm_io::decode_module(&bytes).map_err(|e| format!("{e}"))?;
+
+    // A real program ends by flushing stdio, so the last printf of the C driver
+    // the harness compares against arrives. Nothing exits here, so the calls
+    // file says so: __stdio_exit is the flush an exiting libc does. It is not
+    // printed, and a module without stdio does not have it.
+    let flushed = module
+        .exports
+        .iter()
+        .any(|e| e.name == "__stdio_exit");
+    let mut printed = calls.len();
+    if flushed {
+        calls.push(("__stdio_exit".to_string(), Vec::new()));
+        printed -= 0;
+    }
+
     let wasm = compile(&module, &[])?;
     let outcomes = run_wnjr_sequence(&wasm, &calls, false)?;
     let mut trapped = false;
-    for (label, outcome) in labels.iter().zip(outcomes.iter()) {
+    for (label, outcome) in labels.iter().zip(outcomes.iter()).take(printed) {
         let value = match outcome {
             Outcome::Trap => {
                 trapped = true;
