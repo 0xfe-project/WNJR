@@ -46,9 +46,12 @@ typedef struct {
   bool is_inline;
   bool is_tls;
   int align;
-  // wasi's import attribute, which can sit on a function declaration.
+  // Attributes on a function declaration: the wasi import pair, and the name the
+  // function is exported under.
   char *import_module;
   char *import_name;
+  char *export_name;
+  bool is_used;
 } VarAttr;
 
 // This struct represents a variable initializer. Since initializers
@@ -110,6 +113,10 @@ static Node *current_switch;
 static Obj *builtin_alloca;
 
 static bool is_typename(Token *tok);
+static Token *attribute_list(Token *tok, Type *ty, VarAttr *attr);
+static void static_assert_decl(Token **rest, Token *tok);
+static bool decl_prefix(Token **rest, Token *tok, VarAttr *attr);
+static Type *builtin_va_list_type(void);
 static Type *declspec(Token **rest, Token *tok, VarAttr *attr);
 static Type *typename(Token **rest, Token *tok);
 static Type *enum_specifier(Token **rest, Token *tok);
@@ -404,7 +411,10 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
   int counter = 0;
   bool is_atomic = false;
 
-  while (is_typename(tok)) {
+  // An __attribute__ list is not a typename, but it can sit among the specifiers,
+  // as in "extern hidden FILE *volatile ..." where hidden is
+  // __attribute__((__visibility__("hidden"))).
+  while (is_typename(tok) || equal(tok, "__attribute__")) {
     // Handle storage class specifiers.
     if (equal(tok, "typedef") || equal(tok, "static") || equal(tok, "extern") ||
         equal(tok, "inline") || equal(tok, "_Thread_local") || equal(tok, "__thread")) {
@@ -427,6 +437,14 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
         error_tok(tok, "typedef may not be used together with static,"
                   " extern, inline, __thread or _Thread_local");
       tok = tok->next;
+      continue;
+    }
+
+    // An annotation between the storage class and the type. wasi-libc's internal
+    // headers write "extern hidden FILE *volatile __stdin_used;", where hidden is
+    // __attribute__((__visibility__("hidden"))).
+    if (equal(tok, "__attribute__")) {
+      tok = attribute_list(tok, NULL, attr);
       continue;
     }
 
@@ -457,6 +475,16 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
       else
         attr->align = const_expr(&tok, tok);
       tok = skip(tok, ")");
+      continue;
+    }
+
+    // __builtin_va_list is a type, but not one any declaration introduces.
+    if (equal(tok, "__builtin_va_list")) {
+      if (counter)
+        break;
+      ty = builtin_va_list_type();
+      tok = tok->next;
+      counter += OTHER;
       continue;
     }
 
@@ -1509,6 +1537,69 @@ static void gvar_initializer(Token **rest, Token *tok, Obj *var) {
 }
 
 // Returns true if a given token represents a type.
+// A Token of one's own: struct member lookup compares names as (loc, len), and
+// __builtin_va_list's members are named by the compiler rather than by any source
+// file, so they need tokens that point at a string nobody can free.
+static Token *synth_ident(char *name) {
+  Token *tok = calloc(1, sizeof(Token));
+  tok->kind = TK_IDENT;
+  tok->loc = name;
+  tok->len = strlen(name);
+  return tok;
+}
+
+// __builtin_va_list, spelled as a pointer into the register save area a variadic
+// call leaves behind: two counters into that area, then the two pointers va_arg
+// walks. The layout is the one include/stdarg.h used to write out by hand.
+//
+// The type lives in the compiler because it has to mean one thing. wasi-libc's
+// <bits/alltypes.h> says "typedef __builtin_va_list va_list;" and this frontend's
+// own <stdarg.h> says the same; if the two were different types, a function
+// compiled against one could not be called with a va_list built by the other, and
+// the diagnostic would be about struct assignment rather than about anything real.
+//
+// A pointer rather than the array GCC uses, because what va_list denotes here is
+// a position in a save area, not an object to copy: va_start points it at the
+// area, va_copy copies the pointer, and the va_arg helpers in the header walk it.
+// GCC's array spelling exists so that va_list decays to a pointer at a call
+// boundary, which a pointer already does.
+static Type *builtin_va_list_type(void) {
+  static Type *ty;
+  if (ty)
+    return ty;
+
+  struct { char *name; Type *ty; } fields[] = {
+    {"gp_offset", ty_uint},
+    {"fp_offset", ty_uint},
+    {"overflow_arg_area", pointer_to(ty_void)},
+    {"reg_save_area", pointer_to(ty_void)},
+  };
+
+  Type *elem = struct_type();
+  Member head = {};
+  Member *cur = &head;
+
+  for (int i = 0; i < sizeof(fields) / sizeof(*fields); i++) {
+    Member *mem = calloc(1, sizeof(Member));
+    if (!mem)
+      error("out of memory");
+    mem->name = synth_ident(fields[i].name);
+    mem->ty = fields[i].ty;
+    mem->align = fields[i].ty->align;
+    mem->idx = i;
+    mem->offset = align_to(cur == &head ? 0 : cur->offset + cur->ty->size,
+                           mem->align);
+    cur = cur->next = mem;
+  }
+
+  elem->members = head.next;
+  elem->size = align_to(cur->offset + cur->ty->size, 8);
+  elem->align = 8;
+
+  ty = pointer_to(elem);
+  return ty;
+}
+
 static bool is_typename(Token *tok) {
   static HashMap map;
 
@@ -1518,7 +1609,7 @@ static bool is_typename(Token *tok) {
       "typedef", "enum", "static", "extern", "_Alignas", "signed", "unsigned",
       "const", "volatile", "auto", "register", "restrict", "__restrict",
       "__restrict__", "_Noreturn", "float", "double", "typeof", "inline",
-      "_Thread_local", "__thread", "_Atomic",
+      "_Thread_local", "__thread", "_Atomic", "__builtin_va_list",
     };
 
     for (int i = 0; i < sizeof(kw) / sizeof(*kw); i++)
@@ -1783,6 +1874,11 @@ static Node *compound_stmt(Token **rest, Token *tok) {
   enter_scope();
 
   while (!equal(tok, "}")) {
+    if (equal(tok, "_Static_assert")) {
+      static_assert_decl(&tok, tok);
+      continue;
+    }
+
     if (is_typename(tok) && !equal(tok->next, ":")) {
       VarAttr attr = {};
       Type *basety = declspec(&tok, tok, &attr);
@@ -2610,28 +2706,130 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
   ty->members = head.next;
 }
 
-// attribute = ("__attribute__" "(" "(" "packed" ")" ")")*
-static Token *attribute_list(Token *tok, Type *ty) {
+// The annotation vocabulary of GCC, which is the language every C library in
+// the world is actually written in.
+//
+// chibicc recognised packed and aligned and rejected every other word, which is
+// enough for its own test files and useless against a real library:
+// wasi-libc writes __attribute__((__nothrow__ __leaf__)) on declarations whose
+// bodies are ordinary C, and refusing that word means refusing the file. None of
+// these names changes the code this frontend generates — the module it builds is
+// one file, so no symbol is weak against anything, every call has a body we can
+// read, and there is no optimiser here to be told a function is pure. So they are
+// read past. The list is written out rather than inferred, because accepting an
+// unknown word silently is how an attribute that *does* matter turns into a
+// wrong program far from its cause.
+static char *ignored_attrs[] = {
+  "const", "__const__", "used", "noinline", "always_inline",
+  "__always_inline__", "nodebug", "__nothrow__", "__leaf__", "__noreturn__",
+  "__pure__", "__warn_unused_result__", "__malloc__", "__cold__", "__weak__",
+  "__may_alias__", "__deprecated__", "__nonnull__", "__format__", "visibility",
+  "__visibility__",
+};
+
+static bool is_ignored_attr(Token *tok) {
+  // No kind check: "const" is a keyword token and "__nothrow__" is an identifier,
+  // and inside an attribute list both are just names.
+  for (int i = 0; i < sizeof(ignored_attrs) / sizeof(*ignored_attrs); i++)
+    if (equal(tok, ignored_attrs[i]))
+      return true;
+  return false;
+}
+
+// Skip a parenthesised group, whatever is inside it. An ignored attribute's
+// arguments are still tokens, and a string with a comma in it must not be read as
+// two arguments.
+static Token *skip_parens(Token *tok) {
+  for (int depth = 0;; tok = tok->next) {
+    if (tok->kind == TK_EOF)
+      error_tok(tok, "unclosed attribute");
+    if (equal(tok, "("))
+      depth++;
+    else if (equal(tok, ")") && !--depth)
+      return tok->next;
+  }
+}
+
+// attribute = ("__attribute__" "(" "(" attr ("," attr)* ")" ")")*
+//
+// The same list sits in front of a struct body and between a declarator and the
+// ";" that ends its declaration, so ty (what a type attribute may change) and
+// attr (what a declaration attribute may record) can each be absent.
+static Token *attribute_list(Token *tok, Type *ty, VarAttr *attr) {
   while (consume(&tok, tok, "__attribute__")) {
     tok = skip(tok, "(");
     tok = skip(tok, "(");
 
-    bool first = true;
-
     while (!consume(&tok, tok, ")")) {
-      if (!first)
-        tok = skip(tok, ",");
-      first = false;
+      // Separators are optional: GCC accepts both
+      // __attribute__((__nothrow__, __leaf__)) and __attribute__((__nothrow__ __leaf__)),
+      // and wasi-libc's headers use both.
+      consume(&tok, tok, ",");
 
       if (consume(&tok, tok, "packed")) {
+        if (!ty)
+          error_tok(tok, "packed is not allowed here");
         ty->is_packed = true;
         continue;
       }
 
       if (consume(&tok, tok, "aligned")) {
+        if (!ty)
+          error_tok(tok, "aligned is not allowed here");
         tok = skip(tok, "(");
         ty->align = const_expr(&tok, tok);
         tok = skip(tok, ")");
+        continue;
+      }
+
+      // The name this module imports from, or exports as. See the note in
+      // njvm_emit_module about where these end up.
+      if (equal(tok, "__import_module__") || equal(tok, "__import_name__") ||
+          equal(tok, "export_name")) {
+        if (!attr)
+          error_tok(tok, "%s is not allowed here", get_ident(tok));
+
+        char *attr_name = get_ident(tok);
+        char **slot;
+        if (equal(tok, "__import_module__"))
+          slot = &attr->import_module;
+        else if (equal(tok, "__import_name__"))
+          slot = &attr->import_name;
+        else
+          slot = &attr->export_name;
+
+        tok = skip(tok->next, "(");
+        if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
+          error_tok(tok, "expected a string literal");
+        if (*slot)
+          error_tok(tok, "duplicate %s", attr_name);
+
+        // array_len counts the terminating NUL.
+        int len = tok->ty->array_len - 1;
+        char *s = calloc((size_t)len + 1, 1);
+        if (!s)
+          error("out of memory");
+        memcpy(s, tok->str, (size_t)len);
+        *slot = s;
+
+        tok = skip(tok->next, ")");
+        continue;
+      }
+
+      // __attribute__((used)) is not in that list: it means "keep this definition
+      // even though nothing refers to it", which matters here because the encoder
+      // exports the definitions that are reachable and nothing else. wasi-libc's
+      // crt uses it to name symbols a linker would otherwise drop.
+      if (consume(&tok, tok, "used")) {
+        if (attr)
+          attr->is_used = true;
+        continue;
+      }
+
+      if (is_ignored_attr(tok)) {
+        tok = tok->next;
+        if (equal(tok, "("))
+          tok = skip_parens(tok);
         continue;
       }
 
@@ -2644,63 +2842,51 @@ static Token *attribute_list(Token *tok, Type *ty) {
   return tok;
 }
 
-// The import attribute, which wasi-libc puts between a declarator and the ";"
-// that ends its declaration:
+
+// _Static_assert(constant-expression, "message");
 //
-//   int32_t __imported_wasi_snapshot_preview1_fd_write(int32_t, int32_t)
-//       __attribute__((__import_module__("wasi_snapshot_preview1"),
-//                      __import_name__("fd_write")));
-//
-// Both names are required together. A name this frontend does not know is an
-// error rather than something dropped, because a dropped import turns into a
-// missing function a long way from its cause.
-static Token *import_attribute(Token *tok, VarAttr *attr) {
-  while (consume(&tok, tok, "__attribute__")) {
-    tok = skip(tok, "(");
-    tok = skip(tok, "(");
+// A declaration and not a statement: it can stand at file scope and among the
+// declarations of a block, and it emits nothing. It is checked here because a C
+// library uses it to assert the layout it was written against — "non-wasi data
+// layout" is a header telling the compiler what it expects — and that check is
+// exactly what a new frontend should be held to.
+static void static_assert_decl(Token **rest, Token *tok) {
+  Token *start = tok;
+  tok = skip(tok->next, "(");
+  int64_t cond = const_expr(&tok, tok);
+  tok = skip(tok, ",");
+  if (tok->kind != TK_STR)
+    error_tok(tok, "expected a string literal");
+  char *msg = tok->str;
+  tok = skip(tok->next, ")");
+  *rest = skip(tok, ";");
 
-    bool first = true;
+  if (!cond)
+    error_tok(start, "static assertion failed: %s", msg);
+}
 
-    while (!consume(&tok, tok, ")")) {
-      if (!first)
-        tok = skip(tok, ",");
-      first = false;
-
-      char **slot;
-      if (consume(&tok, tok, "__import_module__"))
-        slot = &attr->import_module;
-      else if (consume(&tok, tok, "__import_name__"))
-        slot = &attr->import_name;
-      else
-        error_tok(tok, "unknown attribute");
-
-      tok = skip(tok, "(");
-      if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
-        error_tok(tok, "expected a string literal");
-      if (*slot)
-        error_tok(tok, "duplicate import name");
-
-      // array_len counts the terminating NUL.
-      int len = tok->ty->array_len - 1;
-      char *s = calloc((size_t)len + 1, 1);
-      if (!s)
-        error("out of memory");
-      memcpy(s, tok->str, (size_t)len);
-      *slot = s;
-
-      tok = skip(tok->next, ")");
-    }
-
-    tok = skip(tok, ")");
+// What can stand in front of a declaration without being part of it: an
+// __attribute__ list for the declaration that follows, or a _Static_assert, which
+// is a declaration that produces nothing. Returns true when it consumed
+// something.
+static bool decl_prefix(Token **rest, Token *tok, VarAttr *attr) {
+  if (equal(tok, "_Static_assert")) {
+    static_assert_decl(rest, tok);
+    return true;
   }
 
-  return tok;
+  if (equal(tok, "__attribute__")) {
+    *rest = attribute_list(tok, NULL, attr);
+    return true;
+  }
+
+  return false;
 }
 
 // struct-union-decl = attribute? ident? ("{" struct-members)?
 static Type *struct_union_decl(Token **rest, Token *tok) {
   Type *ty = struct_type();
-  tok = attribute_list(tok, ty);
+  tok = attribute_list(tok, ty, NULL);
 
   // Read a tag.
   Token *tag = NULL;
@@ -2725,7 +2911,7 @@ static Type *struct_union_decl(Token **rest, Token *tok) {
 
   // Construct a struct object.
   struct_members(&tok, tok, ty);
-  *rest = attribute_list(tok, ty);
+  *rest = attribute_list(tok, ty, NULL);
 
   if (tag) {
     // If this is a redefinition, overwrite a previous type.
@@ -3266,7 +3452,7 @@ static void mark_live(Obj *var) {
 
 static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   Type *ty = declarator(&tok, tok, basety);
-  tok = import_attribute(tok, attr);
+  tok = attribute_list(tok, ty, attr);
   if (!ty->name)
     error_tok(ty->name_pos, "function name omitted");
   char *name_str = get_ident(ty->name);
@@ -3316,9 +3502,18 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     fn->import_name = attr->import_name;
   }
 
+  if (attr->export_name) {
+    if (fn->export_name && strcmp(fn->export_name, attr->export_name))
+      error_tok(ty->name_pos, "%s is exported as two different names", name_str);
+    fn->export_name = attr->export_name;
+  }
+
   // A file-scope object carries no token of its own, and error_tok dereferences
   // it; the name's token is the useful caret anyway.
   fn->tok = ty->name_pos;
+
+  if (attr->is_used)
+    fn->is_live = true;
 
   fn->is_root = !(fn->is_static && fn->is_inline);
 
@@ -3370,10 +3565,19 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     first = false;
 
     Type *ty = declarator(&tok, tok, basety);
-    tok = import_attribute(tok, attr);
+    // A declaration list shares one VarAttr across its declarators, and an
+    // attribute belongs to the declarator it follows; without this the second
+    // name in "int a() __attribute__(...), b();" inherits the first one's.
+    attr->import_module = NULL;
+    attr->import_name = NULL;
+    attr->export_name = NULL;
+    tok = attribute_list(tok, ty, attr);
     if (attr->import_module || attr->import_name)
       error_tok(ty->name_pos,
                 "the import attribute applies to a function, not to a variable");
+    if (attr->export_name)
+      error_tok(ty->name_pos,
+                "export_name applies to a function, not to a variable");
     if (!ty->name)
       error_tok(ty->name_pos, "variable name omitted");
 
@@ -3381,6 +3585,8 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     var->is_definition = !attr->is_extern;
     var->is_static = attr->is_static;
     var->is_tls = attr->is_tls;
+    if (attr->is_used)
+      var->is_live = true;
     if (attr->align)
       var->align = attr->align;
 
@@ -3444,6 +3650,8 @@ Obj *parse(Token *tok) {
 
   while (tok->kind != TK_EOF) {
     VarAttr attr = {};
+    if (decl_prefix(&tok, tok, &attr))
+      continue;
     Type *basety = declspec(&tok, tok, &attr);
 
     // Typedef

@@ -1277,11 +1277,16 @@ void njvm_emit_module(Obj *prog, Mp *m) {
     int a = mp_begin_arr(out);
     size_t ne = 0;
     for (Obj *fn = prog; fn; fn = fn->next) {
-      if (!fn->is_function || !fn->is_definition || fn->is_static)
+      if (!fn->is_function || !fn->is_definition)
         continue;
+      // A static function has no name outside the module, unless an attribute
+      // gave it one.
+      if (fn->is_static && !fn->export_name)
+        continue;
+      char *name = fn->export_name ? fn->export_name : fn->name;
       int e = mp_begin_map(out);
       mp_key(out, "name");
-      mp_str(out, fn->name, strlen(fn->name));
+      mp_str(out, name, strlen(name));
       mp_key(out, "kind");
       mp_variant_unit(out, "Function");
       mp_key(out, "index");

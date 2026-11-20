@@ -145,6 +145,8 @@ struct Obj {
   // the imported function.
   char *import_module;
   char *import_name;
+  // The name this function is exported under, when it is not its own.
+  char *export_name;
   bool is_static;
 
   // Global variable

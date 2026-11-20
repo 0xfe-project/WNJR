@@ -11,3 +11,4 @@ PURPLE.md
 BLUE.md
 NJVM.md
 vendor/
+*.o.tmp

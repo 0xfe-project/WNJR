@@ -27,7 +27,12 @@ VENDOR_CC="$VENDOR_TMP/chibicc"
 # Same flags and cwd for both compilers. cwd is the vendor root because
 # pragma-once.c includes "test/pragma-once.c". sysinc/ holds stub system
 # headers (macOS has no /usr/include); it is searched after -Itest.
-FLAGS=(--dump-ast "-I$VENDOR_SRC" "-I$CHIBICC_TESTSUITE" "-I$HERE/sysinc")
+# One set of headers for both compilers. Each would otherwise fall back to its
+# own include directory, and wnjr-cc's <stdarg.h> now denotes va_list as a
+# pointer into the save area rather than GCC's array of one — a deliberate
+# divergence that would show up here as a different AST for varargs.c and say
+# nothing about either parser.
+FLAGS=(--dump-ast "-I$VENDOR_SRC/include" "-I$VENDOR_SRC" "-I$CHIBICC_TESTSUITE" "-I$HERE/sysinc")
 
 if [ $# -gt 0 ]; then
   # absolute paths: the script cd's to the vendor root below

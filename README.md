@@ -129,7 +129,31 @@ not know about. That is not where `printf` belongs anyway: `printf` is libc,
 compiled by this frontend like any other code, and it reaches the host through
 `fd_write`.
 
-Not yet: VLAs, bitfields, `_Atomic`, `asm`, and libc itself.
+A declaration can also carry `export_name("..."), which renames what the module
+exports without renaming the function inside it, and `__attribute__((used))`,
+which keeps a definition the module would otherwise have no reason to name.
+
+The attribute vocabulary is the one a C library actually writes. `packed`,
+`aligned`, the two import names and `export_name` are honoured; the annotation
+words that change nothing here — `__nothrow__`, `__leaf__`, `__pure__`,
+`__const__`, `__malloc__`, `__warn_unused_result__`, `__nonnull__`,
+`__deprecated__`, `__cold__`, `__weak__`, `__may_alias__`, `__format__`,
+`visibility`, `noinline`, `always_inline`, `nodebug` — are read past, because the
+module is one file with every body in it and there is no optimiser to inform.
+Everything else is still an error: an attribute dropped on the floor is a wrong
+program a long way from its cause. `_Static_assert` is checked at file scope and
+inside functions.
+
+`va_list` is a pointer into the save area a variadic call leaves behind, and the
+type belongs to the frontend, so that `<stdarg.h>`'s spelling and wasi-libc's
+`typedef __builtin_va_list va_list` name the same type. The `__builtin_va_*`
+spellings musl's `printf` uses expand to the same four operations.
+
+Not yet: VLAs, bitfields, `_Atomic`, `asm`, the wasm and overflow builtins
+(`__builtin_trap`, `__builtin_clz`, `__builtin_wasm_memory_grow`,
+`__builtin_add_overflow`, …), `__sync_*` atomics, aliases, and the calling
+convention for a variadic call: nothing fills the save area yet, so a function
+that reads its `...` arguments runs but reads nothing. libc itself is next.
 
 The type table is chibicc's LP64 one, so `long` and a pointer are eight bytes
 wide; only the low 32 bits of a pointer slot are an address, and the upper half

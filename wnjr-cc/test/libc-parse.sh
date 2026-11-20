@@ -20,12 +20,16 @@ mkdir -p "$work" || exit 1
 make -C "$root/wnjr-cc" >/dev/null || { echo "FAIL: cannot build wnjr-cc"; exit 1; }
 
 # The include path wasi-libc's build gives the compiler.
+# musl's own sources come first, in musl's order: a source file includes
+# <features.h> to get the internal one (which defines hidden, weak and the
+# weak_alias machinery and then includes the public one), and it only does that
+# if src/include is searched before include.
 incs=(
-  "-I$libc/libc-top-half/musl/include"
+  "-I$libc/libc-top-half/musl/src/include"
+  "-I$libc/libc-top-half/musl/src/internal"
   "-I$libc/libc-top-half/musl/arch/wasm32"
   "-I$libc/libc-top-half/musl/arch/generic"
-  "-I$libc/libc-top-half/musl/src/internal"
-  "-I$libc/libc-top-half/musl/src/include"
+  "-I$libc/libc-top-half/musl/include"
   "-I$libc/libc-top-half/headers/private"
   "-I$libc/libc-bottom-half/headers/public"
   "-I$libc/libc-bottom-half/headers/private"
@@ -55,8 +59,12 @@ for src in $(cd "$libc" && find . -name '*.c' | sort); do
     first=$(grep -m1 -e '^ *\^ ' "$log" | sed 's/^ *\^ //')
     [ -z "$first" ] && first=$(grep -m1 -e ' error: ' "$log" | sed 's/^[^:]*:[0-9]*: *//')
     [ -z "$first" ] && first=$(head -1 "$log")
-    echo "[fail] $name: $first" >> "$work/fails"
-    [ $verbose -eq 1 ] && echo "[fail] $name: $first"
+    # Where it happened: the "file:line:" line chibicc prints above the source.
+    # chibicc prints "file:line: <source line>" right above the caret.
+    where=$(grep -m1 -B1 -e '^ *\^ ' "$log" | head -1 | sed -E 's/^([^:]*:[0-9]*):.*/\1/')
+    where=$name"  ("$where")"
+    echo "[fail] $where: $first" >> "$work/fails"
+    [ $verbose -eq 1 ] && echo "[fail] $where: $first"
   fi
 done
 
