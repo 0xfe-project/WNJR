@@ -12,9 +12,15 @@
 libc_units() {
   libc=$1
   # The parts of the libc that are not part of one program, and why.
+  #
+  # dlmalloc/src/malloc.c is the allocator; dlmalloc/src/dlmalloc.c is the same
+  # file plus this platform's configuration of it (#define HAVE_MMAP 0, and
+  # MORECORE_CANNOT_TRIM, without which dlfree tries to shrink the heap and
+  # sbrk aborts because a wasm memory cannot shrink). Compile the wrapper, not
+  # the file it includes.
   skip_unit="libc-top-half/musl/src/env/__init_tls.c
 libc-top-half/musl/src/thread/wasi-threads/pthread_create.c
-dlmalloc/src/dlmalloc.c
+dlmalloc/src/malloc.c
 libc-bottom-half/crt/crt1-command.c
 libc-bottom-half/sources/__main_void.c"
 
