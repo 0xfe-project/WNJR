@@ -159,6 +159,14 @@ struct Obj {
   // another name for another function of this file, and has the same index.
   char *alias_target;
   bool is_alias;
+  // Set for a symbol the compiler itself provides rather than the program
+  // (__heap_base, __heap_end, __wasm_call_ctors). It is a definition, every unit
+  // sees it by name, and it is never exported.
+  bool is_provided;
+  // Set for the "alloca" that parse.c inserts for a variable-length array and
+  // that __builtin_alloca names. It has no body and no import: codegen emits the
+  // allocation itself, because it is a stack-pointer move, not a call.
+  bool is_alloca_builtin;
   bool is_static;
 
   // Global variable

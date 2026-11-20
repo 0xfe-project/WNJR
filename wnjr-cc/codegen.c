@@ -121,8 +121,7 @@ static E *gen_expr(Node *node);
 // ───────────────────────── types ─────────────────────────
 
 static bool is_aggregate(Type *ty) {
-  return ty->kind == TY_STRUCT || ty->kind == TY_UNION || ty->kind == TY_ARRAY ||
-         ty->kind == TY_VLA;
+  return ty->kind == TY_STRUCT || ty->kind == TY_UNION || ty->kind == TY_ARRAY;
 }
 
 static bool is_scalar(Type *ty) {
@@ -134,7 +133,7 @@ static bool is_scalar(Type *ty) {
 // would load the wrong thing, so an expression of such a type yields the
 // address.
 static bool is_addr_value(Type *ty) {
-  return is_aggregate(ty) || ty->kind == TY_FUNC;
+  return is_aggregate(ty) || ty->kind == TY_FUNC || ty->kind == TY_VLA;
 }
 
 // Pointers occupy eight bytes in chibicc's LP64 layout (type.c), but only the
@@ -169,9 +168,12 @@ static const char *ir_ty(Type *ty) {
   case TY_ARRAY:
   case TY_FUNC:
     return PTR_MEM;
+  // A variable-length array's value is the address of its region, so it is a
+  // scalar of the pointer kind wherever it is not simply a place.
+  case TY_VLA:
+    return PTR_MEM;
   case TY_STRUCT:
   case TY_UNION:
-  case TY_VLA:
     error("internal error: %s is not a scalar type", __FILE__);
   default:
     if (ty->size == 8)
@@ -191,6 +193,9 @@ static const char *mem_ty(Type *ty) {
   case TY_PTR:
   case TY_ARRAY:
   case TY_FUNC:
+  // A variable-length array occupies a slot holding the address of a region
+  // allocated at run time, so the slot is read and written as an address.
+  case TY_VLA:
     // NJVM-IR has no pointer MemType; an address is an i32 word.
     return PTR_MEM;
   default:
@@ -267,6 +272,10 @@ static Obj *find_symbol(const char *name, int tu) {
     return NULL;
   Obj *static_hit = NULL;
   for (Obj *o = hashmap_get(syms, (char *)name); o; o = o->name_next) {
+    // A provided symbol belongs to no unit and cannot be shadowed: the program
+    // that reads __heap_base gets the compiler's, never a static of some unit.
+    if (o->is_provided)
+      return o;
     if (o->is_static && o->tu != tu)
       continue;
     if (!o->is_definition && !o->import_module && !o->is_alias)
@@ -523,6 +532,11 @@ static E *to_temp(E *e) {
 static E *gen_addr(Node *node) {
   switch (node->kind) {
   case ND_VAR:
+    // A variable-length array's object is a local slot that holds the address of
+    // the region alloca handed out, so the place its name designates is what the
+    // slot points at, not the slot itself.
+    if (node->var->ty->kind == TY_VLA)
+      return e_load(PTR_MEM, frame_addr(node->var->offset), 0, 0);
     if (node->var->is_local)
       return frame_addr(node->var->offset);
     if (node->var->is_function) {
@@ -546,6 +560,10 @@ static E *gen_addr(Node *node) {
     return e_i32(def->offset);
   case ND_DEREF:
     return gen_expr(node->lhs);
+  // The designator of a variable-length array: the place where the address alloca
+  // returned is stored. "int x[n];" becomes "x = alloca(...)" through this node.
+  case ND_VLA_PTR:
+    return frame_addr(node->var->offset);
   case ND_MEMBER: {
     E *base = gen_addr(node->lhs);
     return e_addr(base, node->member->offset);
@@ -813,8 +831,29 @@ static void store_va_arg(Obj *vb, int off, Type *ty, E *val) {
   OP(nj_op_store(out, mem_ty(ty), addr, store_value(val, mem_ty(ty)), 0, 0));
 }
 
+// alloca, and the allocation parse.c inserts for a variable-length array: the
+// region is carved out of the stack this function already owns, which runs from
+// the frame base downwards. Locals are addressed upwards from the frame base, so
+// moving the stack pointer down cannot disturb one, and every Return puts it back.
+static E *gen_alloca(Node *node) {
+  E *size = as_type(gen_expr(node->args), "I32");
+  // Down, then 16-byte aligned. Rounding down leaves the region strictly below the
+  // stack pointer, which is what keeps it from overlapping anything live.
+  E *p = e_binary("And", "I32",
+                  e_binary("Sub", "I32", e_global((uint32_t)sp_global, "I32"), size),
+                  e_i32(-16));
+  int t = new_temp("I32");
+  OP(nj_op_localset(out, (uint32_t)t, p));
+  OP(nj_op_globalset(out, (uint32_t)sp_global, e_local((uint32_t)t, "I32")));
+  return e_local((uint32_t)t, "I32");
+}
+
 static E *gen_call(Node *node) {
   Node *callee = node->lhs;
+  // A call to alloca is a stack-pointer move, not a call: the name has no body,
+  // no import and no definition anywhere in the program.
+  if (callee->kind == ND_VAR && callee->var->is_alloca_builtin)
+    return gen_alloca(node);
   // A direct call names a function of this translation unit; anything else is
   // an indirect call through a function pointer, whose value is a table index.
   bool direct = callee->kind == ND_VAR && callee->var->is_function;
@@ -1353,7 +1392,7 @@ static E *gen_expr(Node *node) {
   }
 
   case ND_VLA_PTR:
-    unsupported(node->tok, "a VLA");
+    return gen_addr(node);
 
   default:
     unsupported(node->tok, "this expression");
@@ -1544,6 +1583,7 @@ static Obj *new_provided_object(const char *name) {
   Obj *o = calloc(1, sizeof(Obj));
   o->name = (char *)name;
   o->is_definition = true;
+  o->is_provided = true;
   o->is_static = true; // not exported: it is not this program's to offer
   o->align = 1;
   o->ty = ty_int; // an address; the size is never used, since it is not laid out

@@ -3999,6 +3999,7 @@ static void declare_builtin_functions(void) {
   ty->params = copy_type(ty_int);
   builtin_alloca = new_gvar("alloca", ty);
   builtin_alloca->is_definition = false;
+  builtin_alloca->is_alloca_builtin = true;
 }
 
 // program = (typedef | function-definition | global-variable)*
