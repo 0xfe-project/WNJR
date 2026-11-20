@@ -112,19 +112,6 @@ Token *tokenize_file(char *filename);
 // preprocess.c
 //
 
-// A `#pragma njvm import(<c-name>, <module>, <field>)` line. The C function it
-// names is declared but not defined in this file; a call to it becomes a call to
-// the imported function. Kept in source order, so the first import is function
-// index 0 — wasm puts imports before the functions a module defines.
-typedef struct ImportPragma ImportPragma;
-struct ImportPragma {
-  ImportPragma *next;
-  char *cname;
-  char *module;
-  char *field;
-};
-extern ImportPragma *import_pragmas;
-
 char *search_include_paths(char *filename);
 void init_macros(void);
 void define_macro(char *name, char *buf);
@@ -151,6 +138,13 @@ struct Obj {
   // Global variable or function
   bool is_function;
   bool is_definition;
+
+  // Where the host function that stands in for this one is filed, when the
+  // declaration carries wasi's import attribute. See parse.c:import_attribute.
+  // A function with these set is not defined in this file and its call goes to
+  // the imported function.
+  char *import_module;
+  char *import_name;
   bool is_static;
 
   // Global variable

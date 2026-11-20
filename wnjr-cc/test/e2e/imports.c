@@ -1,23 +1,30 @@
-// Imported functions: a `#pragma njvm import` names the module and field of a
-// function this file only declares, and a call to it reaches the host. The
-// host side here is wasi's snapshot, which njvm-run provides.
+// Imported functions: a declaration carrying wasi's import attribute names the
+// module and field of the host function that stands in for it, and a call to it
+// reaches the host. The host side here is wasi's snapshot, which njvm-run
+// provides. The spelling is wasi-libc's own (`__wasilibc_real.c`).
 //
 // Each case returns 1 only if the call really crossed into the host and did
 // what its signature promises — the host has to write into our memory for
 // any of these to be 1.
 
-#pragma njvm import(args_sizes_get, wasi_snapshot_preview1, args_sizes_get)
-#pragma njvm import(random_get, wasi_snapshot_preview1, random_get)
-#pragma njvm import(clock_time_get, wasi_snapshot_preview1, clock_time_get)
-#pragma njvm import(fd_write, wasi_snapshot_preview1, fd_write)
-
 typedef unsigned int u32;
 typedef unsigned long long u64;
 
-int args_sizes_get(u32 *argc, u32 *size);
-int random_get(void *buf, u32 len);
-int clock_time_get(u32 id, u64 precision, u64 *time);
-int fd_write(u32 fd, void *iovs, u32 iovs_len, u32 *nwritten);
+int args_sizes_get(u32 *argc, u32 *size)
+    __attribute__((__import_module__("wasi_snapshot_preview1"),
+                   __import_name__("args_sizes_get")));
+
+int random_get(void *buf, u32 len)
+    __attribute__((__import_module__("wasi_snapshot_preview1"),
+                   __import_name__("random_get")));
+
+int clock_time_get(u32 id, u64 precision, u64 *time)
+    __attribute__((__import_module__("wasi_snapshot_preview1"),
+                   __import_name__("clock_time_get")));
+
+int fd_write(u32 fd, void *iovs, u32 iovs_len, u32 *nwritten)
+    __attribute__((__import_module__("wasi_snapshot_preview1"),
+                   __import_name__("fd_write")));
 
 struct iovec {
   u32 base;

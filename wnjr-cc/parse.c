@@ -46,6 +46,9 @@ typedef struct {
   bool is_inline;
   bool is_tls;
   int align;
+  // wasi's import attribute, which can sit on a function declaration.
+  char *import_module;
+  char *import_name;
 } VarAttr;
 
 // This struct represents a variable initializer. Since initializers
@@ -2641,6 +2644,59 @@ static Token *attribute_list(Token *tok, Type *ty) {
   return tok;
 }
 
+// The import attribute, which wasi-libc puts between a declarator and the ";"
+// that ends its declaration:
+//
+//   int32_t __imported_wasi_snapshot_preview1_fd_write(int32_t, int32_t)
+//       __attribute__((__import_module__("wasi_snapshot_preview1"),
+//                      __import_name__("fd_write")));
+//
+// Both names are required together. A name this frontend does not know is an
+// error rather than something dropped, because a dropped import turns into a
+// missing function a long way from its cause.
+static Token *import_attribute(Token *tok, VarAttr *attr) {
+  while (consume(&tok, tok, "__attribute__")) {
+    tok = skip(tok, "(");
+    tok = skip(tok, "(");
+
+    bool first = true;
+
+    while (!consume(&tok, tok, ")")) {
+      if (!first)
+        tok = skip(tok, ",");
+      first = false;
+
+      char **slot;
+      if (consume(&tok, tok, "__import_module__"))
+        slot = &attr->import_module;
+      else if (consume(&tok, tok, "__import_name__"))
+        slot = &attr->import_name;
+      else
+        error_tok(tok, "unknown attribute");
+
+      tok = skip(tok, "(");
+      if (tok->kind != TK_STR || tok->ty->base->kind != TY_CHAR)
+        error_tok(tok, "expected a string literal");
+      if (*slot)
+        error_tok(tok, "duplicate import name");
+
+      // array_len counts the terminating NUL.
+      int len = tok->ty->array_len - 1;
+      char *s = calloc((size_t)len + 1, 1);
+      if (!s)
+        error("out of memory");
+      memcpy(s, tok->str, (size_t)len);
+      *slot = s;
+
+      tok = skip(tok->next, ")");
+    }
+
+    tok = skip(tok, ")");
+  }
+
+  return tok;
+}
+
 // struct-union-decl = attribute? ident? ("{" struct-members)?
 static Type *struct_union_decl(Token **rest, Token *tok) {
   Type *ty = struct_type();
@@ -3210,6 +3266,7 @@ static void mark_live(Obj *var) {
 
 static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   Type *ty = declarator(&tok, tok, basety);
+  tok = import_attribute(tok, attr);
   if (!ty->name)
     error_tok(ty->name_pos, "function name omitted");
   char *name_str = get_ident(ty->name);
@@ -3231,6 +3288,37 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
     fn->is_static = attr->is_static || (attr->is_inline && !attr->is_extern);
     fn->is_inline = attr->is_inline;
   }
+
+  if (attr->import_module || attr->import_name) {
+    if (!attr->import_module || !attr->import_name)
+      error_tok(ty->name_pos,
+                "an import needs both __import_module__ and __import_name__");
+    if (equal(tok, "{"))
+      error_tok(tok, "%s is declared as an import and cannot have a body", name_str);
+    if (ty->is_variadic)
+      error_tok(ty->name_pos,
+                "%s is imported and variadic; a wasm import has a fixed signature, "
+                "so the extra arguments have no way across",
+                name_str);
+    if (ty->return_ty->kind == TY_STRUCT || ty->return_ty->kind == TY_UNION)
+      error_tok(ty->name_pos,
+                "%s is imported and returns a struct or union, which this frontend "
+                "passes through a hidden parameter an outside function does not know "
+                "about",
+                name_str);
+
+    if (fn->import_module &&
+        (strcmp(fn->import_module, attr->import_module) ||
+         strcmp(fn->import_name, attr->import_name)))
+      error_tok(ty->name_pos, "%s is declared as two different imports", name_str);
+
+    fn->import_module = attr->import_module;
+    fn->import_name = attr->import_name;
+  }
+
+  // A file-scope object carries no token of its own, and error_tok dereferences
+  // it; the name's token is the useful caret anyway.
+  fn->tok = ty->name_pos;
 
   fn->is_root = !(fn->is_static && fn->is_inline);
 
@@ -3282,6 +3370,10 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     first = false;
 
     Type *ty = declarator(&tok, tok, basety);
+    tok = import_attribute(tok, attr);
+    if (attr->import_module || attr->import_name)
+      error_tok(ty->name_pos,
+                "the import attribute applies to a function, not to a variable");
     if (!ty->name)
       error_tok(ty->name_pos, "variable name omitted");
 

@@ -69,7 +69,6 @@ static int case_cap;
 // Imported functions, in source order: wasm puts them first in the function
 // index space, so entry k is function index k.
 typedef struct {
-  Obj *fn;
   const char *module;
   const char *field;
   uint32_t type_idx;
@@ -77,13 +76,6 @@ typedef struct {
 static ImportEnt *imports;
 static int nimports;
 static int import_cap;
-
-static ImportEnt *find_import(Obj *fn) {
-  for (int i = 0; i < nimports; i++)
-    if (imports[i].fn == fn)
-      return &imports[i];
-  return NULL;
-}
 
 // Ops emitted into the current function body so far.
 static size_t body_len;
@@ -360,7 +352,7 @@ static E *gen_addr(Node *node) {
       // A C function pointer is an index into table 0, and the element
       // segment puts function i at index i, so the function's own index is
       // the value to use. An imported function has an index too.
-      if (!node->var->is_definition && !find_import(node->var))
+      if (!node->var->is_definition && !node->var->import_module)
         unsupported(node->tok, "the address of a function this file does not define");
       indirect_used = true;
       return e_i32(node->var->offset);
@@ -521,11 +513,11 @@ static E *gen_cond(Node *node) {
 static uint32_t func_index(Obj *fn) {
   if (!fn->is_function)
     error_tok(fn->tok, "wnjr-cc: not a function");
-  // A declared but undefined function is callable only when a
-  // `#pragma njvm import` said where it comes from.
-  if (!fn->is_definition && !find_import(fn))
+  // A declared but undefined function is callable only when an import
+  // attribute said where it comes from.
+  if (!fn->is_definition && !fn->import_module)
     error_tok(fn->tok,
-              "wnjr-cc: %s is not defined in this file and no #pragma njvm import names it",
+              "wnjr-cc: %s is not defined in this file and carries no import attribute",
               fn->name);
   return (uint32_t)fn->offset;
 }
@@ -977,7 +969,7 @@ static void resolve_relocations(Obj *prog) {
       // A function's value is its index in the function-pointer table, which
       // is assigned from `offset` when the function indices are handed out.
       if (target->is_function) {
-        if (!target->is_definition && !find_import(target))
+        if (!target->is_definition && !target->import_module)
           unsupported(var->tok, "a pointer to a function this file does not define");
         indirect_used = true;
         uint32_t word = (uint32_t)(target->offset + rel->addend);
@@ -1115,28 +1107,13 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   // first function this module defines is index nimports.
   nimports = 0;
   uint32_t nfunc = 0;
-  for (ImportPragma *p = import_pragmas; p; p = p->next) {
-    Obj *fn = NULL;
-    for (Obj *v = prog; v; v = v->next)
-      if (v->is_function && !strcmp(v->name, p->cname))
-        fn = v;
-    if (!fn)
-      error("wnjr-cc: #pragma njvm import names %s, which this file does not declare",
-            p->cname);
+  for (Obj *fn = prog; fn; fn = fn->next) {
+    if (!fn->is_function || !fn->import_module)
+      continue;
     if (fn->is_definition)
-      error("wnjr-cc: #pragma njvm import names %s, which this file defines", p->cname);
-    if (fn->ty->is_variadic)
       error_tok(fn->tok,
-                "wnjr-cc: %s is imported and variadic; a wasm import has a fixed "
-                "signature, so the arguments cannot be passed through",
+                "wnjr-cc: %s carries an import attribute and is defined in this file",
                 fn->name);
-    if (is_aggregate(fn->ty->return_ty))
-      error_tok(fn->tok,
-                "wnjr-cc: %s is imported and returns a struct or union, which this "
-                "frontend passes through a hidden parameter an outside function "
-                "does not know about",
-                fn->name);
-
     if (nimports == import_cap) {
       import_cap = import_cap ? import_cap * 2 : 8;
       imports = realloc(imports, (size_t)import_cap * sizeof *imports);
@@ -1144,9 +1121,8 @@ void njvm_emit_module(Obj *prog, Mp *m) {
         error("out of memory");
     }
     ImportEnt *ie = &imports[nimports];
-    ie->fn = fn;
-    ie->module = p->module;
-    ie->field = p->field;
+    ie->module = fn->import_module;
+    ie->field = fn->import_name;
     ie->type_idx = sig_of(fn->tok, fn->ty);
     fn->offset = (int)nimports++;
     nfunc++;

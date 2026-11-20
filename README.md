@@ -108,23 +108,26 @@ value has to cross the boundary; assignment is a `memory.copy`. Both struct
 parameters and struct returns are therefore one `i32` each in a function
 pointer's signature, which is why the two features meet cleanly.
 
-A function this file only declares can be bound to an import with a pragma,
-which is the only way C spells "this comes from elsewhere":
+A function this file only declares can be bound to a host function with wasi's
+import attribute, spelled the way wasi-libc spells it:
 
 ```c
-#pragma njvm import(fd_write, wasi_snapshot_preview1, fd_write)
-int fd_write(unsigned int fd, void *iovs, unsigned int n, unsigned int *written);
+int fd_write(unsigned int fd, void *iovs, unsigned int n, unsigned int *written)
+    __attribute__((__import_module__("wasi_snapshot_preview1"),
+                   __import_name__("fd_write")));
 ```
 
-The pragma carries the C name itself rather than attaching to the declaration
-that follows it, because chibicc's preprocessor drops pragmas before the parser
-runs; the lookup is by name, so the pragma and the declaration can appear in
-either order. Imported functions take the low half of the function index space
-(wasm's own ordering), which is why an import also has a function address and
-can be called through a function pointer. A variadic import is refused: a wasm
-import has a fixed signature, so the arguments have no way across — and that is
-not where `printf` belongs anyway: `printf` is libc, compiled by this frontend
-like any other code, and it reaches the host through `fd_write`.
+Imported functions take the low half of the function index space (wasm's own
+ordering), which is why an import also has a function address and can be called
+through a function pointer. Both attribute names are required together, and an
+attribute name the frontend does not know is an error rather than something
+dropped on the floor. Two shapes are refused rather than quietly miscompiled: a
+variadic import, since a wasm import has a fixed signature and the extra
+arguments have no way across, and an import returning a struct or union, since
+this frontend returns those through a hidden parameter an outside function does
+not know about. That is not where `printf` belongs anyway: `printf` is libc,
+compiled by this frontend like any other code, and it reaches the host through
+`fd_write`.
 
 Not yet: VLAs, bitfields, `_Atomic`, `asm`, and libc itself.
 
