@@ -1,0 +1,24 @@
+via_global 3 4
+via_table 0 10 3
+via_table 1 10 3
+via_table 2 10 3
+via_struct 10 3
+via_static 5 6
+via_local 5 6
+via_local_reassigned 5 6
+via_returned 0 1 2
+via_returned 1 9 4
+via_returned 2 3 4
+via_arg 6 7
+via_nested 5
+via_address_of 8 9
+via_deref_inner 9 8
+via_void
+via_loop 3 4
+via_conditional 1 8 2
+via_conditional 0 8 2
+via_field_of_pointer
+via_recursion_inner 3 4
+compare_pointers
+table_roundtrip
+two_signatures 5 7

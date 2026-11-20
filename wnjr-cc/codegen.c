@@ -76,6 +76,9 @@ static size_t body_len;
   } while (0)
 
 static noreturn void unsupported(Token *tok, const char *what) {
+  // A file-scope object has no token of its own to point at.
+  if (!tok)
+    error("wnjr-cc: %s is not supported yet", what);
   error_tok(tok, "wnjr-cc: %s is not supported yet", what);
 }
 
@@ -91,6 +94,14 @@ static bool is_aggregate(Type *ty) {
 
 static bool is_scalar(Type *ty) {
   return !is_aggregate(ty) && ty->kind != TY_VOID;
+}
+
+// A C value that *is* its address: an array or a struct decays to it, and a
+// function designator becomes a pointer to the function. Reading one of these
+// would load the wrong thing, so an expression of such a type yields the
+// address.
+static bool is_addr_value(Type *ty) {
+  return is_aggregate(ty) || ty->kind == TY_FUNC;
 }
 
 // Pointers occupy eight bytes in chibicc's LP64 layout (type.c), but only the
@@ -153,6 +164,76 @@ static const char *mem_ty(Type *ty) {
 // The IR type a Load of `mem_ty(ty)` produces is the MemType itself (see
 // load_type in verify.rs), so a narrow load is converted before it is used as
 // an int.
+
+// ─────────────────── function-pointer signatures ───────────────────
+
+// One C function type reached through a pointer. It becomes one entry in the
+// module's `types` list and an indirect call names it by that index. Only
+// scalars cross `call_indirect`: a struct by value would need a different
+// convention, and nothing here supports one yet.
+typedef struct {
+  const char **params;
+  int nparams;
+  const char *result; // NULL for a void return
+} Sig;
+
+static Sig *sigs;
+static int nsigs;
+static int sig_cap;
+// Set when a function address is taken or a call goes through one: the module
+// then needs the function-pointer table and the element segment that fills it.
+static bool indirect_used;
+
+// The index in `Module::types` of this function type, adding it if new.
+static uint32_t sig_of(Token *tok, Type *fnty) {
+  if (!fnty || fnty->kind != TY_FUNC)
+    unsupported(tok, "a call through something that is not a function pointer");
+
+  int n = 0;
+  for (Type *p = fnty->params; p; p = p->next) {
+    if (!is_scalar(p))
+      unsupported(tok, "passing a struct or union by value through a function pointer");
+    n++;
+  }
+  const char *result = NULL;
+  if (fnty->return_ty->kind != TY_VOID) {
+    if (!is_scalar(fnty->return_ty))
+      unsupported(tok, "returning a struct or union by value through a function pointer");
+    result = ir_ty(fnty->return_ty);
+  }
+
+  for (int k = 0; k < nsigs; k++) {
+    Sig *s = &sigs[k];
+    if (s->nparams != n || (s->result == NULL) != (result == NULL))
+      continue;
+    if (result && strcmp(result, s->result))
+      continue;
+    bool same = true;
+    Type *p = fnty->params;
+    for (int j = 0; j < n && same; j++, p = p->next)
+      if (strcmp(s->params[j], ir_ty(p)))
+        same = false;
+    if (same)
+      return (uint32_t)k;
+  }
+
+  if (nsigs == sig_cap) {
+    sig_cap = sig_cap ? sig_cap * 2 : 8;
+    sigs = realloc(sigs, (size_t)sig_cap * sizeof *sigs);
+    if (!sigs)
+      error("out of memory");
+  }
+  Sig *s = &sigs[nsigs];
+  s->params = n ? calloc((size_t)n, sizeof *s->params) : NULL;
+  if (n && !s->params)
+    error("out of memory");
+  s->nparams = n;
+  s->result = result;
+  int i = 0;
+  for (Type *p = fnty->params; p; p = p->next)
+    s->params[i++] = ir_ty(p);
+  return (uint32_t)nsigs++;
+}
 
 // ───────────────────────── locals ─────────────────────────
 
@@ -250,8 +331,15 @@ static E *gen_addr(Node *node) {
   case ND_VAR:
     if (node->var->is_local)
       return frame_addr(node->var->offset);
-    if (node->var->is_function)
-      unsupported(node->tok, "a function address (function pointers)");
+    if (node->var->is_function) {
+      // A C function pointer is an index into table 0, and the element
+      // segment puts function i at index i, so the function's own index is
+      // the value to use.
+      if (!node->var->is_definition)
+        unsupported(node->tok, "the address of a function this file does not define");
+      indirect_used = true;
+      return e_i32(node->var->offset);
+    }
     if (!node->var->is_definition)
       unsupported(node->tok, "a reference to a variable this file does not define");
     return e_i32(node->var->offset);
@@ -402,8 +490,19 @@ static uint32_t func_index(Obj *fn) {
 }
 
 static E *gen_call(Node *node) {
-  Obj *fn = node->lhs->var;
-  uint32_t idx = func_index(fn);
+  Node *callee = node->lhs;
+  // A direct call names a function of this translation unit; anything else is
+  // an indirect call through a function pointer, whose value is a table index.
+  bool direct = callee->kind == ND_VAR && callee->var->is_function;
+  uint32_t idx = 0;
+  uint32_t type_idx = 0;
+  if (direct) {
+    idx = func_index(callee->var);
+  } else {
+    Type *fnty = callee->ty->kind == TY_FUNC ? callee->ty : callee->ty->base;
+    type_idx = sig_of(node->tok, fnty);
+    indirect_used = true;
+  }
 
   int nargs = 0;
   for (Node *arg = node->args; arg; arg = arg->next)
@@ -418,18 +517,32 @@ static E *gen_call(Node *node) {
     args[i++] = gen_expr(arg);
   }
 
+  // The arguments are evaluated before the callee (erase.rs documents that
+  // order for CallIndirect), so a callee expression that itself contains a
+  // call cannot disturb the argument temporaries.
+  E *callee_e = direct ? NULL : to_temp(gen_expr(callee));
+
   E *result;
   if (node->ty->kind == TY_VOID) {
-    OP(nj_op_call(out, idx, args, (size_t)nargs));
+    if (direct)
+      OP(nj_op_call(out, idx, args, (size_t)nargs));
+    else
+      OP(nj_op_callindirect(out, type_idx, 0, callee_e, args, (size_t)nargs));
     result = e_i32(0);
   } else {
     int t = new_temp(ir_ty(node->ty));
-    OP(nj_op_localset_call(out, (uint32_t)t, idx, args, (size_t)nargs));
+    if (direct)
+      OP(nj_op_localset_call(out, (uint32_t)t, idx, args, (size_t)nargs));
+    else
+      OP(nj_op_localset_callindirect(out, (uint32_t)t, type_idx, 0, callee_e, args,
+                                     (size_t)nargs));
     result = e_local(t, local_ty[t]);
   }
   for (int j = 0; j < nargs; j++)
     e_free(args[j]);
   free(args);
+  if (callee_e)
+    e_free(callee_e);
   return result;
 }
 
@@ -482,8 +595,8 @@ static E *gen_expr(Node *node) {
   case ND_MEMBER:
   case ND_DEREF: {
     E *addr = gen_addr(node);
-    if (!is_scalar(node->ty))
-      return addr; // an array or struct is its address
+    if (is_addr_value(node->ty))
+      return addr; // an array, struct or function is its address
     return gen_load(node, node->ty, addr);
   }
 
@@ -768,8 +881,16 @@ static void resolve_relocations(Obj *prog) {
       Obj *target = find_object(prog, *rel->label);
       if (!target)
         unsupported(var->tok, "a label address in a static initialiser");
-      if (target->is_function)
-        unsupported(var->tok, "a function address (function pointers)");
+      // A function's value is its index in the function-pointer table, which
+      // is assigned from `offset` when the function indices are handed out.
+      if (target->is_function) {
+        if (!target->is_definition)
+          unsupported(var->tok, "a pointer to a function this file does not define");
+        indirect_used = true;
+        uint32_t word = (uint32_t)(target->offset + rel->addend);
+        memcpy(var->init_data + rel->offset, &word, sizeof(word));
+        continue;
+      }
       if (!target->is_definition)
         unsupported(var->tok, "a pointer to an object this file does not define");
       uint32_t word = (uint32_t)(target->offset + rel->addend);
@@ -872,8 +993,9 @@ static void emit_function(Obj *fn) {
 
 void njvm_emit_module(Obj *prog, Mp *m) {
   out = m;
+  nsigs = 0;
+  indirect_used = false;
   assign_global_offsets(prog);
-  resolve_relocations(prog);
   assign_lvar_offsets(prog);
 
   // Function indices first: a body may call a function defined later. A static
@@ -885,19 +1007,16 @@ void njvm_emit_module(Obj *prog, Mp *m) {
     fn->offset = (int)nfunc++;
   }
 
+  // After the function indices: a static initialiser may name a function, and
+  // the word written for it is that index.
+  resolve_relocations(prog);
+
   int env = mp_begin_map(out);
   mp_key(out, "version");
   mp_uint(out, 1);
   mp_key(out, "module");
   int mod = mp_begin_map(out);
   size_t fields = 0;
-
-  mp_key(out, "types");
-  {
-    int a = mp_begin_arr(out);
-    mp_end_container(out, a, 0);
-  }
-  fields++;
 
   mp_key(out, "imports");
   {
@@ -922,10 +1041,46 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   }
   fields++;
 
+  // The types a function pointer can have, collected while the bodies were
+  // emitted: Module::types[i] is declared at wasm type index i, which is what
+  // CallIndirect's type_idx names.
+  mp_key(out, "types");
+  {
+    int a = mp_begin_arr(out);
+    for (int k = 0; k < nsigs; k++) {
+      int ft = mp_begin_map(out);
+      size_t nft = 0;
+      mp_key(out, "params");
+      emit_type_array(sigs[k].params, sigs[k].nparams);
+      nft++;
+      mp_key(out, "results");
+      if (sigs[k].result)
+        emit_type_array(&sigs[k].result, 1);
+      else
+        emit_type_array(NULL, 0);
+      nft++;
+      mp_end_container(out, ft, nft);
+    }
+    mp_end_container(out, a, (size_t)nsigs);
+  }
+  fields++;
+
+  // Table 0 is the function-pointer table, and it holds function i at index
+  // i, so a C function pointer is just the function's own index.
   mp_key(out, "tables");
   {
     int a = mp_begin_arr(out);
-    mp_end_container(out, a, 0);
+    size_t nt = 0;
+    if (indirect_used) {
+      int t = mp_begin_map(out);
+      mp_key(out, "min");
+      mp_uint(out, nfunc);
+      mp_key(out, "max");
+      mp_nil(out);
+      mp_end_container(out, t, 2);
+      nt = 1;
+    }
+    mp_end_container(out, a, nt);
   }
   fields++;
 
@@ -1001,7 +1156,34 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   mp_key(out, "elements");
   {
     int a = mp_begin_arr(out);
-    mp_end_container(out, a, 0);
+    size_t ne = 0;
+    if (indirect_used) {
+      int e = mp_begin_map(out);
+      size_t nf = 0;
+      mp_key(out, "mode");
+      int mode = mp_variant(out, "Active");
+      int act = mp_begin_map(out);
+      mp_key(out, "index");
+      mp_uint(out, 0);
+      mp_key(out, "offset");
+      int off = mp_variant(out, "Const");
+      int cv = mp_variant(out, "I32");
+      mp_int(out, 0);
+      mp_end_container(out, cv, 1);
+      mp_end_container(out, off, 1);
+      mp_end_container(out, act, 2);
+      mp_end_container(out, mode, 1);
+      nf++;
+      mp_key(out, "funcs");
+      int fa = mp_begin_arr(out);
+      for (uint32_t k = 0; k < nfunc; k++)
+        mp_uint(out, k);
+      mp_end_container(out, fa, nfunc);
+      nf++;
+      mp_end_container(out, e, nf);
+      ne = 1;
+    }
+    mp_end_container(out, a, ne);
   }
   fields++;
 

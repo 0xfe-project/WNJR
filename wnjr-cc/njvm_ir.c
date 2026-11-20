@@ -445,10 +445,8 @@ void nj_expr_call(Mp *m, uint32_t func, E *const *args, size_t nargs) {
   op_end(m, mk, fields, n);
 }
 
-void nj_expr_callindirect(Mp *m, uint32_t type_idx, uint32_t table_idx, const E *callee,
-                          E *const *args, size_t nargs) {
-  int mk = mp_variant(m, "CallIndirect");
-  int fields = mp_begin_map(m);
+static void indirect_fields(Mp *m, uint32_t type_idx, uint32_t table_idx, const E *callee,
+                            E *const *args, size_t nargs, size_t *pn) {
   size_t n = 0;
   mp_key(m, "type_idx");
   mp_uint(m, type_idx);
@@ -465,6 +463,15 @@ void nj_expr_callindirect(Mp *m, uint32_t type_idx, uint32_t table_idx, const E 
     nj_emit_expr(m, args[i]);
   mp_end_container(m, a, nargs);
   n++;
+  *pn = n;
+}
+
+void nj_expr_callindirect(Mp *m, uint32_t type_idx, uint32_t table_idx, const E *callee,
+                          E *const *args, size_t nargs) {
+  int mk = mp_variant(m, "CallIndirect");
+  int fields = mp_begin_map(m);
+  size_t n;
+  indirect_fields(m, type_idx, table_idx, callee, args, nargs, &n);
   op_end(m, mk, fields, n);
 }
 
@@ -509,6 +516,30 @@ void nj_op_localset_call(Mp *m, uint32_t idx, uint32_t func, E *const *args, siz
   n++;
   mp_key(m, "val");
   nj_expr_call(m, func, args, nargs);
+  n++;
+  mp_end_container(m, fields, n);
+  mp_end_container(m, mk, 1);
+}
+
+void nj_op_callindirect(Mp *m, uint32_t type_idx, uint32_t table_idx, const E *callee,
+                         E *const *args, size_t nargs) {
+  int fields;
+  int mk = op_variant(m, "CallIndirect", &fields);
+  size_t n;
+  indirect_fields(m, type_idx, table_idx, callee, args, nargs, &n);
+  op_end(m, mk, fields, n);
+}
+
+void nj_op_localset_callindirect(Mp *m, uint32_t idx, uint32_t type_idx, uint32_t table_idx,
+                                 const E *callee, E *const *args, size_t nargs) {
+  int mk = mp_variant(m, "LocalSet");
+  int fields = mp_begin_map(m);
+  size_t n = 0;
+  mp_key(m, "idx");
+  mp_uint(m, idx);
+  n++;
+  mp_key(m, "val");
+  nj_expr_callindirect(m, type_idx, table_idx, callee, args, nargs);
   n++;
   mp_end_container(m, fields, n);
   mp_end_container(m, mk, 1);

@@ -87,7 +87,15 @@ recursion, calls to functions defined in the same translation unit, and every
 object with a static extent — globals (initialised, zero-initialised, with
 pointer initialisers such as `char *p = s + 1`), string literals, static
 locals, and arrays of pointers to string literals — each placed in a data
-segment. Not yet: struct arguments and returns by value, function pointers,
+segment.
+
+A function pointer is an index into a `funcref` table that holds function
+`i` at index `i`, so taking a function's address costs nothing and an
+indirect call is `call_indirect` with the signature the pointer's C type
+spells out: each distinct signature becomes one entry in the module's type
+list, collected while the bodies are emitted. Function addresses work
+anywhere a value does, including a static initialiser (a relocation whose
+target is a function). Not yet: struct arguments and returns by value,
 VLAs, bitfields, `_Atomic`, `asm`, and anything needing libc — there are no
 imports yet.
 

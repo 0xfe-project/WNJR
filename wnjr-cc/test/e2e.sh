@@ -99,7 +99,14 @@ for src in $cases; do
     failed_cases="$failed_cases $name"
     continue
   fi
-  "$work/$name-native" > "$work/$name-native.out"
+  if ! "$work/$name-native" > "$work/$name-native.out"; then
+    # The host build is the oracle; a crash there means the case itself is
+    # wrong, and comparing against a truncated file would hide that.
+    echo "[FAIL] $name: the host-compiled driver crashed"
+    fail=$((fail + 1))
+    failed_cases="$failed_cases $name"
+    continue
+  fi
 
   # One instance runs every call in file order, exactly as the C driver does,
   # so a call sees what an earlier call wrote.

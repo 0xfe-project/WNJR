@@ -142,6 +142,13 @@ void nj_op_gotoindirect(Mp *m, const E *target);
 // LocalSet { idx, val: Call { func_idx, args } }: a call whose single result
 // lands in local `idx`.
 void nj_op_localset_call(Mp *m, uint32_t idx, uint32_t func, E *const *args, size_t nargs);
+// Op::CallIndirect (result discarded). `type_idx` indexes Module::types.
+void nj_op_callindirect(Mp *m, uint32_t type_idx, uint32_t table_idx, const E *callee,
+                        E *const *args, size_t nargs);
+// LocalSet { idx, val: CallIndirect { .. } }: an indirect call whose single
+// result lands in local `idx`.
+void nj_op_localset_callindirect(Mp *m, uint32_t idx, uint32_t type_idx, uint32_t table_idx,
+                                 const E *callee, E *const *args, size_t nargs);
 void nj_op_unreachable(Mp *m);
 void nj_op_nop(Mp *m);
 
