@@ -16,22 +16,13 @@
 #include <common/errors.h>
 #endif
 
-#ifdef __wasip1__
-static_assert(offsetof(struct iovec, iov_base) ==
-                  offsetof(__wasi_ciovec_t, buf),
-              "Offset mismatch");
-static_assert(sizeof(((struct iovec *)0)->iov_base) ==
-                  sizeof(((__wasi_ciovec_t *)0)->buf),
-              "Size mismatch");
-static_assert(offsetof(struct iovec, iov_len) ==
-                  offsetof(__wasi_ciovec_t, buf_len),
-              "Offset mismatch");
-static_assert(sizeof(((struct iovec *)0)->iov_len) ==
-                  sizeof(((__wasi_ciovec_t *)0)->buf_len),
-              "Size mismatch");
-static_assert(sizeof(struct iovec) == sizeof(__wasi_ciovec_t),
-              "Size mismatch");
-#endif
+// struct iovec and __wasi_ciovec_t used to be the same bytes, and this file
+// reinterpreted one as the other, with asserts above the cast that said so. They
+// are not the same bytes in this data model: a C pointer is eight bytes, the low
+// half an address in the memory and the high half a collector tag, while the ABI
+// spells an address as four. The two structures therefore have different layouts
+// and the translation below is element by element, truncating the address the way
+// every call into the ABI here does.
 
 ssize_t writev(int fildes, const struct iovec *iov, int iovcnt) {
   if (iovcnt < 0 || IOV_MAX < iovcnt) {
@@ -40,14 +31,34 @@ ssize_t writev(int fildes, const struct iovec *iov, int iovcnt) {
   }
 
 #if defined(__wasip1__)
-  size_t bytes_written = 0;
-  __wasi_errno_t error = __wasi_fd_write(
-      fildes, (const __wasi_ciovec_t *)iov, iovcnt, &bytes_written);
-  if (error != 0) {
-    errno = error;
-    return -1;
+  // A descriptor at a time would be a call per element; a fixed chunk keeps the
+  // number of calls down without a buffer whose size depends on iovcnt. A short
+  // write ends the loop, because iovec order is the file's order.
+  ssize_t total = 0;
+  while (iovcnt > 0) {
+    enum { CHUNK = 8 };
+    __wasi_ciovec_t chunk[CHUNK];
+    int n = iovcnt < CHUNK ? iovcnt : CHUNK;
+    size_t want = 0;
+    for (int i = 0; i < n; i++) {
+      chunk[i].buf = (uint32_t)(uintptr_t)iov[i].iov_base;
+      chunk[i].buf_len = iov[i].iov_len;
+      want += iov[i].iov_len;
+    }
+    size_t bytes_written = 0;
+    __wasi_errno_t error =
+        __wasi_fd_write(fildes, chunk, n, &bytes_written);
+    if (error != 0) {
+      errno = error;
+      return -1;
+    }
+    total += bytes_written;
+    if (bytes_written < want)
+      break;
+    iov += n;
+    iovcnt -= n;
   }
-  return bytes_written;
+  return total;
 #elif defined(__wasip2__) || defined(__wasip3__) || defined(__webp2__)
   // Skip empty iovecs and then delegate to `read` with the first non-empty
   // iovec.

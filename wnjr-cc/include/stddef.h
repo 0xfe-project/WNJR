@@ -14,7 +14,8 @@ typedef unsigned int wint_t;
 
 #define NULL ((void *)0)
 
-typedef unsigned long size_t;
+typedef unsigned int size_t;
+typedef int ssize_t;
 typedef long ptrdiff_t;
 typedef unsigned int wchar_t;
 typedef long max_align_t;

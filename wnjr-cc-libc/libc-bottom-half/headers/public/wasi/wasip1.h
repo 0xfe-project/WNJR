@@ -42,7 +42,12 @@ _Static_assert(_Alignof(int32_t) == 4, "non-wasi data layout");
 _Static_assert(_Alignof(uint32_t) == 4, "non-wasi data layout");
 _Static_assert(_Alignof(int64_t) == 8, "non-wasi data layout");
 _Static_assert(_Alignof(uint64_t) == 8, "non-wasi data layout");
-_Static_assert(_Alignof(void *) == 4, "non-wasi data layout");
+// A C pointer in this data model is eight bytes: the low half is an address in the
+// memory and the high half carries a collector tag. The ABI's structures still
+// spell an address as four bytes (see __wasi_iovec_t and __wasi_ciovec_t below),
+// so a structure that crosses the boundary holds a uint32_t where the original
+// header holds a pointer, and the caller truncates on the way in.
+_Static_assert(_Alignof(void *) == 8, "non-wasi data layout");
 
 #ifdef __cplusplus
 extern "C" {
@@ -683,9 +688,10 @@ _Static_assert(_Alignof(__wasi_fd_t) == 4, "witx calculated align");
  */
 typedef struct __wasi_iovec_t {
   /**
-   * The address of the buffer to be filled.
+   * The address of the buffer to be filled. Four bytes wide: this structure is
+   * read by the host, and the ABI spells an address as a 32-bit number.
    */
-  uint8_t *buf;
+  uint32_t buf;
 
   /**
    * The length of the buffer to be filled.
@@ -705,9 +711,10 @@ _Static_assert(offsetof(__wasi_iovec_t, buf_len) == 4,
  */
 typedef struct __wasi_ciovec_t {
   /**
-   * The address of the buffer to be written.
+   * The address of the buffer to be written. Four bytes wide, for the same reason
+   * as in __wasi_iovec_t.
    */
-  const uint8_t *buf;
+  uint32_t buf;
 
   /**
    * The length of the buffer to be written.

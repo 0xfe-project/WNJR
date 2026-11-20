@@ -1076,7 +1076,11 @@ void init_macros(void) {
   define_macro("__SIZEOF_PTRDIFF_T__", "8");
   define_macro("__SIZEOF_SHORT__", "2");
   define_macro("__SIZEOF_SIZE_T__", "8");
-  define_macro("__SIZE_TYPE__", "unsigned long");
+  // size_t is four bytes: it is a length in the memory, and the WASI ABI's
+  // structures are laid out for ILP32 lengths. long stays eight bytes and so does
+  // uintptr_t, which has to hold a pointer.
+  define_macro("__SIZE_TYPE__", "unsigned int");
+  define_macro("__SSIZE_TYPE__", "int");
   define_macro("__STDC_HOSTED__", "1");
   define_macro("__STDC_NO_COMPLEX__", "1");
   define_macro("__STDC_UTF_16__", "1");

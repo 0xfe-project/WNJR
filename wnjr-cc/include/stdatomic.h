@@ -94,7 +94,7 @@ typedef _Atomic long atomic_int_fast64_t;
 typedef _Atomic unsigned long atomic_uint_fast64_t;
 typedef _Atomic long atomic_intptr_t;
 typedef _Atomic unsigned long atomic_uintptr_t;
-typedef _Atomic unsigned long atomic_size_t;
+typedef _Atomic unsigned int atomic_size_t;
 typedef _Atomic long atomic_ptrdiff_t;
 typedef _Atomic long atomic_intmax_t;
 typedef _Atomic unsigned long atomic_uintmax_t;

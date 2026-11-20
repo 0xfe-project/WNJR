@@ -3791,7 +3791,11 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
                 "an import needs both __import_module__ and __import_name__");
     if (equal(tok, "{"))
       error_tok(tok, "%s is declared as an import and cannot have a body", name_str);
-    if (ty->is_variadic)
+    // An import has a fixed signature, so a "..." is a hard error. An empty
+    // parameter list is not that: C calls it unspecified, and chibicc marks it
+    // variadic because it cannot tell the two apart. Every call to such an import
+    // passes nothing (wasi's sched_yield), so its signature has no arguments.
+    if (ty->is_variadic && ty->params)
       error_tok(ty->name_pos,
                 "%s is imported and variadic; a wasm import has a fixed signature, "
                 "so the extra arguments have no way across",

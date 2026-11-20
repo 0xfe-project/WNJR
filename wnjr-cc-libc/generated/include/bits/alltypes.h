@@ -69,8 +69,11 @@ typedef double double_t;
 #define __USE_TIME_BITS64 1
 #include <wasi/version.h>
 
+// size_t is a length in the memory, not an address: four bytes, the WASI ABI's
+// width. uintptr_t below stays as wide as a pointer, which in this data model is
+// eight bytes.
 #if defined(__NEED_size_t) && !defined(__DEFINED_size_t)
-typedef unsigned _Addr size_t;
+typedef __SIZE_TYPE__ size_t;
 #define __DEFINED_size_t
 #endif
 
@@ -85,7 +88,7 @@ typedef _Addr ptrdiff_t;
 #endif
 
 #if defined(__NEED_ssize_t) && !defined(__DEFINED_ssize_t)
-typedef _Addr ssize_t;
+typedef __SSIZE_TYPE__ ssize_t;
 #define __DEFINED_ssize_t
 #endif
 
