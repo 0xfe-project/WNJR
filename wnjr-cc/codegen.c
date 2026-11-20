@@ -122,6 +122,11 @@ static bool is_addr_value(Type *ty) {
 #define PTR_MEM "I32"
 
 // The NJVM-IR type of a C scalar. A pointer is an i32: a wasm32 address.
+//
+// The signedness of a 4- or 8-byte integer is part of the type, because the IR
+// picks the signed or the unsigned instruction from it: an unsigned divide, a
+// right shift, a less-than. Narrow integers are promoted to int before any
+// arithmetic (usual_arith_conv), so they never reach here needing a U type.
 static const char *ir_ty(Type *ty) {
   switch (ty->kind) {
   case TY_FLOAT:
@@ -138,7 +143,9 @@ static const char *ir_ty(Type *ty) {
   case TY_VLA:
     error("internal error: %s is not a scalar type", __FILE__);
   default:
-    return ty->size == 8 ? "I64" : "I32";
+    if (ty->size == 8)
+      return ty->is_unsigned ? "U64" : "I64";
+    return ty->is_unsigned ? "U32" : "I32";
   }
 }
 
@@ -409,6 +416,16 @@ static E *gen_load(Node *node, Type *ty, E *addr) {
   return v;
 }
 
+// A store takes the type its memory type produces on a load (see gen_load), so a
+// value of another IR type of the same width is converted first. An unsigned
+// 32-bit value into an i32 word is the pair that occurs: same bits, and the
+// conversion only says which of the two they are.
+static E *store_value(E *v, const char *mt) {
+  if (!strcmp(v->ty, mt))
+    return v;
+  return e_convert(v->ty, mt, v);
+}
+
 static const char *binary_op_name(NodeKind kind) {
   switch (kind) {
   case ND_ADD:
@@ -453,12 +470,19 @@ static E *as_type(E *e, const char *want) {
 
 // The type two operands are brought to. Their generated types decide, which
 // keeps the emitted op and its operands consistent by construction.
+//
+// Two operands that already agree keep their type exactly: U32 and I32 are the
+// same width but not the same operation, so collapsing an unsigned operand into
+// a signed one here would turn an unsigned divide into a signed one.
 static const char *common_ty(E *a, E *b) {
+  if (!strcmp(a->ty, b->ty))
+    return a->ty;
   if (!strcmp(a->ty, "F64") || !strcmp(b->ty, "F64"))
     return "F64";
   if (!strcmp(a->ty, "F32") || !strcmp(b->ty, "F32"))
     return "F32";
-  if (!strcmp(a->ty, "I64") || !strcmp(b->ty, "I64"))
+  if (!strcmp(a->ty, "I64") || !strcmp(b->ty, "I64") ||
+      !strcmp(a->ty, "U64") || !strcmp(b->ty, "U64"))
     return "I64";
   return "I32";
 }
@@ -470,9 +494,18 @@ static bool is_comparison(NodeKind kind) {
 static E *gen_binary(Node *node) {
   E *a = gen_expr(node->lhs);
   E *b = gen_expr(node->rhs);
-  const char *ty = common_ty(a, b);
-  a = as_type(a, ty);
-  b = as_type(b, ty);
+  // C converts only the left operand of a shift; the count keeps its own type.
+  // Taking the common type here would let an int literal's signedness decide the
+  // instruction, which turns an unsigned right shift into an arithmetic one.
+  const char *ty;
+  if (node->kind == ND_SHL || node->kind == ND_SHR) {
+    ty = a->ty;
+    b = as_type(b, ty);
+  } else {
+    ty = common_ty(a, b);
+    a = as_type(a, ty);
+    b = as_type(b, ty);
+  }
   E *e = e_new(E_BINARY, is_comparison(node->kind) ? "I32" : ty);
   e->op = binary_op_name(node->kind);
   e->op_ty = ty;
@@ -583,7 +616,7 @@ static void store_va_arg(Obj *vb, int off, Type *ty, E *val) {
     OP(nj_op_store(out, "I64", addr, e_convert(PTR_MEM, "I64", val), 0, 0));
     return;
   }
-  OP(nj_op_store(out, mem_ty(ty), addr, val, 0, 0));
+  OP(nj_op_store(out, mem_ty(ty), addr, store_value(val, mem_ty(ty)), 0, 0));
 }
 
 static E *gen_call(Node *node) {
@@ -718,9 +751,12 @@ static E *gen_expr(Node *node) {
       return e_f64(bits);
     }
     default:
+      // A constant carries its C type's signedness into the IR, because that is
+      // what decides which instruction consumes it: a size_t constant is a U64,
+      // and treating it as an I64 makes a fill's length the wrong type.
       if (node->ty->size == 8)
-        return e_i64(node->val);
-      return e_i32((int32_t)node->val);
+        return as_type(e_i64(node->val), ir_ty(node->ty));
+      return as_type(e_i32((int32_t)node->val), ir_ty(node->ty));
     }
 
   case ND_NEG:
@@ -909,7 +945,8 @@ static E *gen_expr(Node *node) {
     int t = new_temp(val->ty);
     OP(nj_op_localset(out, (uint32_t)t, val));
     e_free(val);
-    OP(nj_op_store(out, mem_ty(node->lhs->ty), addr, e_local((uint32_t)t, local_ty[t]), 0, 0));
+    OP(nj_op_store(out, mem_ty(node->lhs->ty), addr,
+                   store_value(e_local((uint32_t)t, local_ty[t]), mem_ty(node->lhs->ty)), 0, 0));
     e_free(addr);
     return e_local((uint32_t)t, local_ty[t]);
   }
@@ -1299,7 +1336,7 @@ static void emit_function(Obj *fn) {
                           e_i32(p->ty->size)));
     } else {
       OP(nj_op_store(out, mem_ty(p->ty), frame_addr(p->offset),
-                     e_local((uint32_t)i, local_ty[i]), 0, 0));
+                     store_value(e_local((uint32_t)i, local_ty[i]), mem_ty(p->ty)), 0, 0));
     }
     i++;
   }

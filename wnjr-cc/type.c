@@ -318,6 +318,32 @@ void add_type(Node *node) {
       error_tok(node->tok, "a floating-point operand is required");
     node->ty = ty_int;
     return;
+  case ND_FLOAT_TEST:
+    if (!is_flonum(node->lhs->ty))
+      error_tok(node->tok, "a floating-point operand is required");
+    node->ty = ty_int;
+    return;
+  // The two-operand tests compare, so they convert like any other comparison.
+  case ND_FLOAT_CMP:
+    if (!is_flonum(node->lhs->ty) || !is_flonum(node->rhs->ty))
+      error_tok(node->tok, "a floating-point operand is required");
+    usual_arith_conv(&node->lhs, &node->rhs);
+    node->ty = ty_int;
+    return;
+  // A result pointer, then two values of one integer type. The builtins take
+  // any integer width, but not a pointer and not a float.
+  case ND_OVERFLOW: {
+    add_type(node->cas_addr);
+    add_type(node->lhs);
+    add_type(node->rhs);
+    if (!is_integer(node->lhs->ty) || !is_integer(node->rhs->ty))
+      error_tok(node->tok, "integer operands are required");
+    if (node->cas_addr->ty->kind != TY_PTR ||
+        !is_integer(node->cas_addr->ty->base))
+      error_tok(node->tok, "a pointer to an integer is required");
+    node->ty = ty_int;
+    return;
+  }
   case ND_ATOMIC_CAS:
     add_type(node->lhs);
     add_type(node->rhs);

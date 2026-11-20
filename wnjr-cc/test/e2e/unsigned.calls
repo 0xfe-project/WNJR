@@ -1,0 +1,11 @@
+ucmp -1 1
+scmp -1 1
+udiv -1 2
+umod -1 10
+ushr -1
+sshr -1
+uadd -1 1
+ult -1 1
+uge64w -1 1
+udiv64w -1 3
+ucmp 5 7

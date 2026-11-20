@@ -21,6 +21,7 @@ static const char *node_names[] = {
   "CAST", "MEMZERO", "ASM", "CAS", "EXCH", "TRAP", "CLZ", "CTZ", "POPCOUNT",
   "ISNAN", "MEMCPY", "MEMSET", "ATOMIC_CAS", "ATOMIC_CAS_BOOL", "ATOMIC_RMW",
   "ATOMIC_WAIT", "ATOMIC_NOTIFY", "ATOMIC_FENCE", "MEMORY_SIZE", "MEMORY_GROW",
+  "FLOAT_TEST", "FLOAT_CMP", "OVERFLOW",
 };
 
 // This table is indexed by NodeKind and has to list every kind, in order. There

@@ -253,7 +253,30 @@ typedef enum {
   ND_ATOMIC_FENCE,    // __sync_synchronize
   ND_MEMORY_SIZE,     // __builtin_wasm_memory_size(0)
   ND_MEMORY_GROW,     // __builtin_wasm_memory_grow(0, n)
+  ND_FLOAT_TEST,      // __builtin_isinf, isfinite, isnormal, signbit
+  ND_FLOAT_CMP,       // __builtin_isunordered, islessgreater
+  ND_OVERFLOW,        // __builtin_add_overflow, sub_overflow, mul_overflow
 } NodeKind;
+
+// Which test a ND_FLOAT_TEST or ND_FLOAT_CMP node performs. The C99
+// classification macros are one family with one shape (floating operands in, int
+// out), so they are one node kind each rather than seven.
+enum {
+  FC_ISINF = 1,
+  FC_ISFINITE,
+  FC_ISNORMAL,
+  FC_SIGNBIT,
+  FC_ISUNORDERED,
+  FC_ISLESSGREATER,
+};
+
+// Which operation a ND_OVERFLOW node performs. It writes its result through a
+// pointer and yields 1 when the mathematical result did not fit.
+enum {
+  OVF_ADD = 1,
+  OVF_SUB,
+  OVF_MUL,
+};
 
 // AST node type
 struct Node {
@@ -326,6 +349,10 @@ struct Node {
   // Numeric literal
   int64_t val;
   long double fval;
+
+  // Which test or operation: ND_FLOAT_TEST, ND_FLOAT_CMP and ND_OVERFLOW carry
+  // no operator token of their own, so the frontend records the choice here.
+  int fclass;
 };
 
 Node *new_cast(Node *expr, Type *ty);
