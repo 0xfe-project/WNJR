@@ -51,8 +51,8 @@ use super::{
     lower_cache_layout::{compute_block_entry_cache_params, preferred_preserved_for_cached},
     lower_const_pool::ConstPoolBuilder,
     lower_context::{
-        explicit_cached_cells, BlockLowerContext, BlockLowerScratch, CachedCell,
-        EntryCacheParam, ValueRegs,
+        explicit_cached_cells, BlockLowerContext, BlockLowerScratch, CachedCell, EntryCacheParam,
+        ValueRegs,
     },
     lower_i64::I64Lowering,
     lower_i64_gp64::Gp64Lowering,
@@ -2884,9 +2884,28 @@ struct EhCatchFixup {
     /// A free linear register the catch block may use to move a payload word
     /// into its slot.
     scratch: MachineReg,
-    /// The register each of the handler's cached cells is in when the throw
-    /// crossed the call, in the handler's cell order.
-    cache_sources: collections::Vec<crate::vm::jit::machine::machine_ir::MachineValue>,
+    /// The argument each of the handler's parameters takes, in the handler's
+    /// parameter order. A catch payload arrives through the handler's own
+    /// reloads; every other cached cell is named by an EhCellReload.
+    handler_args: collections::Vec<crate::vm::jit::machine::machine_ir::MachineValue>,
+    /// Cells the catch block has to restore from their frame home before it
+    /// jumps into the handler.
+    reloads: collections::Vec<EhCellReload>,
+}
+
+/// A cached cell the catch block reloads from its frame home.
+///
+/// A call is a safepoint: the lowering publishes every live cached cell to its
+/// frame slot before the call, and the registers that carried them are free for
+/// the call's own arguments afterwards. So at the throw the frame is the only
+/// place a cell is known to be, whatever the throwing block's register
+/// arrangement said.
+#[derive(Clone, Copy, Debug)]
+struct EhCellReload {
+    dst: crate::vm::jit::machine::machine_ir::MachineReg,
+    addr: crate::vm::jit::machine::machine_ir::MachineAddr,
+    ty: crate::vm::jit::machine::machine_ir::MachineStorageType,
+    width: crate::vm::jit::machine::machine_ir::MachineMemWidth,
 }
 
 /// Deliver each catch payload into the registers its handler block reads.
@@ -2970,7 +2989,6 @@ fn finish_eh_dispatch(
             .filter(|param| param.owner == MachineRegOwner::LinearValue)
             .count();
         if value_count > fixup.payload_arity as usize {
-
             // The handler wants values the exception does not carry: the ones
             // that were already on the stack at the try site. Those are gone
             // once the frame has unwound, so the exception keeps unwinding
@@ -2984,13 +3002,8 @@ fn finish_eh_dispatch(
             continue;
         }
         // A catch label takes only what its own arity asks for; the rest of the
-        // payload is dropped, exactly as a `br` to that label would drop it.
+        // payload is dropped, exactly as a br to that label would drop it.
         let first_word = fixup.payload_arity as usize - value_count;
-        let param_regs = handler
-            .params
-            .iter()
-            .map(|param| param.reg)
-            .collect::<collections::Vec<_>>();
         let payload_regs = handler
             .params
             .iter()
@@ -2998,27 +3011,6 @@ fn finish_eh_dispatch(
             .map(|param| param.reg)
             .collect::<collections::Vec<_>>();
         let slots = payload_slots(handler, fixup.payload_arity as usize);
-        // Hand the handler's cells over in the registers they actually sit in.
-        // A payload word reaches its cell through a slot the handler reloads,
-        // so that cell carries no value on the edge.
-        let mut handler_args = collections::Vec::with_capacity(handler.params.len());
-        let mut sources = fixup.cache_sources.iter().copied();
-        let mut exact = true;
-        for param in &handler.params {
-            match param.owner {
-                MachineRegOwner::LinearValue => handler_args.push(MachineValue::Reg(param.reg)),
-                MachineRegOwner::CachedCell => match sources.next() {
-                    Some(source) => handler_args.push(source),
-                    None => {
-                        exact = false;
-                        break;
-                    }
-                },
-            }
-        }
-        if !exact || sources.next().is_some() {
-            handler_args = param_regs.iter().copied().map(MachineValue::Reg).collect();
-        }
 
         let Some(block) = blocks.get_mut(fixup.block.as_usize()) else {
             return Err(WasmError::internal(
@@ -3061,47 +3053,91 @@ fn finish_eh_dispatch(
             }
         }
         ops.extend(block.ops.drain(..));
+        // Last, so the payload delivery above cannot overwrite a restored cell:
+        // its scratch register may be a lane the handler's cells live in.
+        for reload in fixup.reloads.iter() {
+            ops.push(MachineInst {
+                kind: MachineInstKind::Load {
+                    owner: MachineRegOwner::CachedCell,
+                    ty: reload.ty,
+                    dst: reload.dst,
+                    addr: reload.addr,
+                    width: reload.width,
+                    extension: MachineLoadExtension::None,
+                },
+            });
+        }
         block.ops = ops;
         block.terminator = MachineTerminator::Jump(MachineEdge {
             target: fixup.handler,
-            args: handler_args,
+            args: fixup.handler_args.clone(),
         });
     }
     Ok(())
 }
 
-/// Where each of a catch handler's cached cells comes from when a throw
-/// crossed a call.
+/// How a catch handler's cached cells cross the throw that led to it.
 ///
-/// The handler block starts with no register state of its own: the registers
-/// still hold what the throwing block had, because the JIT ABI keeps cell
-/// registers alive across a local call. The allocator is free to place the
-/// handler's cells in different registers than the throwing block used, though,
-/// so the edge into the handler has to say which register each cell is in. A
-/// cell the catch binds from the payload is left alone: the handler writes it
-/// from the payload slots before reading it.
-fn eh_handler_cache_sources(
+/// A handler block names the registers its cells live in as block parameters,
+/// but nothing about the throwing block guarantees the same placement: the
+/// allocator decides per block. On top of that the throwing call is a safepoint
+/// - its arguments may have taken the registers the cells were in - so the
+/// frame slot backing each cell is the only place the value is known to be.
+///
+/// So every cached cell the handler does not bind from the payload is reloaded
+/// here from its frame home, and the edge into the handler hands it over in the
+/// register the handler's parameters name. A payload cell is left to the handler,
+/// which writes it from the payload slots before reading it.
+fn eh_handler_handover(
+    lower: &BlockLowerContext<'_>,
     clause: &crate::vm::jit::middle::ssa_ir::ir::SsaCatch,
     throwing_block: usize,
     entry_cache_params: &[collections::Vec<EntryCacheParam>],
     cached_cells: &[CachedCell],
-) -> Option<collections::Vec<crate::vm::jit::machine::machine_ir::MachineValue>> {
-    use crate::vm::jit::machine::machine_ir::MachineValue;
+) -> Option<(
+    collections::Vec<crate::vm::jit::machine::machine_ir::MachineValue>,
+    collections::Vec<EhCellReload>,
+)> {
+    use crate::vm::jit::machine::machine_ir::{MachineStorageType, MachineValue};
 
     let wanted = entry_cache_params.get(clause.handler.as_usize())?;
     let have = entry_cache_params.get(throwing_block)?;
-    let mut sources = collections::Vec::with_capacity(wanted.len());
+    let gp_reg_width = lower.gp_reg_width();
+    let mut args = collections::Vec::with_capacity(wanted.len());
+    let mut reloads = collections::Vec::new();
     for entry in wanted {
         let cached = cached_cells.get(usize::from(entry.cached_index))?;
-        if entry.regs.hi.is_some() {
-            return None;
-        }
         if clause
             .payload_locals
             .iter()
             .any(|local| cached.cell.0 == *local)
         {
-            sources.push(MachineValue::ReservedReg(entry.regs.lo));
+            args.push(MachineValue::ReservedReg(entry.regs.lo));
+            continue;
+        }
+        // A word-sized cell comes back from its frame home; anything the frame
+        // does not hold as one addressable word keeps the throwing block's
+        // register, since the ABI leaves preserved lanes alone across a call.
+        let reloadable = entry.regs.hi.is_none()
+            && match cached.ty {
+                MachineStorageType::GpWord
+                | MachineStorageType::Fp32
+                | MachineStorageType::Fp64 => true,
+                MachineStorageType::GpI64 => gp_reg_width == 8,
+                MachineStorageType::V128 => false,
+            };
+        if reloadable {
+            let home = lower.cell_home(cached.cell).ok()?;
+            let addr = lower.frame_addr(home).ok()?;
+            reloads.push(EhCellReload {
+                dst: entry.regs.lo,
+                addr,
+                ty: cached.ty,
+                width: crate::vm::jit::machine::lower_regalloc::canonical_cached_cell_mem_width(
+                    cached.ty,
+                ),
+            });
+            args.push(MachineValue::Reg(entry.regs.lo));
             continue;
         }
         let source = have
@@ -3110,9 +3146,9 @@ fn eh_handler_cache_sources(
         if source.regs.hi.is_some() {
             return None;
         }
-        sources.push(MachineValue::Reg(source.regs.lo));
+        args.push(MachineValue::Reg(source.regs.lo));
     }
-    Some(sources)
+    Some((args, reloads))
 }
 
 fn attach_eh_dispatch(
@@ -3128,8 +3164,8 @@ fn attach_eh_dispatch(
 ) -> Result<bool, WasmError> {
     use crate::vm::jit::machine::machine_ir::{
         EhHelperOp, MachineBranchCond, MachineCompareKind, MachineEdge, MachineInst,
-        MachineInstKind, MachineIntWidth, MachineReg, MachineSign, MachineStorageType,
-        MachineTrapKind, MachineValue,
+        MachineInstKind, MachineIntWidth, MachineSign, MachineStorageType, MachineTrapKind,
+        MachineValue,
     };
     let ssa = lower.program();
     if !matches!(terminator, MachineTerminator::Call { thrown: None, .. }) {
@@ -3167,14 +3203,18 @@ fn attach_eh_dispatch(
 
     // Every clause needs its cached cells sourced before any block is created,
     // so a failure leaves the program exactly as it was.
-    let mut clause_sources = collections::Vec::with_capacity(scope.catches.len());
+    let mut clause_handover = collections::Vec::with_capacity(scope.catches.len());
     for clause in &scope.catches {
-        let Some(sources) =
-            eh_handler_cache_sources(clause, ssa_block as usize, entry_cache_params, cached_cells)
-        else {
+        let Some(handover) = eh_handler_handover(
+            lower,
+            clause,
+            ssa_block as usize,
+            entry_cache_params,
+            cached_cells,
+        ) else {
             return Ok(false);
         };
-        clause_sources.push(sources);
+        clause_handover.push(handover);
     }
 
     let mut catch_blocks = collections::Vec::with_capacity(scope.catches.len());
@@ -3216,7 +3256,8 @@ fn attach_eh_dispatch(
             rethrow,
             payload_arity: clause.payload_arity,
             scratch: flag,
-            cache_sources: clause_sources[index].clone(),
+            handler_args: clause_handover[index].0.clone(),
+            reloads: clause_handover[index].1.clone(),
         });
         extra_blocks.push(MachineBlock {
             id: catch_blocks[index],
