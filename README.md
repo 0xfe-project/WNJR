@@ -136,6 +136,15 @@ wide; only the low 32 bits of a pointer slot are an address, and the upper half
 is reserved for the GC tag of the tagged-pointer model. Codegen reads every
 width from that table, so moving to ILP32 would be a change to `type.c` alone.
 
+The target is wasm32-wasip1-threads, and the predefined macros say so:
+`__wasm__`, `__wasm32__`, `__wasi__`, `__wasip1__`, and no `__x86_64__`,
+`__linux__` or `__ELF__`, because the machine the compiler happens to run on is
+not the machine it compiles for. `test/libc-parse.sh` measures the frontend
+against the real thing: it preprocesses and parses every source file in
+`wnjr-cc-libc` with wasi-libc's own include path and prints one line per file
+that fails, with the first error. It is the number to watch while the frontend
+grows enough to compile a C library.
+
 ## WebAssembly compatibility
 
 Validated against the official

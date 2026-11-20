@@ -1065,7 +1065,6 @@ void init_macros(void) {
   // Define predefined macros
   define_macro("_LP64", "1");
   define_macro("__C99_MACRO_WITH_VA_ARGS", "1");
-  define_macro("__ELF__", "1");
   define_macro("__LP64__", "1");
   define_macro("__SIZEOF_DOUBLE__", "8");
   define_macro("__SIZEOF_FLOAT__", "4");
@@ -1086,23 +1085,29 @@ void init_macros(void) {
   define_macro("__STDC__", "1");
   define_macro("__USER_LABEL_PREFIX__", "");
   define_macro("__alignof__", "_Alignof");
-  define_macro("__amd64", "1");
-  define_macro("__amd64__", "1");
   define_macro("__chibicc__", "1");
   define_macro("__const__", "const");
-  define_macro("__gnu_linux__", "1");
   define_macro("__inline__", "inline");
-  define_macro("__linux", "1");
-  define_macro("__linux__", "1");
   define_macro("__signed__", "signed");
   define_macro("__typeof__", "typeof");
-  define_macro("__unix", "1");
-  define_macro("__unix__", "1");
   define_macro("__volatile__", "volatile");
-  define_macro("__x86_64", "1");
-  define_macro("__x86_64__", "1");
-  define_macro("linux", "1");
-  define_macro("unix", "1");
+
+  // The target is wasm32-wasip1-threads, not the host the compiler happens to
+  // run on, so nothing here says x86_64 or linux: a compiler that claimed to be
+  // both a wasm toolchain and an ELF one would take the wrong branch of
+  // whatever it compiled. The widths above stay LP64 on purpose — this
+  // frontend's pointers are eight bytes with the GC tag in the high half, which
+  // is the whole reason it does not use a prebuilt wasi-libc.
+  define_macro("__wasm", "1");
+  define_macro("__wasm__", "1");
+  define_macro("__wasm32", "1");
+  define_macro("__wasm32__", "1");
+  define_macro("__wasi__", "1");
+  define_macro("__wasip1__", "1");
+  define_macro("__ORDER_LITTLE_ENDIAN__", "1234");
+  define_macro("__ORDER_BIG_ENDIAN__", "4321");
+  define_macro("__ORDER_PDP_ENDIAN__", "3412");
+  define_macro("__BYTE_ORDER__", "1234");
 
   add_builtin("__FILE__", file_macro);
   add_builtin("__LINE__", line_macro);

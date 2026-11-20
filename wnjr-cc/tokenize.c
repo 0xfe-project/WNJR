@@ -532,6 +532,36 @@ Token *tokenize(File *file) {
       continue;
     }
 
+    // A `#error` or `#warning` line carries diagnostic text, not C tokens. If the
+    // message is tokenized like everything else, an apostrophe in it opens a
+    // character literal that runs to the next apostrophe — maybe lines later —
+    // and swallows whatever directives lie in between, so a skipped branch
+    // becomes an unterminated conditional. Emit the `#` and the directive word,
+    // which is all the preprocessor reads, then go to the end of the line.
+    if (at_bol && *p == '#') {
+      char *q = p + 1;
+      while (*q == ' ' || *q == '\t')
+        q++;
+
+      const char *word = NULL;
+      if (startswith(q, "error"))
+        word = "error";
+      else if (startswith(q, "warning"))
+        word = "warning";
+
+      if (word) {
+        size_t len = strlen(word);
+        if (!isalnum((unsigned char)q[len]) && q[len] != '_') {
+          cur = cur->next = new_token('#', p, p + 1);
+          cur = cur->next = new_token(TK_IDENT, q, q + len);
+          p = q + len;
+          while (*p && *p != '\n')
+            p++;
+          continue;
+        }
+      }
+    }
+
     // Numeric literal
     if (isdigit(*p) || (*p == '.' && isdigit(p[1]))) {
       char *q = p++;
