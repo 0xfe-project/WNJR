@@ -1,25 +1,25 @@
 #ifndef _SETJMP_H
 #define _SETJMP_H
 
-/* wnjr-cc builtin setjmp/longjmp
+/*
+ * wnjr-cc-libc setjmp.h. Replaces musl's setjmp.h, which needs
+ * -mllvm -wasm-enable-sjlj (see README.md, "setjmp / longjmp").
  *
- * jmp_buf 是 int (i32)，存储标签编号。
- * setjmp() 第一次返回 0，longjmp 返回时返回 val（若 val==0 则返回 1）。
- * longjmp() 不返回，跳转到 setjmp 点。
+ * __wnjr_setjmp and __wnjr_longjmp are wnjr-cc builtins, not library
+ * functions: no object in this tree defines them. wnjr-cc maps them to
+ * NJVM-IR Op::Setjmp / Op::Longjmp.
  *
- * 实现：wnjr-cc 把 setjmp 映射到 NJVM-IR 的 Op::Setjmp，longjmp 映射到 Op::Longjmp。
- * 底层降低：setjmp → try_table(catch_all $unwind)，longjmp → throw with val。
- * 多个 setjmp 点用 BrTable 分发。
- *
- * 参考 wnjr-cc-libc/README.md 了解详情。
+ * jmp_buf holds one i32 at offset 0 (the setjmp site number). The rest of
+ * the buffer is unused. Do not store anything else in it.
  */
 
 typedef int jmp_buf[1];
 
-int  setjmp(jmp_buf env);
-void longjmp(jmp_buf env, int val);
+/* First return: 0. After longjmp(env, v): v, or 1 if v == 0. */
+int __wnjr_setjmp(jmp_buf env);
+_Noreturn void __wnjr_longjmp(jmp_buf env, int val);
 
-#define setjmp(env)  __builtin_setjmp(env)
-#define longjmp(env, val)  __builtin_longjmp(env, val)
+#define setjmp(env) __wnjr_setjmp(env)
+#define longjmp(env, val) __wnjr_longjmp(env, val)
 
 #endif
