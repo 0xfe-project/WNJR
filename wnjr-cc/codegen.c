@@ -34,16 +34,26 @@
 //
 // The stack comes before the heap so that the heap is contiguous with what
 // sbrk returns: sbrk grows the memory and hands back the previous end, so a heap
-// with a hole above it would break. The stack has no guard page below it, so an
-// overflow walks into the data area rather than trapping.
+// with a hole above it would break. The stack has no guard page below it, so
+// every prologue compares sp against stack_base and traps when it has gone
+// under: without that an overflow walks into the data area, and the first sign
+// of it is a wrong answer far from where it happened.
+//
+// STACK_SIZE is not a guess about ordinary code. A large array initialiser is
+// parsed by recursing once per element (array_initializer2), so the depth scales
+// with the number of elements: musl's ctype tables need more than 256 KB, and
+// this program — the compiler and the whole libc — needs less than 1 MB. Four
+// megabytes is that with room to spare, and the check above turns anything past
+// it into a trap instead of a corrupted heap.
 #define MEMORY_PAGES 256
 #define MEMORY_END ((uint64_t)MEMORY_PAGES * 65536)
 #define GLOBAL_BASE 0x1000
-#define STACK_SIZE 0x40000
+#define STACK_SIZE 0x400000
 #define MIN_HEAP 0x10000
 
 // Where the stack starts and the heap ends, both decided by the data layout.
 static uint32_t stack_top;
+static uint32_t stack_base;
 
 // ───────────────────────── state ─────────────────────────
 
@@ -554,6 +564,20 @@ static E *e_addr(E *base, int offset) {
   if (!offset)
     return base;
   return e_binary("Add", base->ty, base, as_type(e_i32(offset), base->ty));
+}
+
+// The frame is given back the way the prologue took it: sp = fp + frame_size.
+// Every return goes through here. The one at the end of a body that falls off
+// its end used to return without it, so each call to such a function leaked its
+// whole frame; a long run walked the stack pointer down through the stack and
+// into the data area, and every answer after that came from corrupted memory.
+static void restore_frame(void) {
+  if (!frame_size)
+    return;
+  OP(nj_op_globalset(out, sp_global,
+                     as_type(e_binary("Add", PTR_TY, e_local(fp_local, PTR_TY),
+                                      as_type(e_i32(frame_size), PTR_TY)),
+                             "I32")));
 }
 
 // The address of a local, as a Ptr: two of them may be compared, and C compares
@@ -1788,11 +1812,7 @@ static void gen_stmt(Node *node) {
       set_local(t, v);
       e_free(v);
     }
-    if (frame_size)
-      OP(nj_op_globalset(out, sp_global,
-                         as_type(e_binary("Add", PTR_TY, e_local(fp_local, PTR_TY),
-                                          as_type(e_i32(frame_size), PTR_TY)),
-                                 "I32")));
+    restore_frame();
     if (agg)
       OP(nj_op_return_void(out));
     else if (t >= 0)
@@ -2001,6 +2021,7 @@ static void assign_global_offsets(Obj *prog) {
   data_end = top;
 
   uint32_t base = align_to(top, 16);
+  stack_base = base;
   stack_top = base + STACK_SIZE;
   if (stack_top + MIN_HEAP > MEMORY_END)
     error("the data area leaves no room for a stack of %d bytes and a heap of "
@@ -2127,6 +2148,19 @@ static void emit_function(Obj *fn) {
                               PTR_TY)));
     OP(nj_op_globalset(out, (uint32_t)sp_global,
                        as_type(e_local((uint32_t)fp_local, PTR_TY), "I32")));
+    // The stack has no guard page below it, so without this an overflow walks
+    // down into the data area and corrupts whatever it finds there. One compare
+    // turns that into a trap at the moment it happens.
+    {
+      uint32_t ok = next_label++;
+      OP(nj_op_jmpif(
+          out,
+          e_binary("Ge", "I32", e_global((uint32_t)sp_global, "I32"),
+                   e_i32((int32_t)stack_base)),
+          ok));
+      OP(nj_op_unreachable(out));
+      OP(nj_op_label(out, ok));
+    }
   } else {
     set_local((uint32_t)fp_local, as_type(e_global((uint32_t)sp_global, "I32"), PTR_TY));
   }
@@ -2182,6 +2216,7 @@ static void emit_function(Obj *fn) {
   // it is dead code whenever the body really ends in a return. chibicc's own
   // test suite has a char * function with no return statement at all.
   Type *rty = fn->ty->return_ty;
+  restore_frame();
   if (rty->kind == TY_VOID || is_aggregate(rty))
     OP(nj_op_return_void(out));
   else
