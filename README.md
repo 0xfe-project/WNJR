@@ -71,6 +71,7 @@ wnjr-cc/wcc -o prog.njvm prog.c   # IR as MessagePack
 make -C wnjr-cc test                              # -E and --dump-ast vs chibicc
 wnjr-cc/test/e2e.sh                               # C -> IR -> WNJR vs the host cc
 wnjr-cc/test/bootstrap.sh                         # wcc builds itself, on WNJR
+wnjr-cc/test/bootstrap-emit.sh                     # and agrees with the native one, case by case
 ```
 
 **It compiles itself.** `test/bootstrap.sh` compiles the compiler's own
@@ -80,6 +81,15 @@ again. The module wcc emits and the module the compiler built by wcc emits are
 the same bytes; a second generation reproduces them a third time. So the
 compiler that builds the compiler is a wasm program running on this engine, and
 it agrees with the native one byte for byte.
+
+Agreeing with itself is not the same as being right: a frontend that gives the
+same wrong answer at every generation is a perfect fixed point, and this one did
+that twice. `test/bootstrap-emit.sh` is the other half of the claim — the host
+compiler and the self-built one compile chibicc's test set with the same words,
+and their preprocessed output, their ASTs and (for a few cases) their whole
+modules have to match, byte for byte. Both defects found that way were real
+miscompiles that the bootstrap alone had declared green: a `char` argument going
+through `...` was stored one byte wide, and `p - q` lost its sign.
 
 Every C object lives in linear memory at a frame-relative address (the
 prologue sets `fp = sp - frame_size`, `sp = fp`; each `return` restores it), so
