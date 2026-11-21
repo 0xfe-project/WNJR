@@ -16,3 +16,6 @@ vendor/
 *.o.tmp
 wnjr-cc/wnjr-cc-asan*
 wnjr-cc/wcc
+
+# benchmarks build into a scratch directory next to their sources
+wnjr-cc/bench/.work/
