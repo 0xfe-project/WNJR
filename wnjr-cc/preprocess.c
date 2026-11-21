@@ -23,6 +23,7 @@
 // https://github.com/rui314/chibicc/wiki/cpp.algo.pdf
 
 #include "chibicc.h"
+#include "weld.h"
 
 typedef struct MacroParam MacroParam;
 struct MacroParam {
@@ -796,7 +797,49 @@ static char *detect_include_guard(Token *tok) {
   return NULL;
 }
 
+// Record a file this unit depends on, once, in the order the preprocessor
+// reached it. include_file calls this before it consults "#pragma once" or an
+// include guard: a header skipped because its guard was already defined is
+// still a dependency, since the guard is what decided the skip.
+// The same header is reached under more than one spelling, because a musl
+// wrapper is "#include_next <stdio.h>" and the search path that reaches it
+// spells the way there differently. One file must appear once, so the list
+// holds resolved paths: realpath collapses "." and ".." and follows symlinks,
+// which is also what a later content hash needs (editing through a symlink
+// must change the entry).
+void record_dep(char *path) {
+  static HashMap seen;
+  if (path[0] == '\0')
+    return;
+
+  static char resolved[4096];
+  char *key = realpath(path, resolved) ? resolved : path;
+  if (hashmap_get(&seen, key))
+    return;
+  hashmap_put(&seen, format("%s", key), (void *)1);
+  strarray_push(&deps, format("%s", key));
+}
+
+// A marker token for the welded table's generator: a token whose text is
+// 0x01name0x01 (a file begins) or 0x02name0x02 (it ends). It never reaches the
+// parser: it exists only in the output of --emit-text with --weld-tree, where the
+// generator reads the boundaries off it.
+static Token *weld_marker(char *path, bool open, File *file) {
+  static int marker_no;
+  Token *t = calloc(1, sizeof(Token));
+  char *text = format("%c%s%c", open ? 1 : 2, path, open ? 1 : 2);
+  t->kind = TK_IDENT;
+  t->loc = text;
+  t->len = strlen(text);
+  t->file = file;
+  t->at_bol = true;
+  t->line_no = ++marker_no;
+  return t;
+}
+
 static Token *include_file(Token *tok, char *path, Token *filename_tok) {
+  record_dep(path);
+
   // Check for "#pragma once"
   if (hashmap_get(&pragma_once, path))
     return tok;
@@ -817,7 +860,158 @@ static Token *include_file(Token *tok, char *path, Token *filename_tok) {
   if (guard_name)
     hashmap_put(&include_guards, path, guard_name);
 
-  return append(tok2, tok);
+  if (!opt_weld_tree)
+    return append(tok2, tok);
+
+  // Wrap the file in its markers, keeping the end-of-file token where append
+  // expects it: append walks to the first TK_EOF, so the close marker goes
+  // before it.
+  Token *open = weld_marker(path, true, tok2->file);
+  open->next = tok2;
+
+  Token *last = open;
+  while (last->next && last->next->kind != TK_EOF)
+    last = last->next;
+
+  Token *close = weld_marker(path, false, tok2->file);
+  close->next = last->next;
+  last->next = close;
+
+  return append(open, tok);
+}
+
+//
+// Welded headers (weld.h)
+//
+
+// A program asks a header for a different configuration by defining a macro
+// whose name begins with "_" before including it: _GNU_SOURCE, _POSIX_C_SOURCE,
+// _FILE_OFFSET_BITS and the rest. A welded header was expanded under the
+// default configuration, so once the unit has defined one of those the table no
+// longer answers for it and the headers are read from disk again.
+static bool weld_dirty;
+// Set when the command line itself named such a macro (-D_GNU_SOURCE). It holds
+// for every unit of the run, so it is not cleared when one begins.
+static bool weld_cmdline_dirty;
+
+void weld_note_cmdline_macro(char *name) {
+  if (name[0] == '_')
+    weld_cmdline_dirty = true;
+}
+// Set while the welded macro block is being read, so the definitions it carries
+// do not make the unit dirty.
+static bool welding;
+
+// Off while the table cannot be made exact: a musl header's tokens depend on
+// which macros the headers before it defined (bits/alltypes.h is nothing but
+// conditions on __NEED_*), so one welded text cannot stand for all includers.
+// See docs/COMPILE-SPEED.md.
+bool weld_enabled = false;
+int weld_hits;
+int weld_misses;
+
+// Which unit the marks below belong to. A mark is present when its value is
+// this number, so the start of a unit needs no clearing.
+static int weld_unit;
+static HashMap welded;
+
+static void weld_reset(void) {
+  weld_unit++;
+  weld_dirty = false;
+  welding = false;
+}
+
+static void weld_mark(const char *name) {
+  hashmap_put(&welded, (char *)name, (void *)(long)weld_unit);
+}
+
+static bool weld_marked(const char *name) {
+  return hashmap_get(&welded, (char *)name) == (void *)(long)weld_unit;
+}
+
+static const WeldHeader *weld_find(char *name) {
+  if (!weld_enabled)
+    return NULL;
+
+  for (int i = 0; i < weld_headers_len; i++) {
+    if (strcmp(weld_headers[i].name, name))
+      continue;
+    if (weld_dirty || weld_cmdline_dirty) {
+      weld_misses++;
+      return NULL;
+    }
+    return &weld_headers[i];
+  }
+  return NULL;
+}
+
+// The table entry for a name, whether or not the unit has made itself dirty: the
+// dependencies of a header that is already being welded are part of it.
+static const WeldHeader *weld_entry(const char *name) {
+  for (int i = 0; i < weld_headers_len; i++)
+    if (!strcmp(weld_headers[i].name, name))
+      return &weld_headers[i];
+  return NULL;
+}
+
+static Token *weld_build(const WeldHeader *h);
+
+// A welded header as tokens: its dependencies first, in the order it includes
+// them, then its own tokens.
+//
+// Marking and building are one pass on purpose. Two headers that include the
+// same third must not both put it in the program, and which of them puts it
+// there is decided by which is reached first — the same rule the include guard
+// applies on disk.
+static Token *weld_build(const WeldHeader *h) {
+  if (weld_marked(h->name))
+    return NULL;
+
+  weld_mark(h->name);
+  weld_hits++;
+
+  Token *acc = NULL;
+
+  for (int i = 0; i < h->n_deps; i++) {
+    const WeldHeader *d = weld_entry(h->deps[i]);
+    if (!d)
+      continue;
+    Token *part = weld_build(d);
+    if (part)
+      acc = acc ? append(acc, part) : part;
+  }
+
+  // The macros go in before the text: it was expanded with them in effect, and a
+  // name the unit uses afterwards has to resolve the same way it did for the
+  // header.
+  if (h->macros) {
+    char *file = format("<weld:%s>", h->name);
+    Token *t = tokenize_text(file, (char *)h->macros);
+    welding = true;
+    while (t->kind != TK_EOF) {
+      if (!is_hash(t) || !equal(t->next, "define"))
+        error("weld: %s: expected a #define", h->name);
+      t = t->next->next;
+      read_macro_definition(&t, t);
+    }
+    welding = false;
+  }
+
+  // The text is tokenized here: the table holds text, and a token is not a
+  // stable thing to store.
+  Token *text = tokenize_text(format("<weld:%s>", h->name), (char *)h->text);
+  for (Token *t = text; t->kind != TK_EOF; t = t->next)
+    t->is_welded = true;
+
+  if (text)
+    acc = acc ? append(acc, text) : text;
+  return acc;
+}
+
+// Put one welded header into the stream in place of the #include.
+static Token *weld_splice(Token *tok, const WeldHeader *h) {
+  Token *built = weld_build(h);
+  return built ? append(built, tok) : tok;
 }
 
 // Read #line arguments
@@ -845,6 +1039,17 @@ static Token *preprocess2(Token *tok) {
   Token *cur = &head;
 
   while (tok->kind != TK_EOF) {
+    // A welded token is already the result of preprocessing: expanding it again
+    // against the macros of this unit would apply a second, different
+    // configuration to text that was resolved under the first.
+    if (tok->is_welded) {
+      tok->line_delta = tok->file->line_delta;
+      tok->filename = tok->file->display_name;
+      cur = cur->next = tok;
+      tok = tok->next;
+      continue;
+    }
+
     // If it is a macro, expand it.
     if (expand_macro(&tok, tok))
       continue;
@@ -873,6 +1078,14 @@ static Token *preprocess2(Token *tok) {
         }
       }
 
+      // A libc header this front end carries already preprocessed: nothing to
+      // read and nothing to expand.
+      const WeldHeader *h = weld_find(filename);
+      if (h) {
+        tok = weld_splice(tok, h);
+        continue;
+      }
+
       char *path = search_include_paths(filename);
       tok = include_file(tok, path ? path : filename, start->next->next);
       continue;
@@ -887,6 +1100,8 @@ static Token *preprocess2(Token *tok) {
     }
 
     if (equal(tok, "define")) {
+      if (!welding && tok->next->kind == TK_IDENT && tok->next->loc[0] == '_')
+        weld_dirty = true;
       read_macro_definition(&tok, tok->next);
       continue;
     }
@@ -895,6 +1110,8 @@ static Token *preprocess2(Token *tok) {
       tok = tok->next;
       if (tok->kind != TK_IDENT)
         error_tok(tok, "macro name must be an identifier");
+      if (!welding && tok->loc[0] == '_')
+        weld_dirty = true;
       undef_macro(strndup(tok->loc, tok->len));
       tok = skip_line(tok->next);
       continue;
@@ -992,6 +1209,44 @@ static Token *preprocess2(Token *tok) {
 
   cur->next = tok;
   return head.next;
+}
+
+bool macro_defined(char *name) {
+  return hashmap_get(&macros, name) != NULL;
+}
+
+// Every macro the unit ended with, as the "#define" lines that would recreate
+// it. Written out by the generator of the welded table, which has to know what a
+// header leaves behind as well as what it declares.
+static void print_macro_body(FILE *out, Token *tok) {
+  for (Token *t = tok; t && t->kind != TK_EOF; t = t->next)
+    fprintf(out, " %.*s", t->len, t->loc);
+}
+
+void dump_macros(FILE *out) {
+  for (int i = 0; i < macros.capacity; i++) {
+    HashEntry *e = &macros.buckets[i];
+    if (!e->key)
+      continue;
+
+    Macro *m = e->val;
+    // __FILE__ and friends compute their value from where they are used: there
+    // is no body to write down.
+    if (m->handler)
+      continue;
+
+    fprintf(out, "#define %s", m->name);
+    if (!m->is_objlike) {
+      fprintf(out, "(");
+      for (MacroParam *p = m->params; p; p = p->next)
+        fprintf(out, "%s%s", p == m->params ? "" : ", ", p->name);
+      if (m->va_args_name)
+        fprintf(out, "%s...", m->params ? ", " : "");
+      fprintf(out, ")");
+    }
+    print_macro_body(out, m->body);
+    fprintf(out, "\n");
+  }
 }
 
 void define_macro(char *name, char *buf) {
@@ -1248,6 +1503,7 @@ static void join_adjacent_string_literals(Token *tok) {
 
 // Entry point function of the preprocessor.
 Token *preprocess(Token *tok) {
+  weld_reset();
   tok = preprocess2(tok);
   if (cond_incl)
     error_tok(cond_incl->tok, "unterminated conditional directive");

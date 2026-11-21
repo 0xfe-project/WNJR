@@ -87,6 +87,12 @@ struct Token {
   bool has_space;   // True if this token follows a space character
   Hideset *hideset; // For macro expansion
   Token *origin;    // If this is expanded from a macro, the original token
+  // True for a token that came out of a welded header (weld.h), which is text
+  // produced by this compiler's own preprocessor at build time. Such a token is
+  // already expanded, so preprocess2 must neither expand it as a macro nor read
+  // it as a directive: a macro defined after the header was welded would
+  // otherwise rewrite a name the header had already resolved.
+  bool is_welded;
 };
 
 noreturn void error(char *fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -102,6 +108,9 @@ File *new_file(char *name, int file_no, char *contents);
 Token *tokenize_string_literal(Token *tok, Type *basety);
 Token *tokenize(File *file);
 Token *tokenize_file(char *filename);
+// Tokenize text this compiler carries rather than a file on disk: the same
+// canonicalisation a file gets, without reading one.
+Token *tokenize_text(char *name, char *contents);
 
 #define unreachable() \
   error("internal error at %s:%d", __FILE__, __LINE__)
@@ -114,7 +123,30 @@ char *search_include_paths(char *filename);
 void init_macros(void);
 void define_macro(char *name, char *buf);
 void undef_macro(char *name);
+bool macro_defined(char *name);
+// Tell the preprocessor that the command line named a macro: a name beginning
+// with "_" is how a program asks a header for a different configuration, and a
+// welded header was expanded under the default one.
+void weld_note_cmdline_macro(char *name);
+// Every macro a unit ends with, as the "#define" lines that would recreate it.
+// The generator of the welded table uses this to learn what a header leaves
+// behind; nothing else does.
+void dump_macros(FILE *out);
 Token *preprocess(Token *tok);
+
+// Whether an #include may be answered from the welded table (weld.h) instead of
+// opening the file. --no-weld turns it off, and the tests use that to compare
+// the two paths.
+extern bool weld_enabled;
+// Whether to mark where each included file begins and ends in the output. The
+// generator of the welded table needs the boundary: the table stores what a
+// header adds on its own, which is its text minus the text of the headers it
+// includes, and nothing in a flat token stream says where one ends.
+extern bool opt_weld_tree;
+// How many includes this run answered from the table, and how many it declined
+// because the unit had already defined a macro of its own.
+extern int weld_hits;
+extern int weld_misses;
 
 //
 // parse.c
@@ -132,6 +164,13 @@ struct Obj {
 
   // Local variable
   int offset;
+  // Set when this variable has to keep a place in the frame instead of living in
+  // a wasm local -- which is a register. Three reasons put it there: its address
+  // is taken anywhere in the function (whatever took it keeps pointing at that
+  // memory), its type is not one machine word that can be read and written whole,
+  // or it is a frame object codegen addresses directly.
+  // Decided once on the AST, by mark_escapes() in parse.c.
+  bool in_frame;
 
   // Global variable or function
   bool is_function;
@@ -388,6 +427,9 @@ int64_t const_expr(Token **rest, Token *tok);
 // Parses one translation unit. `tu` numbers it within the program: a file-scope
 // static is private to its unit, so the number is part of what a name means.
 Obj *parse(Token *tok, int tu);
+// Marks the local variables of `fn` whose address escapes. Runs at the end of
+// parsing the body, so both the AST dump and code generation see the answer.
+void mark_escapes(Obj *fn);
 
 //
 // type.c
@@ -552,6 +594,16 @@ void hashmap_test(void);
 bool file_exists(char *path);
 
 extern StringArray include_paths;
+
+// Every file this run of the front end reads, or would have read: the unit
+// itself first, then each header in the order the preprocessor reached it.
+// A header that an include guard or "#pragma once" skipped is still a
+// dependency, because the guard is what decided to skip it; include_file
+// records before it looks at either. Two consumers need this list: the
+// per-unit cache (a header changing must invalidate the cached unit) and the
+// link step (a unit's dependencies are what has to exist before it).
+extern StringArray deps;
+void record_dep(char *path);
 extern bool opt_fpic;
 extern bool opt_fcommon;
 extern char *base_file;

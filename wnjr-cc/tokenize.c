@@ -805,6 +805,23 @@ static void convert_universal_chars(char *p) {
   *q = '\0';
 }
 
+// Text this compiler carries, put through the same canonicalisation a file gets.
+// The contents are copied first: canonicalisation rewrites in place, and the
+// table the text comes from is read-only.
+Token *tokenize_text(char *name, char *contents) {
+  char *p = strdup(contents);
+
+  // UTF-8 texts may start with a 3-byte "BOM" marker sequence, as a file may.
+  if (!memcmp(p, "\xef\xbb\xbf", 3))
+    p += 3;
+
+  canonicalize_newline(p);
+  remove_backslash_newline(p);
+  convert_universal_chars(p);
+
+  return tokenize(new_file(name, 0, p));
+}
+
 Token *tokenize_file(char *path) {
   char *p = read_file(path);
   if (!p)

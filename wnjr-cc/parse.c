@@ -2226,6 +2226,21 @@ static Node *to_assign(Node *binary) {
   add_type(binary->rhs);
   Token *tok = binary->tok;
 
+  // A plain local variable needs no pointer to be assigned twice: naming it again
+  // costs nothing and has no side effect, so "A op= B" is directly "A = A op B".
+  // The general form takes A's address into a temporary, which is what makes the
+  // variable look like one whose address escapes -- and it would then have to stay
+  // in the frame for no reason. "++x", "x += 1" and "x = x + 1" all arrive here.
+  Type *lt = binary->lhs->ty;
+  if (binary->lhs->kind == ND_VAR && binary->lhs->var->is_local &&
+      lt->kind != TY_STRUCT && lt->kind != TY_UNION && lt->kind != TY_ARRAY &&
+      lt->kind != TY_VLA && !lt->is_atomic) {
+    Node *again = new_var_node(binary->lhs->var, tok);
+    again->ty = binary->lhs->ty;
+    return new_binary(ND_ASSIGN, binary->lhs,
+                      new_binary(binary->kind, again, binary->rhs, tok), tok);
+  }
+
   // Convert `A.x op= C` to `tmp = &A, (*tmp).x = (*tmp).x op C`.
   if (binary->lhs->kind == ND_MEMBER) {
     Obj *var = new_lvar("", pointer_to(binary->lhs->lhs->ty));
@@ -3959,7 +3974,77 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
   fn->locals = locals;
   leave_scope();
   resolve_goto_labels();
+  mark_escapes(fn);
   return tok;
+}
+
+// ─────────────────────── address escape ───────────────────────
+
+// A variable whose address the program can see has to keep living in the frame:
+// whatever took that address keeps pointing at that memory. One whose address no
+// one takes is only ever a value.
+//
+// The walk runs over the whole body before anything is generated, and it answers
+// conservatively: what it cannot see through stays escaped. Being wrong in that
+// direction costs the optimization and nothing else.
+//
+// C hands out the address of a declared object in exactly one way, "&", and the
+// lowerings in this file that need an address (compound assignment, ++/--, the
+// atomic builtins, VLA allocation) all build an ND_ADDR node, so the walk sees
+// those too.
+static void note_escapes(Node *node);
+
+static void note_escapes_list(Node *node) {
+  for (; node; node = node->next)
+    note_escapes(node);
+}
+
+static void note_escapes(Node *node) {
+  if (!node)
+    return;
+
+  if (node->kind == ND_ADDR && node->lhs && node->lhs->kind == ND_VAR &&
+      node->lhs->var && node->lhs->var->is_local)
+    node->lhs->var->in_frame = true;
+
+  note_escapes(node->lhs);
+  note_escapes(node->rhs);
+  note_escapes(node->cond);
+  note_escapes(node->then);
+  note_escapes(node->els);
+  note_escapes(node->init);
+  note_escapes(node->inc);
+  note_escapes(node->cas_addr);
+  note_escapes(node->cas_old);
+  note_escapes(node->cas_new);
+  note_escapes(node->atomic_expr);
+  note_escapes_list(node->body);
+  note_escapes_list(node->args);
+}
+
+void mark_escapes(Obj *fn) {
+  if (!fn->body)
+    return;
+
+  note_escapes(fn->body);
+
+  for (Obj *var = fn->locals; var; var = var->next) {
+    Type *ty = var->ty;
+    // A variable this compiler cannot hand to a wasm local: an aggregate or an
+    // array is a place by definition and never a value, a variable-length array's
+    // storage is chosen at run time, an atomic one is only touched through memory
+    // (that is what makes it atomic), and a narrow integer is stored through a
+    // store of its own width, which is where its truncation happens -- a wasm
+    // local of the word size would lose it.
+    if (ty->kind == TY_STRUCT || ty->kind == TY_UNION || ty->kind == TY_ARRAY ||
+        ty->kind == TY_VLA || ty->is_atomic ||
+        (ty->size != 4 && ty->size != 8))
+      var->in_frame = true;
+    // The objects the compiler builds for itself are read and written through
+    // addresses codegen constructs directly, never by naming them.
+    if (var == fn->va_area || var == fn->va_buf || var == fn->alloca_bottom)
+      var->in_frame = true;
+  }
 }
 
 static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
