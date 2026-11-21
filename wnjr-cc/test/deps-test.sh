@@ -39,8 +39,10 @@ bad() { fail=$((fail + 1)); echo "[FAIL] $1"; [ -n "${2:-}" ] && echo "       $2
 # Run --deps on a unit; the list lands in $work/out.
 deps() { "$cc" --deps "$1" > "$work/out" 2> "$work/err" || { cat "$work/err" >&2; return 1; }; }
 
-# The path the list should carry for a file: absolute, symlinks resolved.
-real_of() { ( cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")" ); }
+# The path the list should carry for a file: the way it was given, with "." and
+# ".." collapsed. Symbolic links are not followed -- that would take readlink,
+# which this compiler does not link against -- so "pwd" here and not "pwd -P".
+real_of() { ( cd "$(dirname "$1")" && printf '%s/%s\n' "$(pwd)" "$(basename "$1")" ); }
 
 # --- 1. a bare unit depends on nothing but itself -----------------------------
 
@@ -142,7 +144,12 @@ else
   bad "diamond unit: --deps failed"
 fi
 
-# --- 5. every line is a path that exists, and no line repeats -----------------
+# --- 5. every line is a path that resolves, and no line repeats ---------------
+#
+# The list carries the paths the search spelled, collapsed but not made absolute:
+# an absolute path would take getcwd, and the compiler built by itself runs
+# against a libc whose getcwd has never worked. A relative entry is resolved from
+# the directory this script runs in, which is where a build runs.
 
 for unit in "$work/bare.c" "$work/stdio.c" "$work/dead.c" "$work/diamond/diamond.c"; do
   [ -f "$unit" ] || continue
@@ -156,11 +163,11 @@ for unit in "$work/bare.c" "$work/stdio.c" "$work/dead.c" "$work/diamond/diamond
   while IFS= read -r p; do
     case "$p" in
       /*) [ -e "$p" ] || missing="$p (missing)";;
-      *)  missing="$p (not absolute)";;
+      *)  [ -e "$root/$p" ] || missing="$p (missing)";;
     esac
   done < "$work/out"
-  [ -z "$missing" ] && ok "$name: every entry is an absolute path that exists" \
-                    || bad "$name: every entry is an absolute path that exists" "$missing"
+  [ -z "$missing" ] && ok "$name: every entry resolves" \
+                    || bad "$name: every entry resolves" "$missing"
 done
 
 echo

@@ -25,6 +25,64 @@
 #include "chibicc.h"
 #include "weld.h"
 
+// One file, one entry. A header is reached through the search path and musl's
+// wrappers reach the next one with "#include_next", so the same file arrives
+// spelled more than one way: "./a/../b/x.h" and "b/x.h" are the same file.
+//
+// This collapses "." and ".." and runs of slashes, and stops there. Following
+// symbolic links would take readlink, which this program links against its own
+// libc to get and does not have; two spellings that differ only by a link cost
+// one extra line in the list, not a wrong answer.
+static const char *collapse_path(const char *path) {
+  static char out[4096];
+  size_t n = 0;
+  bool absolute = path[0] == '/';
+  size_t floor = absolute ? 1 : 0;
+
+  if (absolute)
+    out[n++] = '/';
+
+  for (const char *p = path; *p;) {
+    while (*p == '/')
+      p++;
+    if (!*p)
+      break;
+    const char *seg = p;
+    while (*p && *p != '/')
+      p++;
+    size_t len = (size_t)(p - seg);
+
+    if (len == 1 && seg[0] == '.')
+      continue;
+
+    if (len == 2 && seg[0] == '.' && seg[1] == '.') {
+      if (n > floor) {
+        if (out[n - 1] == '/')
+          n--;
+        while (n > floor && out[n - 1] != '/')
+          n--;
+        continue;
+      }
+      // "/.." is "/". A relative path can walk above where it started, and what
+      // is up there is not this function's to know, so the ".." stays literal.
+      if (absolute)
+        continue;
+    }
+
+    if (n > 0 && out[n - 1] != '/')
+      out[n++] = '/';
+    if (n + len >= sizeof(out))
+      return path; // longer than this can hold: leave it spelled as it came
+    memcpy(out + n, seg, len);
+    n += len;
+  }
+
+  if (n == 0)
+    out[n++] = '.';
+  out[n] = '\0';
+  return out;
+}
+
 typedef struct MacroParam MacroParam;
 struct MacroParam {
   MacroParam *next;
@@ -804,16 +862,17 @@ static char *detect_include_guard(Token *tok) {
 // The same header is reached under more than one spelling, because a musl
 // wrapper is "#include_next <stdio.h>" and the search path that reaches it
 // spells the way there differently. One file must appear once, so the list
-// holds resolved paths: realpath collapses "." and ".." and follows symlinks,
-// which is also what a later content hash needs (editing through a symlink
-// must change the entry).
+// holds collapsed paths.
 void record_dep(char *path) {
   static HashMap seen;
   if (path[0] == '\0')
     return;
 
-  static char resolved[4096];
-  char *key = realpath(path, resolved) ? resolved : path;
+  // The path is kept the way the search path spelled it, only collapsed. Making
+  // it absolute would take getcwd, and the compiler built by itself runs against
+  // a libc whose getcwd has never been exercised -- it is one more thing that can
+  // be wrong, to buy a prefix every reader already knows.
+  char *key = (char *)collapse_path(path);
   if (hashmap_get(&seen, key))
     return;
   hashmap_put(&seen, format("%s", key), (void *)1);
