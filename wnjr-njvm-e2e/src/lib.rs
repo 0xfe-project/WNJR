@@ -240,14 +240,27 @@ pub fn result_kinds(module: &Module, export: &str) -> Result<Vec<Kind>, String> 
 /// translation unit's functions one after another. With `fresh_per_call` every
 /// call gets its own instance instead.
 /// The imports a frontend module may name with `#pragma njvm import`: the wasi
-/// snapshot the CLI gives every module. argv is fixed so that a test reading it
-/// gets the same answer on every run.
-fn wasi_imports() -> std::vec::Vec<wnjr_core::Import> {
-    // A preopen of the working directory, so a case can open, stat and read a
-    // file the harness wrote beside it: without one, a libc's whole path layer
-    // is unreachable and "close enough" testing stops at printf.
+/// snapshot the CLI gives every module.
+///
+/// `guest_args` is what the module's `args_get` returns. It is fixed by default
+/// so that a test reading argv gets the same answer on every run; a caller that
+/// runs a *program* (a compiler reading its own command line) passes what that
+/// program was given.
+fn wasi_imports(guest_args: &[String]) -> std::vec::Vec<wnjr_core::Import> {
+    let argv: std::vec::Vec<String> = if guest_args.is_empty() {
+        vec!["njvm-run".to_string()]
+    } else {
+        guest_args.to_vec()
+    };
+    // The working directory, at the guest's root. Only this one: a second
+    // preopen of the host root is not composable with it, because wasi-libc
+    // registers a preopen by its prefix after stripping leading "/" and "./"
+    // (preopens.c, strip_prefixes), so "." and "/" both become the empty prefix
+    // and the first registration wins -- mounting "/" after "." silently sends
+    // every relative path to the host root. A guest therefore sees the working
+    // directory as "/", which is what a shell's cwd means to a program anyway.
     let ctx = wnjr_wasi::WasiContextBuilder::new()
-        .args(["njvm-run"])
+        .args(argv)
         .preopen_dir(".", std::path::Path::new("."))
         .build();
     wnjr_wasi::wasi_imports_with_config(ctx, None)
@@ -257,6 +270,7 @@ pub fn run_wnjr_sequence(
     bytes: &[u8],
     calls: &[(String, Vec<Arg>)],
     fresh_per_call: bool,
+    guest_args: &[String],
 ) -> Result<Vec<Outcome>, String> {
     let engine = Engine::new(Config::new()).map_err(|e| format!("engine: {e:?}"))?;
     let mut out = Vec::new();
@@ -266,7 +280,7 @@ pub fn run_wnjr_sequence(
     for (export, args) in calls {
         if live.is_none() {
             let mut world = RuntimeWorld::new();
-            let imports = wasi_imports();
+            let imports = wasi_imports(guest_args);
             let id = world.instantiate(&engine, parsed.clone(), &imports).map_err(|e| format!("WNJR instantiate: {e:?}"))?;
             live = Some((world, id));
         }
@@ -295,7 +309,13 @@ pub fn run_wnjr_sequence(
     Ok(out)
 }
 
-pub fn run_wnjr(bytes: &[u8], export: &str, inputs: &[Vec<Arg>], stateless: bool) -> Result<Vec<Outcome>, String> {
+pub fn run_wnjr(
+    bytes: &[u8],
+    export: &str,
+    inputs: &[Vec<Arg>],
+    stateless: bool,
+    guest_args: &[String],
+) -> Result<Vec<Outcome>, String> {
     // `stateless` is the case's own flag, and it reads backwards: the bun runner
     // builds a fresh instance per input for every case (bun/runner.js: "so memory
     // and globals start identical on every host"), so a case that is *not*
@@ -303,7 +323,7 @@ pub fn run_wnjr(bytes: &[u8], export: &str, inputs: &[Vec<Arg>], stateless: bool
     // stateless case may reuse one instance, which no case asks for yet — it
     // would stop matching bun.
     let calls: Vec<(String, Vec<Arg>)> = inputs.iter().map(|a| (export.to_string(), a.clone())).collect();
-    run_wnjr_sequence(bytes, &calls, !stateless)
+    run_wnjr_sequence(bytes, &calls, !stateless, guest_args)
 }
 /// One module to run on a host.
 pub struct Job {
@@ -524,7 +544,7 @@ pub fn wnjr_runner_main() -> Result<(), String> {
                 .iter()
                 .map(|a| a.as_array().ok_or("input is not an array".to_string())?.iter().map(Arg::from_json).collect::<Result<Vec<_>, _>>())
                 .collect::<Result<Vec<_>, _>>()?;
-            run_wnjr(&bytes, export, &inputs, job["stateless"].as_bool().unwrap_or(false))
+            run_wnjr(&bytes, export, &inputs, job["stateless"].as_bool().unwrap_or(false), &[])
         })();
         let json = match line {
             Ok(outs) => serde_json::json!({ "outs": outs.iter().map(outcome_to_json).collect::<Vec<_>>() }),
