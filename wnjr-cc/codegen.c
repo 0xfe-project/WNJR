@@ -50,10 +50,10 @@
 // locals and recursion, and the check above turns anything past it into a trap
 // instead of a corrupted heap.
 //
-// The one limit a big *local* initialiser still meets is wasm's: each element's
-// store costs a temporary of its own, one wasm local each, and a function may
-// declare fifty thousand. A few thousand elements is where that starts. Static
-// arrays are unaffected — theirs is data, not code.
+// A big *local* initialiser meets no limit of its own now: it cost two wasm
+// locals per element until temporaries were handed back (temp_mark), and a
+// function may declare fifty thousand. Static arrays never had the problem —
+// theirs is data, not code.
 #define MEMORY_PAGES 256
 #define MEMORY_END ((uint64_t)MEMORY_PAGES * 65536)
 #define GLOBAL_BASE 0x1000
@@ -73,6 +73,12 @@ static uint32_t next_label;
 // Locals of the function being generated: params first, then temporaries.
 static const char **local_ty;
 static int nlocals;
+// Temporaries that were handed back, waiting to be used again, and the ones
+// still holding a value, in the order they were made. See temp_mark().
+static int *temp_dead;
+static int ntemp_dead, cap_temp_dead;
+static int *temp_live;
+static int ntemp_live, cap_temp_live;
 static int local_cap;
 static int nparams;
 
@@ -175,6 +181,7 @@ static noreturn void error_obj(Obj *var, const char *msg) {
 }
 
 static void gen_stmt(Node *node);
+static void gen_stmt_inner(Node *node);
 static E *gen_expr(Node *node);
 
 // ───────────────────────── types ─────────────────────────
@@ -547,6 +554,8 @@ static uint32_t sig_of(Token *tok, Type *fnty) {
 static void reset_locals(void) {
   nlocals = 0;
   nparams = 0;
+  ntemp_dead = 0;
+  ntemp_live = 0;
 }
 
 static int add_local(const char *ty) {
@@ -562,8 +571,62 @@ static int add_local(const char *ty) {
 
 static E *as_type(E *e, const char *want);
 
+// A temporary is a wasm local of its own, and a local's type is fixed for the
+// whole function, so a slot is only handed back to the same type: handing it to
+// a different one would leave the emitted locals array claiming the wrong type
+// for an instruction that uses it.
+static void temp_grow(int **v, int *cap) {
+  *cap = *cap ? *cap * 2 : 64;
+  *v = realloc(*v, (size_t)*cap * sizeof(**v));
+  if (!*v)
+    error("out of memory");
+}
+
 static int new_temp(const char *ty) {
-  return add_local(ty);
+  // An index of the same type that was handed back, if there is one.
+  for (int i = ntemp_dead - 1; i >= 0; i--) {
+    int l = temp_dead[i];
+    if (strcmp(local_ty[l], ty))
+      continue;
+    temp_dead[i] = temp_dead[--ntemp_dead];
+    if (ntemp_live == cap_temp_live)
+      temp_grow(&temp_live, &cap_temp_live);
+    temp_live[ntemp_live++] = l;
+    return l;
+  }
+  int l = add_local(ty);
+  if (ntemp_live == cap_temp_live)
+    temp_grow(&temp_live, &cap_temp_live);
+  temp_live[ntemp_live++] = l;
+  return l;
+}
+
+// Where the temporaries stand right now. Everything made after this point is
+// dead once the value it was made for has been dropped, and temp_release() hands
+// those locals back to be used again.
+//
+// Without this a function's local count grew with the *source* instead of with
+// the nesting of its expressions: one temporary for the address of a store and
+// one for the value it leaves behind, per element of an initializer, per
+// statement of a body. "int t[20000] = {...}" is one statement and twenty
+// thousand stores, so it asked for forty thousand locals, and wasm allows fifty
+// thousand in a function -- the module was refused at instantiation rather than
+// compiled slowly. The statement is not the only mark: a comma expression drops
+// each part in turn, so an initializer of any size now costs what one element
+// costs, and its depth instead of its length.
+static int temp_mark(void) {
+  return ntemp_live;
+}
+
+static void temp_release(int mark) {
+  if (mark < 0)
+    mark = 0;
+  while (ntemp_live > mark) {
+    int l = temp_live[--ntemp_live];
+    if (ntemp_dead == cap_temp_dead)
+      temp_grow(&temp_dead, &cap_temp_dead);
+    temp_dead[ntemp_dead++] = l;
+  }
 }
 
 // base + byte offset, in the type the base already has: a frame address and a
@@ -1786,9 +1849,11 @@ static E *gen_expr(Node *node) {
   }
 
   case ND_COMMA: {
+    int mark = temp_mark();
     E *a = gen_expr(node->lhs);
     OP(nj_op_drop(out, a));
     e_free(a);
+    temp_release(mark);
     return gen_expr(node->rhs);
   }
 
@@ -1819,7 +1884,18 @@ static E *gen_expr(Node *node) {
 
 // ───────────────────────── statements ─────────────────────────
 
+// Every statement is a place a temporary stops being readable: its value is gone
+// by the time the next one starts, and this codegen hands each temporary a wasm
+// local it never takes back (see temp_mark). A body of twenty thousand
+// statements was twenty thousand pairs of locals for the same reason an
+// initializer was, so the mark belongs here and not only on the comma chain.
 static void gen_stmt(Node *node) {
+  int mark = temp_mark();
+  gen_stmt_inner(node);
+  temp_release(mark);
+}
+
+static void gen_stmt_inner(Node *node) {
   if (!node)
     return;
   cur_tok = node->tok;
@@ -2289,9 +2365,6 @@ static void emit_function(Obj *fn) {
   fields++;
 
   mp_key(out, "locals");
-  if (getenv("WNJRCC_LOCALS"))
-    fprintf(stderr, "TRACE %s: nparams=%d nlocals=%d l30=%s l27=%s\n", fn->name, nparams, nlocals,
-            nlocals > 30 ? local_ty[30] : "-", nlocals > 27 ? local_ty[27] : "-");
   emit_type_array(local_ty + nparams, nlocals - nparams);
   fields++;
 
