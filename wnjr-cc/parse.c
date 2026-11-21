@@ -324,6 +324,7 @@ static Obj *new_var(char *name, Type *ty) {
   var->name = name;
   var->ty = ty;
   var->align = ty->align;
+  var->promoted = -1;
   push_scope(name)->var = var;
   return var;
 }
@@ -3994,6 +3995,46 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
 // those too.
 static void note_escapes(Node *node);
 
+// Set when "&x" is added to or subtracted from something. The result is an
+// address C does not tie to x's object: "&x + 1" may point at whatever the
+// compiler put after x, and nothing promises that is x's own storage. Once one
+// of those exists, every variable of the function is reachable through it, so
+// none of them may leave the frame.
+//
+// chibicc's own suite leans on exactly that: "int x = 3, y = 5; *(&x + 1)" is
+// asserted to see y. It is not C -- clang -O0 prints 0 for the same program and
+// clang -O1 prints garbage -- but keeping it costs one function's promotion and
+// nothing else, since code that never does pointer arithmetic on a local's
+// address is the code that matters.
+static bool addr_in_arithmetic;
+
+// The other way a variable's address leaves: not "&x" but an assignment whose
+// left side is not a name. "(a, b) = 5" stores through b, and code generation
+// gets there by asking for the address the expression designates -- so b is
+// handed out. A conditional is the same. A member or a dereference is not: the
+// memory it designates was settled somewhere else, so the walk stops there.
+static void note_place(Node *node) {
+  if (!node)
+    return;
+  switch (node->kind) {
+  case ND_VAR:
+    if (node->var && node->var->is_local)
+      node->var->in_frame = true;
+    return;
+  case ND_COMMA:
+    note_place(node->lhs);
+    note_place(node->rhs);
+    return;
+  case ND_COND:
+    note_place(node->then);
+    note_place(node->els);
+    return;
+  default:
+    note_escapes(node);
+    return;
+  }
+}
+
 static void note_escapes_list(Node *node) {
   for (; node; node = node->next)
     note_escapes(node);
@@ -4003,9 +4044,16 @@ static void note_escapes(Node *node) {
   if (!node)
     return;
 
-  if (node->kind == ND_ADDR && node->lhs && node->lhs->kind == ND_VAR &&
-      node->lhs->var && node->lhs->var->is_local)
-    node->lhs->var->in_frame = true;
+  if ((node->kind == ND_ADD || node->kind == ND_SUB) &&
+      ((node->lhs && node->lhs->kind == ND_ADDR) ||
+       (node->rhs && node->rhs->kind == ND_ADDR)))
+    addr_in_arithmetic = true;
+
+  if (node->kind == ND_ADDR || (node->kind == ND_ASSIGN && node->lhs &&
+                                node->lhs->kind != ND_VAR &&
+                                node->lhs->kind != ND_MEMBER &&
+                                node->lhs->kind != ND_DEREF))
+    note_place(node->kind == ND_ADDR ? node->lhs : node->lhs);
 
   note_escapes(node->lhs);
   note_escapes(node->rhs);
@@ -4026,10 +4074,13 @@ void mark_escapes(Obj *fn) {
   if (!fn->body)
     return;
 
+  addr_in_arithmetic = false;
   note_escapes(fn->body);
 
   for (Obj *var = fn->locals; var; var = var->next) {
     Type *ty = var->ty;
+    if (addr_in_arithmetic)
+      var->in_frame = true;
     // A variable this compiler cannot hand to a wasm local: an aggregate or an
     // array is a place by definition and never a value, a variable-length array's
     // storage is chosen at run time, an atomic one is only touched through memory

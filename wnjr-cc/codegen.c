@@ -792,6 +792,13 @@ static E *to_temp(E *e) {
 static E *gen_addr(Node *node) {
   switch (node->kind) {
   case ND_VAR:
+    // A promoted variable has no frame address: its storage is a wasm local. The
+    // escape analysis is what decides that no one can ask for one, so getting
+    // here means it let a use through -- an error, not a wrong answer.
+    if (node->var->is_local && node->var->promoted >= 0)
+      error_tok(node->tok,
+                "internal error: the address of %s was taken but it was promoted",
+                node->var->name);
     // A variable-length array's object is a local slot that holds the address of
     // the region alloca handed out, so the place its name designates is what the
     // slot points at, not the slot itself.
@@ -1733,6 +1740,10 @@ static E *gen_expr(Node *node) {
   case ND_VAR:
   case ND_MEMBER:
   case ND_DEREF: {
+    // A promoted variable is a wasm local: reading it is a register read, with no
+    // address to compute and no memory in between.
+    if (node->kind == ND_VAR && node->var->is_local && node->var->promoted >= 0)
+      return e_local((uint32_t)node->var->promoted, local_ty[node->var->promoted]);
     E *addr = gen_addr(node);
     if (is_addr_value(node->ty))
       return addr; // an array, struct or function is its address
@@ -1756,6 +1767,21 @@ static E *gen_expr(Node *node) {
       e_free(src);
       return dst;
     }
+    // A promoted variable is assigned through its own wasm local: the same
+    // snapshot, without the address arithmetic and the store.
+    if (node->lhs->kind == ND_VAR && node->lhs->var->is_local &&
+        node->lhs->var->promoted >= 0) {
+      int p = node->lhs->var->promoted;
+      E *val = gen_expr(node->rhs);
+      int t = new_temp(val->ty);
+      set_local((uint32_t)t, val);
+      e_free(val);
+      // The declaration's type is the slot's type, and a wasm local keeps it, so
+      // a narrower value is widened here the way the store used to do it.
+      set_local((uint32_t)p, as_type(e_local((uint32_t)t, local_ty[t]), local_ty[p]));
+      return e_local((uint32_t)t, local_ty[t]);
+    }
+
     // The value of an assignment is a snapshot of what was stored, taken before
     // the store: parse.c's compound-assignment lowering re-reads the lvalue from
     // its own value expression, so returning the tree would read the *new*
@@ -2256,6 +2282,27 @@ static void emit_function(Obj *fn) {
   if (takes_varargs(fn->ty))
     va_param = add_local(PTR_TY);
   nparams = nlocals;
+
+  // A variable the escape analysis proved no one can reach through memory is a
+  // value, and a value belongs in a wasm local -- which is a register. Reading
+  // one was "compute its frame address, load" and writing one was "compute its
+  // frame address, store"; this is that variable's storage.
+  //
+  // A parameter is already a wasm local: promoting it costs nothing more than
+  // naming that slot, and the prologue then has nothing to copy into the frame.
+  // Everything else gets a slot here, before any temporary is made, so
+  // temp_release() -- which only ever hands back what it handed out -- cannot
+  // take one away.
+  for (Obj *var = fn->locals; var; var = var->next)
+    var->promoted = -1;
+  int pi = arg_base;
+  for (Obj *p = first_param; p; p = p->next, pi++)
+    if (!p->in_frame && !is_aggregate(p->ty))
+      p->promoted = pi;
+  for (Obj *var = fn->locals; var; var = var->next)
+    if (!var->in_frame && var->promoted < 0)
+      var->promoted = add_local(ir_ty(var->ty));
+
   fp_local = new_temp(PTR_TY);
 
   int f = mp_begin_map(out);
@@ -2297,7 +2344,8 @@ static void emit_function(Obj *fn) {
       // temporary.
       OP(nj_op_memorycopy(out, frame_addr(p->offset), e_local((uint32_t)i, local_ty[i]),
                           e_i32(p->ty->size)));
-    } else {
+    } else if (p->promoted < 0) {
+      // A promoted parameter is already where it belongs, so there is no copy.
       OP(nj_op_store(out, mem_ty(p->ty), frame_addr(p->offset),
                      store_value(e_local((uint32_t)i, local_ty[i]), mem_ty(p->ty)), 0, 0));
     }

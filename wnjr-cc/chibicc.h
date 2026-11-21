@@ -171,6 +171,10 @@ struct Obj {
   // or it is a frame object codegen addresses directly.
   // Decided once on the AST, by mark_escapes() in parse.c.
   bool in_frame;
+  // The wasm local that holds this variable instead of a frame slot, or -1 when
+  // it still lives in the frame. Assigned by emit_function in codegen.c, which
+  // is the only place that knows a function's local numbering.
+  int promoted;
 
   // Global variable or function
   bool is_function;
