@@ -1,4 +1,6 @@
 target
+# what wnjr-cc/test/bootstrap.sh builds
+.bootstrap/
 /tmp
 __pycache__/
 *.py[cod]

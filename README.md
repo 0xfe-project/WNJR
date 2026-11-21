@@ -70,7 +70,16 @@ wnjr-cc/wcc -o prog.njvm prog.c   # IR as MessagePack
 ./target/debug/njvm-run prog.njvm main             # read, lower, run on WNJR
 make -C wnjr-cc test                              # -E and --dump-ast vs chibicc
 wnjr-cc/test/e2e.sh                               # C -> IR -> WNJR vs the host cc
+wnjr-cc/test/bootstrap.sh                         # wcc builds itself, on WNJR
 ```
+
+**It compiles itself.** `test/bootstrap.sh` compiles the compiler's own
+translation units and the whole libc into one NJVM module — 274 files, 14.4 MB
+of module — and then runs that module *on WNJR* to compile the same sources
+again. The module wcc emits and the module the compiler built by wcc emits are
+the same bytes; a second generation reproduces them a third time. So the
+compiler that builds the compiler is a wasm program running on this engine, and
+it agrees with the native one byte for byte.
 
 Every C object lives in linear memory at a frame-relative address (the
 prologue sets `fp = sp - frame_size`, `sp = fp`; each `return` restores it), so
