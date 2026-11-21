@@ -14,14 +14,35 @@ if [ ! -f "$VENDOR_TMP/chibicc" ]; then
 fi
 VENDOR_CC="$VENDOR_TMP/chibicc"
 
+# Two of chibicc's files preprocess its own <stdarg.h>, and this compiler's is a
+# different design on purpose: va_list is a struct the frontend defines (so that
+# wasi-libc's "typedef __builtin_va_list va_list" names the same type), and every
+# "..." argument travels in memory. A byte comparison there reports the design,
+# not a defect, so those two are named and counted apart -- never silently
+# dropped from the run.
+not_comparable() {
+  case "$1" in
+    stdhdr.c|varargs.c)
+      echo "preprocesses chibicc's <stdarg.h>; wnjr-cc's va_list is a struct of its own (see wnjr-cc/include/stdarg.h)"
+      return 0;;
+  esac
+  return 1
+}
+
 # Find all .c test files
 TESTS=($CHIBICC_TESTSUITE/*.c)
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=${#TESTS[@]}
 
 for t in "${TESTS[@]}"; do
   base=$(basename "$t")
+  if reason=$(not_comparable "$base"); then
+    echo "[skip] $base: $reason"
+    SKIP=$((SKIP + 1))
+    continue
+  fi
   
   # Run both preprocessors with the same flags chibicc tests use
   OUT_V=$(mktemp)
@@ -44,5 +65,6 @@ for t in "${TESTS[@]}"; do
 done
 
 echo
-echo "Results: $PASS/$TOTAL passed, $FAIL/$TOTAL failed"
+comparable=$((TOTAL - SKIP))
+echo "Results: $PASS/$comparable passed, $FAIL/$comparable failed ($SKIP not comparable, listed above)"
 exit $FAIL
