@@ -963,6 +963,19 @@ static E *gen_binary(Node *node) {
     a = as_type(a, ty);
     b = as_type(b, ty);
   }
+  // p - q is not an address: it is a signed count of elements, and the byte
+  // difference is negative whenever p sits below q. Subtracting two ptrs leaves
+  // the answer in 32 bits and the enclosing division then widens it as an
+  // address, i.e. zero-extended: (uint32_t*)p - (uint32_t*)q with p one below q
+  // became 1073741823 instead of -1, and musl's printf computed its decimal
+  // exponent from that and walked its digit buffer out of bounds. The addresses
+  // widen as unsigned, which is what an address is, and the subtraction happens
+  // in the 64 bits its C type (long) has.
+  if (node->kind == ND_SUB && !strcmp(ty, PTR_TY)) {
+    ty = "I64";
+    a = e_convert(PTR_TY, "I64", a);
+    b = e_convert(PTR_TY, "I64", b);
+  }
   E *e = e_new(E_BINARY, is_comparison(node->kind) ? "I32" : ty);
   e->op = binary_op_name(node->kind);
   e->op_ty = ty;
@@ -1132,6 +1145,23 @@ static uint32_t func_index(Obj *fn) {
   return (uint32_t)def->offset;
 }
 
+// What a "..." argument becomes before it is stored. C requires the default
+// argument promotions here (6.5.2.2p6): the callee has no parameter to say what
+// the argument is, so it reads an int or a double. A char or a short widens to
+// the four bytes of an int — sign-extended when it is signed, zero-extended when
+// it is unsigned, both of which fit in an int — and a float becomes a double.
+// Without this the caller wrote one byte of an eight-byte slot and left the rest
+// alone, so printf("%d", (char)-1) read three bytes of whatever had been stored
+// there before: this frontend printed its own --dump-ast data bytes as 5b904f
+// instead of 4f for exactly that reason.
+static Type *vararg_promoted(Type *ty) {
+  if (ty->kind == TY_FLOAT)
+    return ty_double;
+  if (is_integer(ty) && ty->size < 4)
+    return ty_int;
+  return ty;
+}
+
 // One "..." argument, stored into the caller's buffer at `off`. The callee reads
 // it back with va_arg, which walks the same slots in the same order: a slot is
 // rounded to eight bytes, and a wider alignment pads before it.
@@ -1228,10 +1258,19 @@ static E *gen_call(Node *node) {
     // Everything from here on goes through "...".
     if (!vb)
       unsupported(arg->tok, "an argument with no parameter to travel in");
-    int align = arg->ty->align < 8 ? 8 : arg->ty->align;
+    Type *pty = vararg_promoted(arg->ty);
+    if (pty != arg->ty) {
+      // Widen the value itself, not only the slot it lands in: to_narrow
+      // normalizes to the argument's own width and signedness in the i32 this
+      // frontend carries every integer in, and the float-to-double conversion
+      // goes through the IR.
+      val = is_integer(arg->ty) ? to_narrow(val, arg->ty)
+                                : e_convert("F32", "F64", val);
+    }
+    int align = pty->align < 8 ? 8 : pty->align;
     slot = align_to(slot, align);
-    store_va_arg(vb, slot, arg->ty, val);
-    slot += align_to(arg->ty->size, 8);
+    store_va_arg(vb, slot, pty, val);
+    slot += align_to(pty->size, 8);
     e_free(val);
   }
   if (variadic) {
