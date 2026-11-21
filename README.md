@@ -72,6 +72,7 @@ make -C wnjr-cc test                              # -E and --dump-ast vs chibicc
 wnjr-cc/test/e2e.sh                               # C -> IR -> WNJR vs the host cc
 wnjr-cc/test/bootstrap.sh                         # wcc builds itself, on WNJR
 wnjr-cc/test/bootstrap-emit.sh                     # and agrees with the native one, case by case
+wnjr-cc/test/init-large.sh                         # a 20000 element initializer inside a 256 KB stack
 ```
 
 **It compiles itself.** `test/bootstrap.sh` compiles the compiler's own

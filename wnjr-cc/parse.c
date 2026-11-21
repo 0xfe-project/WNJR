@@ -1415,25 +1415,51 @@ static Node *init_desg_expr(InitDesg *desg, Token *tok) {
   return new_unary(ND_DEREF, new_add(lhs, rhs, tok), tok);
 }
 
+// The parts of an initializer are joined with commas, and a comma expression says
+// one thing: evaluate the parts in order. It must not say it by being deep.
+// "int t[50000] = {...}" has one part per element, and every pass over the tree --
+// add_type, gen_expr, the dump -- recurses down the left spine, so a chain of one
+// link per element wants one stack frame per element: fifty thousand elements
+// crashed the compiler on a program that is legal C, both on the host and, with
+// the stack guard, as a trap on the guest. Folding pairs leaves the order alone
+// and makes the depth the logarithm of the count.
+static Node *comma_tree(Node **part, int n, Token *tok) {
+  while (n > 1) {
+    int m = 0;
+    for (int i = 0; i + 1 < n; i += 2)
+      part[m++] = new_binary(ND_COMMA, part[i], part[i + 1], tok);
+    if (n % 2)
+      part[m++] = part[n - 1];
+    n = m;
+  }
+  return n ? part[0] : new_node(ND_NULL_EXPR, tok);
+}
+
 static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token *tok) {
   if (ty->kind == TY_ARRAY) {
-    Node *node = new_node(ND_NULL_EXPR, tok);
-    for (int i = 0; i < ty->array_len; i++) {
+    int n = ty->array_len;
+    Node **part = calloc(n ? n : 1, sizeof(Node *));
+    for (int i = 0; i < n; i++) {
       InitDesg desg2 = {desg, i};
-      Node *rhs = create_lvar_init(init->children[i], ty->base, &desg2, tok);
-      node = new_binary(ND_COMMA, node, rhs, tok);
+      part[i] = create_lvar_init(init->children[i], ty->base, &desg2, tok);
     }
+    Node *node = comma_tree(part, n, tok);
+    free(part);
     return node;
   }
 
   if (ty->kind == TY_STRUCT && !init->expr) {
-    Node *node = new_node(ND_NULL_EXPR, tok);
-
-    for (Member *mem = ty->members; mem; mem = mem->next) {
+    int n = 0;
+    for (Member *mem = ty->members; mem; mem = mem->next)
+      n++;
+    Node **part = calloc(n ? n : 1, sizeof(Node *));
+    Member *mem = ty->members;
+    for (int i = 0; i < n; i++, mem = mem->next) {
       InitDesg desg2 = {desg, 0, mem};
-      Node *rhs = create_lvar_init(init->children[mem->idx], mem->ty, &desg2, tok);
-      node = new_binary(ND_COMMA, node, rhs, tok);
+      part[i] = create_lvar_init(init->children[mem->idx], mem->ty, &desg2, tok);
     }
+    Node *node = comma_tree(part, n, tok);
+    free(part);
     return node;
   }
 

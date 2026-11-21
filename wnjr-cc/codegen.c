@@ -39,12 +39,21 @@
 // under: without that an overflow walks into the data area, and the first sign
 // of it is a wrong answer far from where it happened.
 //
-// STACK_SIZE is not a guess about ordinary code. A large array initialiser is
-// parsed by recursing once per element (array_initializer2), so the depth scales
-// with the number of elements: musl's ctype tables need more than 256 KB, and
-// this program — the compiler and the whole libc — needs less than 1 MB. Four
-// megabytes is that with room to spare, and the check above turns anything past
-// it into a trap instead of a corrupted heap.
+// STACK_SIZE is headroom for the program this compiler writes, not a number the
+// compiler needs to survive its input. That was worth measuring twice: a big
+// array initialiser used to cost one stack frame per element (a left-deep comma
+// chain; create_lvar_init), so "int t[50000] = {...}" crashed the compiler and
+// the stack looked like the fix. It was not. The compiler compiles the whole of
+// itself and the libc — 274 files — inside 96 KB of stack, and an initialiser of
+// two hundred thousand elements does not change that (test/init-large.sh holds
+// it to 256 KB). Four megabytes is what a compiled program gets for its own
+// locals and recursion, and the check above turns anything past it into a trap
+// instead of a corrupted heap.
+//
+// The one limit a big *local* initialiser still meets is wasm's: each element's
+// store costs a temporary of its own, one wasm local each, and a function may
+// declare fifty thousand. A few thousand elements is where that starts. Static
+// arrays are unaffected — theirs is data, not code.
 #define MEMORY_PAGES 256
 #define MEMORY_END ((uint64_t)MEMORY_PAGES * 65536)
 #define GLOBAL_BASE 0x1000
