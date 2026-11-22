@@ -1,0 +1,56 @@
+--- a/main.c
++++ b/main.c
+@@ -11,6 +11,7 @@
+ static FileType opt_x;
+ static StringArray opt_include;
+ static bool opt_E;
++static bool opt_dump_ast;
+ static bool opt_M;
+ static bool opt_MD;
+ static bool opt_MMD;
+@@ -170,6 +171,11 @@
+       continue;
+     }
+ 
++    if (!strcmp(argv[i], "--dump-ast")) {
++      opt_dump_ast = true;
++      continue;
++    }
++
+     if (!strncmp(argv[i], "-I", 2)) {
+       strarray_push(&include_paths, argv[i] + 2);
+       continue;
+@@ -552,6 +558,13 @@
+ 
+   Obj *prog = parse(tok);
+ 
++  if (opt_dump_ast) {
++    FILE *dump_out = open_file(output_file);
++    dump_ast(prog, dump_out);
++    fclose(dump_out);
++    return;
++  }
++
+   // Open a temporary output buffer.
+   char *buf;
+   size_t buflen;
+@@ -757,7 +770,7 @@
+     assert(type == FILE_C);
+ 
+     // Just preprocess
+-    if (opt_E || opt_M) {
++    if (opt_E || opt_M || opt_dump_ast) {
+       run_cc1(argc, argv, input, NULL);
+       continue;
+     }
+--- a/chibicc.h
++++ b/chibicc.h
+@@ -409,6 +409,7 @@
+ //
+ 
+ void codegen(Obj *prog, FILE *out);
++void dump_ast(Obj *prog, FILE *out); // njvm-cc dump patch
+ int align_to(int n, int align);
+ 
+ //
+

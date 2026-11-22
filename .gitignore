@@ -1,5 +1,5 @@
 target
-# what wnjr-cc/test/bootstrap.sh builds
+# what njvm-cc/test/bootstrap.sh builds
 .bootstrap/
 /tmp
 __pycache__/
@@ -14,8 +14,8 @@ BLUE.md
 NJVM.md
 vendor/
 *.o.tmp
-wnjr-cc/wnjr-cc-asan*
-wnjr-cc/wcc
+njvm-cc/wcc-asan*
+njvm-cc/wcc
 
 # benchmarks build into a scratch directory next to their sources
-wnjr-cc/bench/.work/
+njvm-cc/bench/.work/

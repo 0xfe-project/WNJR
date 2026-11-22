@@ -1,0 +1,18 @@
+[package]
+name = "njvm-cli"
+publish = false
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+description = "Command-line front end for NJVM-IR modules: lower, run on WNJR, or emit wasm"
+license = "Apache-2.0"
+
+[[bin]]
+name = "njvm-cli"
+path = "src/main.rs"
+
+[dependencies]
+wnjr-core = { path = "../wnjr-core" }
+wnjr-wasi = { path = "../wnjr-wasi" }
+njvm-io = { path = "../njvm-io" }
+njvm-e2e = { path = "../njvm-e2e" }

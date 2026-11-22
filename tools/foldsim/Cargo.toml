@@ -1,5 +1,5 @@
 [package]
-name = "wnjr-foldsim"
+name = "njvm-foldsim"
 version = "0.1.0"
 edition = "2021"
 description = "Static analyzer: simulates the folded-stack-machine predecoder over wasm binaries and reports dispatch/operand statistics"

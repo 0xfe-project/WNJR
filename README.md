@@ -59,20 +59,20 @@ allocator. Two properties make the codegen what it is:
 
 ## The C frontend
 
-`wnjr-cc` compiles C to **NJVM-IR**, the language frontends' interchange
+`njvm-cc` compiles C to **NJVM-IR**, the language frontends' interchange
 format, and does not touch wasm directly: the transform path lowers the IR to
 wasm bytes and hands them to the engine unchanged. It is a C program with its
 own `Makefile`, based on [chibicc](https://github.com/rui314/chibicc) (MIT).
 
 ```bash
-make -C wnjr-cc
-wnjr-cc/wcc -o prog.njvm prog.c   # IR as MessagePack
-./target/debug/njvm-run prog.njvm main             # read, lower, run on WNJR
-make -C wnjr-cc test                              # -E and --dump-ast vs chibicc
-wnjr-cc/test/e2e.sh                               # C -> IR -> WNJR vs the host cc
-wnjr-cc/test/bootstrap.sh                         # wcc builds itself, on WNJR
-wnjr-cc/test/bootstrap-emit.sh                     # and agrees with the native one, case by case
-wnjr-cc/test/init-large.sh                         # a 20000 element initializer inside a 256 KB stack
+make -C njvm-cc
+njvm-cc/wcc -o prog.njvm prog.c   # IR as MessagePack
+./target/debug/njvm-cli prog.njvm main             # read, lower, run on WNJR
+make -C njvm-cc test                              # -E and --dump-ast vs chibicc
+njvm-cc/test/e2e.sh                               # C -> IR -> WNJR vs the host cc
+njvm-cc/test/bootstrap.sh                         # wcc builds itself, on WNJR
+njvm-cc/test/bootstrap-emit.sh                     # and agrees with the native one, case by case
+njvm-cc/test/init-large.sh                         # a 20000 element initializer inside a 256 KB stack
 ```
 
 **It compiles itself.** `test/bootstrap.sh` compiles the compiler's own
@@ -98,7 +98,7 @@ taking the address of anything needs no special case, and the function body is
 a flat CFG of labels and jumps — the shape the IR verifier wants. `goto *p`
 and `&&label` go in as `Op::GotoIndirect` / `Expr::LabelAddr` and are lowered
 by `njvm/computed_goto.rs`. The interchange format is documented in
-`wnjr-njvm-io/src/lib.rs`; the C writer produces byte-identical output.
+`njvm-io/src/lib.rs`; the C writer produces byte-identical output.
 
 Implemented today: integer and floating-point arithmetic, comparisons,
 conversions, pointers, arrays, structs and unions (as memory), `if`/`for`/
@@ -213,7 +213,7 @@ The target is wasm32-wasip1-threads, and the predefined macros say so:
 `__linux__` or `__ELF__`, because the machine the compiler happens to run on is
 not the machine it compiles for. `test/libc-parse.sh` measures the frontend
 against the real thing: it preprocesses and parses every source file in
-`wnjr-cc-libc` with wasi-libc's own include path and prints one line per file
+`njvm-cc-libc` with wasi-libc's own include path and prints one line per file
 that fails, with the first error. It is the number to watch while the frontend
 grows enough to compile a C library.
 
@@ -304,11 +304,11 @@ make -C bench/wasi
 ```
 
 The C frontend's end-to-end check compares every call against the host C
-compiler; it needs a built `wnjr-cc` and writes its scratch files under
-`$TMPDIR/wnjr-cc-e2e`:
+compiler; it needs a built `njvm-cc` and writes its scratch files under
+`$TMPDIR/njvm-cc-e2e`:
 
 ```bash
-make -C wnjr-cc && wnjr-cc/test/e2e.sh
+make -C njvm-cc && njvm-cc/test/e2e.sh
 ```
 
 Diagnostics are environment variables:

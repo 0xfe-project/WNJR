@@ -1,9 +1,9 @@
 [package]
-name = "wnjr-tracked-alloc"
+name = "njvm-tracked-alloc"
 version.workspace = true
 edition = "2021"
 rust-version = "1.94"
-description = "Internal allocation statistics and standard alloc re-exports for WNJR"
+description = "Internal allocation statistics and standard alloc re-exports for njvm"
 license = "Apache-2.0"
 include = ["src/**", "tests/**", "README.md", "LICENSE"]
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Generate wnjr-cc/libc_headers.c, the table of welded headers.
+"""Generate njvm-cc/libc_headers.c, the table of welded headers.
 
 A welded header is a libc header this compiler carries already preprocessed:
-its declarations as plain text, plus the macros it leaves behind. wnjr-cc reads
+its declarations as plain text, plus the macros it leaves behind. njvm-cc reads
 that table instead of opening the file, expanding macros and walking include
 paths, which is most of what compiling the libc costs: preprocessing is 96% of
 it (2.39s of 2.47s over the libc 263 units, arm64 M5).
@@ -15,7 +15,7 @@ it (2.39s of 2.47s over the libc 263 units, arm64 M5).
 it to the file in the tree, so a header that changed without the table being
 regenerated fails the gate instead of quietly going stale.
 
-The table is produced by wnjr-cc own preprocessor (wcc -E), not by a second
+The table is produced by njvm-cc own preprocessor (wcc -E), not by a second
 implementation, so it cannot disagree with the compiler that reads it. The
 headers are found through the compiler own search paths (wcc
 --dump-include-paths), in the order it would search them, so a name is welded
@@ -36,7 +36,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-CC_DIR = os.path.join(ROOT, "wnjr-cc")
+CC_DIR = os.path.join(ROOT, "njvm-cc")
 WCC = os.path.join(CC_DIR, "wcc")
 OUT = os.path.join(CC_DIR, "libc_headers.c")
 
@@ -85,7 +85,7 @@ def used_names(roots):
     """
     names = set()
 
-    libc_root = os.path.join(ROOT, "wnjr-cc-libc")
+    libc_root = os.path.join(ROOT, "njvm-cc-libc")
     units = []
     for dirpath, dirnames, filenames in os.walk(libc_root):
         dirnames.sort()

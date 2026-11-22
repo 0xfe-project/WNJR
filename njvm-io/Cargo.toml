@@ -1,0 +1,16 @@
+[package]
+name = "njvm-io"
+version.workspace = true
+edition = "2021"
+rust-version = "1.94"
+description = "NJVM-IR msgpack interchange: reader, writer, and text dump"
+license = "Apache-2.0"
+
+[[bin]]
+name = "njvm-dump"
+path = "src/bin/njvm-dump.rs"
+
+[dependencies]
+wnjr-core = { path = "../wnjr-core" }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+rmp-serde = "1.3.1"

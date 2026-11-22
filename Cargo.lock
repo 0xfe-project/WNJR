@@ -217,6 +217,53 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
+name = "njvm-cli"
+version = "0.1.0"
+dependencies = [
+ "njvm-e2e",
+ "njvm-io",
+ "wnjr-core",
+ "wnjr-wasi",
+]
+
+[[package]]
+name = "njvm-e2e"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "wnjr-core",
+ "wnjr-wasi",
+]
+
+[[package]]
+name = "njvm-foldsim"
+version = "0.1.0"
+dependencies = [
+ "wasmparser",
+ "wat",
+]
+
+[[package]]
+name = "njvm-io"
+version = "0.7.0"
+dependencies = [
+ "rmp-serde",
+ "serde",
+ "wnjr-core",
+]
+
+[[package]]
+name = "njvm-memprof-report"
+version = "0.1.0"
+dependencies = [
+ "njvm-tracked-alloc",
+]
+
+[[package]]
+name = "njvm-tracked-alloc"
+version = "0.7.0"
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -634,47 +681,13 @@ dependencies = [
 name = "wnjr-core"
 version = "0.7.0"
 dependencies = [
+ "njvm-tracked-alloc",
  "parking_lot",
  "serde",
  "wasm-encoder",
  "wasmparser",
  "wat",
- "wnjr-tracked-alloc",
  "wnjr-wasi",
-]
-
-[[package]]
-name = "wnjr-foldsim"
-version = "0.1.0"
-dependencies = [
- "wasmparser",
- "wat",
-]
-
-[[package]]
-name = "wnjr-memprof-report"
-version = "0.1.0"
-dependencies = [
- "wnjr-tracked-alloc",
-]
-
-[[package]]
-name = "wnjr-njvm-e2e"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "wnjr-core",
- "wnjr-njvm-io",
- "wnjr-wasi",
-]
-
-[[package]]
-name = "wnjr-njvm-io"
-version = "0.7.0"
-dependencies = [
- "rmp-serde",
- "serde",
- "wnjr-core",
 ]
 
 [[package]]
@@ -690,10 +703,6 @@ dependencies = [
  "wat",
  "wnjr-core",
 ]
-
-[[package]]
-name = "wnjr-tracked-alloc"
-version = "0.7.0"
 
 [[package]]
 name = "wnjr-wasi"

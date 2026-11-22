@@ -10,7 +10,7 @@ pub struct Session {
 impl Session {
     pub fn new(output_path: Option<PathBuf>, command_line: &[String]) -> Self {
         let output_path = output_path.unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("wnjr-memprof-{}.html", std::process::id()))
+            std::env::temp_dir().join(format!("njvm-memprof-{}.html", std::process::id()))
         });
         let command_line = command_line.to_vec();
         tracked_alloc::reset_tracking();

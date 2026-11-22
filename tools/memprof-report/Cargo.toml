@@ -1,9 +1,9 @@
 [package]
-name = "wnjr-memprof-report"
+name = "njvm-memprof-report"
 publish = false
 version = "0.1.0"
 edition = "2021"
-description = "HTML report writer for WNJR memory profiles"
+description = "HTML report writer for njvm memory profiles"
 license = "Apache-2.0"
 
 [lib]
@@ -11,4 +11,4 @@ name = "memprof_report"
 path = "src/lib.rs"
 
 [dependencies]
-tracked_alloc = { package = "wnjr-tracked-alloc", path = "../tracked-alloc" }
+tracked_alloc = { package = "njvm-tracked-alloc", path = "../tracked-alloc" }
