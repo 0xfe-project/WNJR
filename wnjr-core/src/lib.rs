@@ -41,6 +41,8 @@ pub use vm::engine::{Engine, Tier};
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub use vm::entities::SharedMemHandle;
 pub use vm::entities::{Caller, HostFn};
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+pub use vm::handle::MemHandle;
 pub use vm::imports::{Extern, Import};
 pub use vm::instance::{Func, Instance, InstanceInstantiationError, RuntimeWorld};
 // Diagnostics expose owned data, never instance bodies or instruction enums.

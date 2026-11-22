@@ -139,6 +139,7 @@ impl MemInstJit for MemInst {
         crate::vm::entities::check_memory_quota(config, &limits)?;
         Ok(MemInst {
             backing: Rc::new(RefCell::new(MemBacking {
+                id: crate::vm::entities::next_memory_id(),
                 data: collections::Vec::new(),
                 host_callback_borrowed: Cell::new(false),
                 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]

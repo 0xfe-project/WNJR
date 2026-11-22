@@ -222,6 +222,25 @@ impl Import {
         Self::memory_with_state(module, name, limits, None)
     }
 
+    /// Bind a memory the host owns.
+    ///
+    /// The instance sees the very reservation the handle owns: same base, same
+    /// bytes, same id. Growing it from either side is visible to the other, and
+    /// the mapping stays alive until both are done with it.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    pub fn memory_handle(
+        module: &str,
+        name: &str,
+        handle: &crate::vm::handle::MemHandle,
+    ) -> Result<Self, crate::error::WasmError> {
+        Ok(Self {
+            source: None,
+            module: module.to_string(),
+            name: name.to_string(),
+            value: ImportValue::Memory(handle.limits(), Some(handle.to_mem_inst()?)),
+        })
+    }
+
     pub(crate) fn memory_with_state(
         module: &str,
         name: &str,

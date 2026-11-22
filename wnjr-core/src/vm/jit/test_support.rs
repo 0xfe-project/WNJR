@@ -10,6 +10,7 @@ pub(crate) fn heap_memory(config: &Config, limits: Limits) -> Result<MemInst, Wa
     let initial_bytes = limits.min() * crate::constants::WASM_PAGE_SIZE;
     Ok(MemInst {
         backing: Rc::new(RefCell::new(MemBacking {
+            id: crate::vm::entities::next_memory_id(),
             data: collections::vec![0u8; initial_bytes],
             host_callback_borrowed: Cell::new(false),
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]

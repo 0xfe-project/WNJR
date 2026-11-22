@@ -5,6 +5,7 @@ use crate::config::Config;
 
 use alloc::rc::Rc as AllocRc;
 use core::cell::{Cell, Ref, RefCell, RefMut, UnsafeCell};
+use core::sync::atomic::{AtomicU64, Ordering};
 use tracked_alloc::rc::Rc;
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 use tracked_alloc::sync::Arc;
@@ -325,10 +326,17 @@ impl TableInst {
 
 #[derive(Debug)]
 pub(crate) struct MemBacking {
+    /// Identity of this memory, unique for the life of the process.
+    ///
+    /// It lives on the backing because the backing is the memory: an instance
+    /// that imports a reservation wraps the very same one. Two stores that
+    /// import one memory therefore agree on its id, which is what lets an
+    /// embedder key a wait queue or an invalidation flag on it.
+    pub(crate) id: u64,
     pub(crate) data: collections::Vec<u8>,
     pub(crate) host_callback_borrowed: Cell<bool>,
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-    pub(crate) guard: Option<GuardPageMemory>,
+    pub(crate) guard: Option<Arc<GuardPageMemory>>,
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +399,15 @@ pub(crate) fn check_memory_quota(config: &Config, limits: &Limits) -> Result<(),
     Ok(())
 }
 
+/// Source of memory identities. Monotonic, never reused: a recycled id would
+/// let a stale wait queue or grow flag apply to a different memory.
+static NEXT_MEMORY_ID: AtomicU64 = AtomicU64::new(1);
+
+#[inline]
+pub(crate) fn next_memory_id() -> u64 {
+    NEXT_MEMORY_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 impl MemInst {
     pub(crate) fn current_limits(&self) -> Result<Limits, WasmError> {
         let pages = self.current_pages();
@@ -416,6 +433,7 @@ impl MemInst {
         let shared = Arc::new(SharedMemory::new(&limits)?);
         Ok(MemInst {
             backing: Rc::new(RefCell::new(MemBacking {
+                id: next_memory_id(),
                 data: collections::Vec::new(),
                 host_callback_borrowed: Cell::new(false),
                 guard: None,
@@ -437,6 +455,7 @@ impl MemInst {
     pub(crate) fn from_shared_handle(h: crate::vm::entities::SharedMemHandle) -> Self {
         MemInst {
             backing: Rc::new(RefCell::new(MemBacking {
+                id: next_memory_id(),
                 data: collections::Vec::new(),
                 host_callback_borrowed: Cell::new(false),
                 guard: None,
@@ -450,9 +469,10 @@ impl MemInst {
     #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     pub(crate) fn new_guarded(config: &Config, limits: Limits) -> Result<Self, WasmError> {
         check_memory_quota(config, &limits)?;
-        let guard = GuardPageMemory::new(limits.min())?;
+        let guard = Arc::new(GuardPageMemory::new(limits.min())?);
         Ok(MemInst {
             backing: Rc::new(RefCell::new(MemBacking {
+                id: next_memory_id(),
                 data: collections::Vec::new(),
                 host_callback_borrowed: Cell::new(false),
                 guard: Some(guard),
@@ -461,6 +481,52 @@ impl MemInst {
             #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
             shared: None,
         })
+    }
+
+    /// Build a memory around a guarded reservation an embedder already holds.
+    ///
+    /// The bytes are the same bytes: this instance and the handle share one
+    /// mapping, one committed length and one identity.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    pub(crate) fn from_guarded(
+        limits: Limits,
+        guard: Arc<GuardPageMemory>,
+        id: u64,
+    ) -> Result<Self, WasmError> {
+        let committed = guard.len();
+        let initial_bytes = limits.min() * crate::constants::WASM_PAGE_SIZE;
+        if committed < initial_bytes {
+            return Err(WasmError::invalid(
+                "imported memory is smaller than the module's declared initial size",
+            ));
+        }
+        Ok(MemInst {
+            backing: Rc::new(RefCell::new(MemBacking {
+                id,
+                data: collections::Vec::new(),
+                host_callback_borrowed: Cell::new(false),
+                guard: Some(guard),
+            })),
+            limits,
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            shared: None,
+        })
+    }
+
+    /// A `Send + Sync` view of this memory's reservation, for an embedder.
+    ///
+    /// Only a guard-page memory has one: a heap-backed memory reallocates on
+    /// grow, so a pointer into it stops being the memory's base. `None` here
+    /// means "this memory cannot be handed out", not "keep trying".
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    pub(crate) fn guarded(&self) -> Option<Arc<GuardPageMemory>> {
+        self.backing.borrow().guard.clone()
+    }
+
+    /// The identity of this memory, stable for the process lifetime.
+    #[inline]
+    pub(crate) fn id(&self) -> u64 {
+        self.backing.borrow().id
     }
 
     #[inline]

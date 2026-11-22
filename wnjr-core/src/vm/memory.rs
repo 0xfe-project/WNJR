@@ -173,6 +173,7 @@ mod tests {
         // aliasing model without entering generated code or OS mappings.
         let memory = MemInst {
             backing: Rc::new(RefCell::new(MemBacking {
+                id: crate::vm::entities::next_memory_id(),
                 data: vec![1, 2, 3],
                 host_callback_borrowed: Cell::new(false),
                 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]

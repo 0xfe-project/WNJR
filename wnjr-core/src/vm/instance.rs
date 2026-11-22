@@ -30,7 +30,7 @@ use crate::vm::jit::instantiate::JitInstanceLease;
 // One import model for both engines. The interpreter's raw host-dispatch
 // boundary is an implementation detail that `interp_imports` drives from
 // these same declarations.
-use crate::vm::imports::{Extern, Import};
+use crate::vm::imports::{Extern, Import, ImportValue};
 
 enum Inner {
     Jit(JitInstanceLease),
@@ -245,6 +245,27 @@ impl Instance {
             value,
             source: self.instance_id(),
         }))
+    }
+
+    /// A host handle to a memory this instance exports.
+    ///
+    /// `None` when there is no such export, or when the memory is heap-backed:
+    /// only a guard-page reservation can be handed out, because only it has a
+    /// base that survives a grow.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    pub fn memory_handle(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::vm::handle::MemHandle>, WasmError> {
+        let Some(export) = self.get_export(name)? else {
+            return Ok(None);
+        };
+        let ImportValue::Memory(limits, Some(mem)) = &export.value else {
+            return Ok(None);
+        };
+        Ok(mem
+            .guarded()
+            .map(|guard| crate::vm::handle::MemHandle::from_guard(guard, mem.id(), limits.clone())))
     }
 
     /// Collect named exports for linking, preserving aliases and current sizes.

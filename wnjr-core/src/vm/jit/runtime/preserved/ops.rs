@@ -1357,10 +1357,19 @@ pub(super) fn do_memory_grow(
                     Err(_) => error_value,
                 }
             } else {
-                let mut backing = mem.backing_mut();
-                if let Some(guard) = backing.guard.as_mut() {
+                // Read the id before borrowing the backing: `id()` borrows the
+                // same RefCell the `backing_mut` below holds.
+                let memory_id = mem.id();
+                let backing = mem.backing_mut();
+                if let Some(guard) = backing.guard.as_ref() {
                     match guard.grow(delta_pages) {
-                        Ok(_) => old_pages as u64,
+                        Ok(_) => {
+                            // Tell the embedder its view of this memory moved on.
+                            // Nothing here touches the engine: the callback runs
+                            // inside a live instance borrow.
+                            guard.notify_grow(memory_id);
+                            old_pages as u64
+                        }
                         Err(_) => error_value,
                     }
                 } else {

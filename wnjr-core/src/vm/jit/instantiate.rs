@@ -1569,7 +1569,7 @@ mod tests {
 
         let mut backing = memory.backing_mut();
         #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-        if let Some(guard) = backing.guard.as_mut() {
+        if let Some(guard) = backing.guard.as_ref() {
             let delta_pages = new_pages - old_pages;
             guard
                 .grow(delta_pages)
