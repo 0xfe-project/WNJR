@@ -882,6 +882,8 @@ static Node *compute_vla_size(Type *ty, Token *tok) {
 }
 
 static Node *new_alloca(Node *sz) {
+  if (current_fn)
+    current_fn->uses_alloca = true;
   Node *node = new_unary(ND_FUNCALL, new_var_node(builtin_alloca, sz->tok), sz->tok);
   node->func_ty = builtin_alloca->ty;
   node->ty = builtin_alloca->ty->return_ty;
@@ -1492,15 +1494,29 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
 static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
   Initializer *init = initializer(rest, tok, var->ty, &var->ty);
   InitDesg desg = {NULL, 0, NULL, var};
+  Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
 
-  // If a partial initializer list is given, the standard requires
-  // that unspecified elements are set to 0. Here, we simply
-  // zero-initialize the entire memory region of a variable before
-  // initializing it with user-supplied values.
+  // If a partial initializer list is given, the standard requires that
+  // unspecified elements are set to 0. Here, we simply zero-initialize the entire
+  // memory region of a variable before initializing it with user-supplied values.
+  //
+  // Only an aggregate can be left partly unspecified -- "int a[4] = {1}" -- so
+  // only there does that zeroing decide what anything holds. A scalar assignment
+  // writes every byte of the object, so zeroing first is work the assignment
+  // immediately undoes; "unsigned free = x;" was a four-byte fill followed by a
+  // four-byte store to the same address.
+  switch (var->ty->kind) {
+  case TY_STRUCT:
+  case TY_UNION:
+  case TY_ARRAY:
+  case TY_VLA:
+    break;
+  default:
+    return rhs;
+  }
+
   Node *lhs = new_node(ND_MEMZERO, tok);
   lhs->var = var;
-
-  Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
   return new_binary(ND_COMMA, lhs, rhs, tok);
 }
 
@@ -4093,7 +4109,11 @@ void mark_escapes(Obj *fn) {
       var->in_frame = true;
     // The objects the compiler builds for itself are read and written through
     // addresses codegen constructs directly, never by naming them.
-    if (var == fn->va_area || var == fn->va_buf || var == fn->alloca_bottom)
+    //
+    // __alloca_size__ is not one of them: it is the register chibicc's x86 backend
+    // keeps the stack adjustment of alloca in, and this backend restores the stack
+    // from the frame pointer instead, so nothing here ever reads or writes it.
+    if (var == fn->va_area || var == fn->va_buf)
       var->in_frame = true;
   }
 }

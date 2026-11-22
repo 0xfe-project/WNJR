@@ -175,6 +175,11 @@ struct Obj {
   // it still lives in the frame. Assigned by emit_function in codegen.c, which
   // is the only place that knows a function's local numbering.
   int promoted;
+  // Set on a function that calls alloca, or declares a variable-length array --
+  // which is lowered to alloca. Such a function moves the stack pointer below its
+  // own frame, so it must keep one even when every local of its lives in a
+  // register; the alternative is a stack pointer that never comes back.
+  bool uses_alloca;
 
   // Global variable or function
   bool is_function;

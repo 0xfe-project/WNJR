@@ -7,7 +7,7 @@ The same C file built two ways and timed as a whole process:
 
 Both columns must print the same checksum. That is checked before any time is looked at, and the run stops if they disagree.
 
-Machine: Apple M5, arm64, darwin 25.5.0, 32 GiB. 5 runs each after 3 discarded warm-up runs, 2026-11-21 18:11 UTC.
+Machine: Apple M5, arm64, darwin 25.5.0, 32 GiB. 5 runs each after 3 discarded warm-up runs, 2026-11-22 01:51 UTC.
 
 Times are the **fastest** of the runs. Nothing about timing is ever faster than the work, so the fastest run is the one least polluted by the machine; the median and every sample are at the bottom of this file so the spread stays visible.
 
@@ -15,20 +15,20 @@ Times are the **fastest** of the runs. Nothing about timing is ever faster than 
 
 | benchmark | checksum | native ms | wnjr ms | wnjr / native |
 |---|---|---:|---:|---:|
-| startup | 1 | 1.9 | 83.5 | 43.37× |
-| matmul | 10276522263000 | 140.5 | 251.1 | 1.79× |
-| pi | 452413269 | 137.9 | 353.4 | 2.56× |
-| mergesort | 4579674966457524707 | 46.4 | 221.2 | 4.76× |
-| nqueens | 365596 | 109.9 | 618.0 | 5.62× |
+| startup | 1 | 2.3 | 72.6 | 32.02× |
+| matmul | 10276522263000 | 151.5 | 222.7 | 1.47× |
+| pi | 452413269 | 136.3 | 342.1 | 2.51× |
+| mergesort | 4579674966457524707 | 45.5 | 174.7 | 3.84× |
+| nqueens | 365596 | 109.1 | 194.8 | 1.79× |
 
 The **startup** row is what a program that computes nothing costs: the price of the process, and inside the wnjr column also of decoding and compiling the module. Subtracting it leaves the work itself:
 
 | benchmark | native work ms | wnjr work ms | wnjr / native |
 |---|---:|---:|---:|
-| matmul | 138.6 | 167.6 | 1.21× |
-| pi | 136.0 | 269.8 | 1.98× |
-| mergesort | 44.5 | 137.7 | 3.09× |
-| nqueens | 108.0 | 534.5 | 4.95× |
+| matmul | 149.2 | 150.2 | 1.01× |
+| pi | 134.0 | 269.5 | 2.01× |
+| mergesort | 43.2 | 102.1 | 2.36× |
+| nqueens | 106.8 | 122.3 | 1.14× |
 
 ## Compiling the benchmark, for scale
 
@@ -36,11 +36,11 @@ These are not comparable to each other: clang compiles one short file, wcc compi
 
 | benchmark | clang -O1 ms | wcc ms (including the whole libc) |
 |---|---:|---:|
-| startup | 43.1 | 940.1 |
-| matmul | 42.6 | 801.3 |
-| pi | 42.1 | 813.7 |
-| mergesort | 50.3 | 787.5 |
-| nqueens | 40.5 | 775.2 |
+| startup | 107.4 | 735.7 |
+| matmul | 47.1 | 764.6 |
+| pi | 47.9 | 863.0 |
+| mergesort | 46.3 | 835.5 |
+| nqueens | 44.0 | 795.6 |
 
 ## What this does and does not say
 
@@ -50,8 +50,8 @@ These are not comparable to each other: clang compiles one short file, wcc compi
 - Nothing here is comparable to `bench/` at the top of the repository. Those numbers are Rust programs compiled to wasm by rustc, and they measure WNJR against other wasm runtimes. These are C programs written by a compiler with no optimization passes, measured against LLVM.
 - Raw samples:
 
-  - startup: native min 1.9 median 2.5 [3.0, 3.1, 2.5, 2.1, 1.9] ms; wnjr min 83.5 median 85.0 [85.3, 83.5, 84.6, 85.0, 85.3] ms
-  - matmul: native min 140.5 median 141.9 [145.9, 141.9, 141.9, 140.5, 148.5] ms; wnjr min 251.1 median 253.8 [251.1, 253.8, 255.5, 253.0, 255.0] ms
-  - pi: native min 137.9 median 138.2 [138.4, 137.9, 138.3, 138.0, 138.2] ms; wnjr min 353.4 median 355.0 [353.4, 353.7, 355.0, 356.5, 357.0] ms
-  - mergesort: native min 46.4 median 46.5 [46.5, 46.4, 47.1, 46.5, 46.5] ms; wnjr min 221.2 median 222.1 [222.1, 225.4, 221.2, 222.5, 221.3] ms
-  - nqueens: native min 109.9 median 110.4 [110.3, 110.4, 109.9, 110.6, 110.8] ms; wnjr min 618.0 median 621.1 [621.1, 618.0, 618.8, 622.1, 625.1] ms
+  - startup: native min 2.3 median 2.7 [2.7, 2.7, 2.4, 2.7, 2.3] ms; wnjr min 72.6 median 87.0 [72.6, 87.0, 101.6, 106.2, 73.2] ms
+  - matmul: native min 151.5 median 154.5 [154.5, 165.8, 151.9, 154.7, 151.5] ms; wnjr min 222.7 median 223.6 [225.5, 223.4, 225.2, 222.7, 223.6] ms
+  - pi: native min 136.3 median 136.6 [137.7, 136.3, 136.6, 137.9, 136.3] ms; wnjr min 342.1 median 343.8 [372.3, 350.8, 342.4, 343.8, 342.1] ms
+  - mergesort: native min 45.5 median 45.7 [46.1, 45.8, 45.7, 45.5, 45.6] ms; wnjr min 174.7 median 175.4 [175.4, 174.7, 175.8, 175.0, 179.0] ms
+  - nqueens: native min 109.1 median 110.7 [109.8, 111.3, 111.4, 110.7, 109.1] ms; wnjr min 194.8 median 195.2 [200.4, 195.8, 194.8, 195.2, 195.2] ms

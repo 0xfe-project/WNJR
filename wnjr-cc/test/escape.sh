@@ -80,7 +80,11 @@ expect deref     frame    "&x appears, even though it is dereferenced at once"
 expect array_like frame   "an array is a place, not a value"
 expect b         frame    "a struct is a place, not a value"
 expect narrow    frame    "a char is stored through a byte store, which truncates"
-expect __alloca_size__ frame "the compiler addresses it directly"
+# This one is the reverse of the others: chibicc keeps it for the x86 backend,
+# where alloca records its stack adjustment in a variable. Nothing here reads it --
+# the stack comes back from the frame pointer -- so it must NOT hold a frame slot,
+# or every function would keep a frame for an object no one looks at.
+expect __alloca_size__ register "nothing here reads it; the x86 backend used it"
 expect plain     register "nothing takes its address"
 expect incdec    register "++ does not take the address of a plain variable"
 expect opassign  register "+= does not take the address of a plain variable"

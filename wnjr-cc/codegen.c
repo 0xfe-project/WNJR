@@ -643,13 +643,20 @@ static E *e_addr(E *base, int offset) {
 // its end used to return without it, so each call to such a function leaked its
 // whole frame; a long run walked the stack pointer down through the stack and
 // into the data area, and every answer after that came from corrupted memory.
+// Whether the function being emitted took a frame, and so has to give one back.
+// A function whose locals all live in wasm locals has none: there is nothing to
+// take, and nothing to restore.
+static bool restore_needed;
+
 static void restore_frame(void) {
-  if (!frame_size)
+  if (!restore_needed)
     return;
-  OP(nj_op_globalset(out, sp_global,
-                     as_type(e_binary("Add", PTR_TY, e_local(fp_local, PTR_TY),
-                                      as_type(e_i32(frame_size), PTR_TY)),
-                             "I32")));
+  // sp = fp + frame_size. A function with alloca but no frame still has to come
+  // back: fp is what sp held on entry, and alloca moved sp below it.
+  E *v = frame_size ? e_binary("Add", PTR_TY, e_local(fp_local, PTR_TY),
+                               as_type(e_i32(frame_size), PTR_TY))
+                    : e_local(fp_local, PTR_TY);
+  OP(nj_op_globalset(out, sp_global, as_type(v, "I32")));
 }
 
 // The address of a local, as a Ptr: two of them may be compared, and C compares
@@ -1935,6 +1942,12 @@ static void gen_stmt_inner(Node *node) {
     return;
 
   case ND_EXPR_STMT: {
+    // "int x;" declares a name and compiles to nothing at all. parse.c still
+    // wraps the declaration in a statement, whose expression is a null one;
+    // evaluating that emitted a constant only to drop it, once per declaration
+    // and every time the statement ran.
+    if (!node->lhs || node->lhs->kind == ND_NULL_EXPR)
+      return;
     E *e = gen_expr(node->lhs);
     OP(nj_op_drop(out, e));
     e_free(e);
@@ -2224,6 +2237,23 @@ static void assign_lvar_offsets(Obj *prog) {
     //
     // The rule for arrays of 16 bytes or more is chibicc's: the AMD64 System V
     // ABI aligns them to 16.
+    // Does anything at all live in the frame? A promoted variable is a wasm
+    // local, but a function that keeps a frame anyway still gives it its bytes
+    // there. "&z - &y" is a number C leaves unspecified and chibicc's own suite
+    // asserts (test/variable.c expects 7), and it depends on everything sitting
+    // between the two -- so the layout has to stay what it was. Only a function
+    // with nothing in its frame at all can have the frame taken away.
+    bool any_in_frame = false;
+    for (Obj *var = fn->locals; var; var = var->next)
+      if (var->in_frame) {
+        any_in_frame = true;
+        break;
+      }
+    if (!any_in_frame) {
+      fn->stack_size = 0;
+      continue;
+    }
+
     int bottom = 0;
     int align_max = 16;
     for (Obj *var = fn->locals; var; var = var->next) {
@@ -2256,6 +2286,11 @@ static void emit_function(Obj *fn) {
   reset_labels();
   body_len = 0;
   frame_size = fn->stack_size;
+  // A frame is worth taking only when something lives on the stack: a variable
+  // that could not be promoted to a wasm local, or alloca, which moves the stack
+  // pointer itself. Otherwise every local made it into a wasm local, and the
+  // prologue would be guarding and shaping an empty region.
+  restore_needed = frame_size > 0 || fn->uses_alloca;
 
   // A struct or union return cannot be a wasm value, so the caller passes the
   // address of its buffer as a hidden first parameter, exactly as the C ABI
@@ -2332,7 +2367,7 @@ static void emit_function(Obj *fn) {
       OP(nj_op_unreachable(out));
       OP(nj_op_label(out, ok));
     }
-  } else {
+  } else if (fn->uses_alloca) {
     set_local((uint32_t)fp_local, as_type(e_global((uint32_t)sp_global, "I32"), PTR_TY));
   }
   int i = arg_base;
