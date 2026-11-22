@@ -63,7 +63,11 @@ impl Printer {
             self.line(format_args!("types:"));
             self.nested(|p| {
                 for (i, t) in m.types.iter().enumerate() {
-                    p.line(format_args!("type {i}: {} -> {}", tys(&t.params), tys(&t.results)));
+                    p.line(format_args!(
+                        "type {i}: {} -> {}",
+                        tys(&t.params),
+                        tys(&t.results)
+                    ));
                 }
             });
         }
@@ -84,7 +88,10 @@ impl Printer {
                         }
                         ImportKind::Tag(t) => format!("tag {}", tys(&t.params)),
                     };
-                    p.line(format_args!("import {i} {:?}.{:?}: {kind}", im.module, im.name));
+                    p.line(format_args!(
+                        "import {i} {:?}.{:?}: {kind}",
+                        im.module, im.name
+                    ));
                 }
             });
         }
@@ -101,7 +108,10 @@ impl Printer {
             self.nested(|p| {
                 for (i, mt) in m.memories.iter().enumerate() {
                     let shared = if mt.shared { " shared" } else { "" };
-                    p.line(format_args!("memory {i}: {}{shared}", limits(mt.min, mt.max)));
+                    p.line(format_args!(
+                        "memory {i}: {}{shared}",
+                        limits(mt.min, mt.max)
+                    ));
                 }
             });
         }
@@ -110,7 +120,11 @@ impl Printer {
             self.nested(|p| {
                 for (i, g) in m.globals.iter().enumerate() {
                     let mutable = if g.ty.mutable { "mut " } else { "" };
-                    p.line(format_args!("global {i}: {mutable}{} = {}", ty(g.ty.ty), init(&g.init)));
+                    p.line(format_args!(
+                        "global {i}: {mutable}{} = {}",
+                        ty(g.ty.ty),
+                        init(&g.init)
+                    ));
                 }
             });
         }
@@ -139,7 +153,11 @@ impl Printer {
             self.nested(|p| {
                 for (i, e) in m.elements.iter().enumerate() {
                     let funcs: Vec<String> = e.funcs.iter().map(u32::to_string).collect();
-                    p.line(format_args!("elem {i}: {} funcs [{}]", mode(&e.mode, "table"), funcs.join(", ")));
+                    p.line(format_args!(
+                        "elem {i}: {} funcs [{}]",
+                        mode(&e.mode, "table"),
+                        funcs.join(", ")
+                    ));
                 }
             });
         }
@@ -148,7 +166,12 @@ impl Printer {
             self.nested(|p| {
                 for (i, d) in m.data.iter().enumerate() {
                     let hex: Vec<String> = d.bytes.iter().map(|b| format!("{b:02x}")).collect();
-                    p.line(format_args!("data {i}: {} bytes {} [{}]", mode(&d.mode, "memory"), d.bytes.len(), hex.join(" ")));
+                    p.line(format_args!(
+                        "data {i}: {} bytes {} [{}]",
+                        mode(&d.mode, "memory"),
+                        d.bytes.len(),
+                        hex.join(" ")
+                    ));
                 }
             });
         }
@@ -165,7 +188,11 @@ impl Printer {
     }
 
     fn function(&mut self, idx: u32, f: &Function) {
-        self.line(format_args!("func {idx}: {} -> {}", tys(&f.params), tys(&f.results)));
+        self.line(format_args!(
+            "func {idx}: {} -> {}",
+            tys(&f.params),
+            tys(&f.results)
+        ));
         self.nested(|p| {
             p.line(format_args!("locals: {}", tys(&f.locals)));
             p.body(&f.body);
@@ -201,17 +228,33 @@ impl Printer {
                 self.line(format_args!("jmp_if L{target}"));
                 self.exprs(&[cond]);
             }
-            Op::BrTable { index, targets, default } => {
+            Op::BrTable {
+                index,
+                targets,
+                default,
+            } => {
                 let ts: Vec<String> = targets.iter().map(|t| format!("L{t}")).collect();
-                self.line(format_args!("br_table [{}] default L{default}", ts.join(", ")));
+                self.line(format_args!(
+                    "br_table [{}] default L{default}",
+                    ts.join(", ")
+                ));
                 self.exprs(&[index]);
             }
             Op::GotoIndirect { target } => {
                 self.line(format_args!("goto_indirect"));
                 self.exprs(&[target]);
             }
-            Op::Store { ty, ptr, val, offset, align } => {
-                self.line(format_args!("store {} offset={offset} align={align}", mem(*ty)));
+            Op::Store {
+                ty,
+                ptr,
+                val,
+                offset,
+                align,
+            } => {
+                self.line(format_args!(
+                    "store {} offset={offset} align={align}",
+                    mem(*ty)
+                ));
                 self.exprs(&[ptr, val]);
             }
             Op::Block { body } => {
@@ -224,7 +267,11 @@ impl Printer {
                 self.nested(|p| p.body(body));
                 self.line(format_args!("end"));
             }
-            Op::If { cond, then_body, else_body } => {
+            Op::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
                 self.line(format_args!("if"));
                 self.exprs(&[cond]);
                 self.section(format_args!("then"), then_body);
@@ -236,7 +283,11 @@ impl Printer {
                 self.exprs(&vals.iter().collect::<Vec<_>>());
             }
             Op::Unreachable => self.line(format_args!("unreachable")),
-            Op::Switch { scrutinee, cases, default } => {
+            Op::Switch {
+                scrutinee,
+                cases,
+                default,
+            } => {
                 self.line(format_args!("switch"));
                 self.exprs(&[scrutinee]);
                 for (v, ops) in cases {
@@ -257,8 +308,15 @@ impl Printer {
                 self.line(format_args!("call func {func_idx}"));
                 self.exprs(&args.iter().collect::<Vec<_>>());
             }
-            Op::CallIndirect { type_idx, table_idx, callee, args } => {
-                self.line(format_args!("call_indirect type {type_idx} table {table_idx}"));
+            Op::CallIndirect {
+                type_idx,
+                table_idx,
+                callee,
+                args,
+            } => {
+                self.line(format_args!(
+                    "call_indirect type {type_idx} table {table_idx}"
+                ));
                 let mut es = vec![callee];
                 es.extend(args.iter());
                 self.exprs(&es);
@@ -268,7 +326,11 @@ impl Printer {
                 self.nested(|p| p.body(body));
                 for c in catches {
                     let bind: Vec<String> = c.bind.iter().map(|l| format!("{l}")).collect();
-                    let bind = if bind.is_empty() { String::new() } else { format!(" bind {}", bind.join(" ")) };
+                    let bind = if bind.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" bind {}", bind.join(" "))
+                    };
                     match c.tag {
                         Some(tag) => self.section(format_args!("catch tag {tag}{bind}"), &c.body),
                         None => self.section(format_args!("catch_all"), &c.body),
@@ -319,7 +381,15 @@ impl Printer {
                 self.line(format_args!("memory.grow"));
                 self.exprs(&[delta]);
             }
-            Op::Atomic { op, width, offset, ptr, val, replacement, dest } => {
+            Op::Atomic {
+                op,
+                width,
+                offset,
+                ptr,
+                val,
+                replacement,
+                dest,
+            } => {
                 let d = match dest {
                     Some(d) => format!(" -> local {d}"),
                     None => String::new(),
@@ -337,7 +407,9 @@ impl Printer {
                 ops.extend(replacement);
                 self.exprs(&ops);
             }
-            Op::Const { ty: t, val } => self.line(format_args!("const {} {}", ty(*t), constval(val))),
+            Op::Const { ty: t, val } => {
+                self.line(format_args!("const {} {}", ty(*t), constval(val)))
+            }
             Op::Drop { val } => {
                 self.line(format_args!("drop"));
                 self.exprs(&[val]);
@@ -348,13 +420,20 @@ impl Printer {
 
     fn expr(&mut self, e: &Expr) {
         match e {
-            Expr::Const { ty: t, val } => self.line(format_args!("const {} {}", ty(*t), constval(val))),
+            Expr::Const { ty: t, val } => {
+                self.line(format_args!("const {} {}", ty(*t), constval(val)))
+            }
             Expr::MemorySize => self.line(format_args!("memory.size")),
             Expr::MemoryGrow { delta } => {
                 self.line(format_args!("memory.grow"));
                 self.exprs(&[delta]);
             }
-            Expr::Binary { op, lhs, rhs, ty: t } => {
+            Expr::Binary {
+                op,
+                lhs,
+                rhs,
+                ty: t,
+            } => {
                 self.line(format_args!("{} {}", binop(*op), ty(*t)));
                 self.exprs(&[lhs, rhs]);
             }
@@ -366,12 +445,24 @@ impl Printer {
                 self.line(format_args!("convert {} -> {}", ty(*from), ty(*to)));
                 self.exprs(&[val]);
             }
-            Expr::Select { cond, then_val, else_val } => {
+            Expr::Select {
+                cond,
+                then_val,
+                else_val,
+            } => {
                 self.line(format_args!("select"));
                 self.exprs(&[cond, then_val, else_val]);
             }
-            Expr::Load { ty: t, ptr, offset, align } => {
-                self.line(format_args!("load {} offset={offset} align={align}", mem(*t)));
+            Expr::Load {
+                ty: t,
+                ptr,
+                offset,
+                align,
+            } => {
+                self.line(format_args!(
+                    "load {} offset={offset} align={align}",
+                    mem(*t)
+                ));
                 self.exprs(&[ptr]);
             }
             Expr::LocalGet(i) => self.line(format_args!("local.get {i}")),
@@ -384,8 +475,15 @@ impl Printer {
                 self.line(format_args!("call func {func_idx}"));
                 self.exprs(&args.iter().collect::<Vec<_>>());
             }
-            Expr::CallIndirect { type_idx, table_idx, callee, args } => {
-                self.line(format_args!("call_indirect type {type_idx} table {table_idx}"));
+            Expr::CallIndirect {
+                type_idx,
+                table_idx,
+                callee,
+                args,
+            } => {
+                self.line(format_args!(
+                    "call_indirect type {type_idx} table {table_idx}"
+                ));
                 let mut es: Vec<&Expr> = vec![callee];
                 es.extend(args.iter());
                 self.exprs(&es);
@@ -509,7 +607,9 @@ fn init(i: &InitExpr) -> String {
 fn mode(m: &SegmentMode, space: &str) -> String {
     match m {
         SegmentMode::Passive => "passive".to_string(),
-        SegmentMode::Active { index, offset } => format!("active {space} {index} offset {}", init(offset)),
+        SegmentMode::Active { index, offset } => {
+            format!("active {space} {index} offset {}", init(offset))
+        }
     }
 }
 

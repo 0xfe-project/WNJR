@@ -32,8 +32,8 @@ use super::{
     context::CompileContext,
     primitive_op::{self, PrimitiveOpKind},
     semantic_ir::{
-    SemanticCatchClause, SemanticOp, SemanticOpKind, SemanticProgram, SemanticTryScope,
-},
+        SemanticCatchClause, SemanticOp, SemanticOpKind, SemanticProgram, SemanticTryScope,
+    },
 };
 
 /// Semantic IR builder used by Wasm decode.
@@ -549,7 +549,7 @@ impl<'a> DecodeContext<'a> {
         Self {
             compile,
             builder: SemanticBuilder::default(),
-        pending_try_scopes: collections::Vec::new(),
+            pending_try_scopes: collections::Vec::new(),
             control: collections::vec![DecodeControlFrame {
                 kind: DecodeBlockKind::Function,
                 start_height: 0,
@@ -888,9 +888,7 @@ impl<'a> DecodeContext<'a> {
         inst_idx: SemanticIndex,
         site: PendingFixupSite,
     ) {
-        if matches!(site, PendingFixupSite::TryTableCatch(_)) {
-
-        }
+        if matches!(site, PendingFixupSite::TryTableCatch(_)) {}
         if let Some(frame) = self.frame_at_depth_mut(depth) {
             frame
                 .pending_fixups

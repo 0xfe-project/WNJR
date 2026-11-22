@@ -13,11 +13,17 @@ use wnjr_core::njvm::{
 };
 
 fn c32(v: i32) -> Expr {
-    Expr::Const { ty: Type::I32, val: ConstVal::I32(v) }
+    Expr::Const {
+        ty: Type::I32,
+        val: ConstVal::I32(v),
+    }
 }
 
 fn label(id: LabelId) -> Op {
-    Op::Label { id, params: Vec::new() }
+    Op::Label {
+        id,
+        params: Vec::new(),
+    }
 }
 
 fn ret() -> Op {
@@ -25,7 +31,12 @@ fn ret() -> Op {
 }
 
 fn func(params: Vec<Type>, results: Vec<Type>, locals: Vec<Type>, body: Vec<Op>) -> Function {
-    Function { params, results, locals, body }
+    Function {
+        params,
+        results,
+        locals,
+        body,
+    }
 }
 
 fn one(f: Function) -> Module {
@@ -40,7 +51,12 @@ pub fn add() -> Module {
     let entry = fb.next_label();
     fb.label(entry, vec![]);
     fb.push_op(Op::Return {
-        vals: vec![Expr::binary(BinaryOp::Add, Expr::LocalGet(0), Expr::LocalGet(1), Type::I32)],
+        vals: vec![Expr::binary(
+            BinaryOp::Add,
+            Expr::LocalGet(0),
+            Expr::LocalGet(1),
+            Type::I32,
+        )],
     });
     one(fb.build())
 }
@@ -48,11 +64,17 @@ pub fn add() -> Module {
 /// Two-label counting loop: for (i = 0; i < 10; i++) {}
 pub fn two_label_loop() -> Module {
     let mut fb = FunctionBuilder::new(vec![], vec![], vec![Type::I32]);
-    fb.push_op(Op::LocalSet { idx: 0, val: c32(0) });
+    fb.push_op(Op::LocalSet {
+        idx: 0,
+        val: c32(0),
+    });
     let head = fb.next_label();
     let exit = fb.next_label();
     fb.label(head, vec![]);
-    fb.jmp_if(Expr::binary(BinaryOp::Ge, Expr::LocalGet(0), c32(10), Type::I32), exit);
+    fb.jmp_if(
+        Expr::binary(BinaryOp::Ge, Expr::LocalGet(0), c32(10), Type::I32),
+        exit,
+    );
     fb.push_op(Op::LocalSet {
         idx: 0,
         val: Expr::binary(BinaryOp::Add, Expr::LocalGet(0), c32(1), Type::I32),
@@ -64,7 +86,10 @@ pub fn two_label_loop() -> Module {
 }
 
 fn inc(idx: u32) -> Op {
-    Op::LocalSet { idx, val: Expr::binary(BinaryOp::Add, Expr::LocalGet(idx), c32(1), Type::I32) }
+    Op::LocalSet {
+        idx,
+        val: Expr::binary(BinaryOp::Add, Expr::LocalGet(idx), c32(1), Type::I32),
+    }
 }
 
 fn ge10(idx: u32) -> Expr {
@@ -75,12 +100,24 @@ fn ge10(idx: u32) -> Expr {
 pub fn nested_loop() -> Module {
     let (oh, ox, ih, ix) = (0, 1, 2, 3);
     let body = vec![
-        Op::LocalSet { idx: 0, val: c32(0) },
+        Op::LocalSet {
+            idx: 0,
+            val: c32(0),
+        },
         label(oh),
-        Op::JmpIf { cond: ge10(0), target: ox },
-        Op::LocalSet { idx: 1, val: c32(0) },
+        Op::JmpIf {
+            cond: ge10(0),
+            target: ox,
+        },
+        Op::LocalSet {
+            idx: 1,
+            val: c32(0),
+        },
         label(ih),
-        Op::JmpIf { cond: ge10(1), target: ix },
+        Op::JmpIf {
+            cond: ge10(1),
+            target: ix,
+        },
         inc(1),
         Op::Jmp { target: ih },
         label(ix),
@@ -100,7 +137,10 @@ pub fn computed_goto_dispatch() -> Module {
     const L1: LabelId = 1;
     const L2: LabelId = 2;
     const SEL: u32 = 1;
-    let set_sel = |n: i32| Op::LocalSet { idx: SEL, val: c32(n) };
+    let set_sel = |n: i32| Op::LocalSet {
+        idx: SEL,
+        val: c32(n),
+    };
     let dispatch = || {
         vec![
             label(D),
@@ -115,7 +155,10 @@ pub fn computed_goto_dispatch() -> Module {
     };
     let mut body = vec![
         set_sel(2),
-        Op::JmpIf { cond: Expr::LocalGet(0), target: D },
+        Op::JmpIf {
+            cond: Expr::LocalGet(0),
+            target: D,
+        },
         set_sel(1),
         Op::Jmp { target: D },
         label(L1),
@@ -126,7 +169,10 @@ pub fn computed_goto_dispatch() -> Module {
     body.extend([
         label(L2),
         set_sel(1),
-        Op::JmpIf { cond: Expr::LocalGet(0), target: D },
+        Op::JmpIf {
+            cond: Expr::LocalGet(0),
+            target: D,
+        },
         ret(),
     ]);
     one(func(vec![Type::I32], vec![], vec![Type::I32], body))
@@ -137,17 +183,31 @@ pub fn computed_goto_dispatch() -> Module {
 /// two defined functions, an active element segment, and two exports.
 pub fn comprehensive() -> Module {
     let mut mb = ModuleBuilder::new();
-    let type_idx = mb.add_type(FunctionType { params: vec![Type::I32], results: vec![Type::I32] });
+    let type_idx = mb.add_type(FunctionType {
+        params: vec![Type::I32],
+        results: vec![Type::I32],
+    });
     mb.import_function("env", "host_add", type_idx);
     mb.import_memory("env", "memory", 1, Some(16));
     mb.add_stack_pointer_and_tls_base(65536, 0);
-    mb.add_data(DataSegment { mode: SegmentMode::Passive, bytes: vec![0x42, 0x43] });
-    mb.add_tag(Tag { params: vec![Type::I32] });
-    mb.add_table(TableType { min: 2, max: Some(2) });
+    mb.add_data(DataSegment {
+        mode: SegmentMode::Passive,
+        bytes: vec![0x42, 0x43],
+    });
+    mb.add_tag(Tag {
+        params: vec![Type::I32],
+    });
+    mb.add_table(TableType {
+        min: 2,
+        max: Some(2),
+    });
     mb.add_function(Function::new(vec![], vec![], vec![]));
     mb.add_function(Function::new(vec![], vec![], vec![]));
     mb.add_element(ElementSegment {
-        mode: SegmentMode::Active { index: 0, offset: InitExpr::i32(0) },
+        mode: SegmentMode::Active {
+            index: 0,
+            offset: InitExpr::i32(0),
+        },
         funcs: vec![1, 2],
     });
     mb.export_function("f1", 2);
@@ -163,7 +223,10 @@ pub fn showcase() -> Module {
     for f in [add(), nested_loop(), computed_goto_dispatch()] {
         m.functions.extend(f.functions);
     }
-    let f64c = |v: f64| Expr::Const { ty: Type::F64, val: ConstVal::f64(v) };
+    let f64c = |v: f64| Expr::Const {
+        ty: Type::F64,
+        val: ConstVal::f64(v),
+    };
     let body = vec![
         Op::Block {
             body: vec![Op::Store {
@@ -189,11 +252,18 @@ pub fn showcase() -> Module {
             vals: vec![Expr::Convert {
                 from: Type::F64,
                 to: Type::I32,
-                val: Expr::Load { ty: wnjr_core::njvm::MemType::F64, ptr: Expr::LocalGet(0).boxed(), offset: 8, align: 3 }.boxed(),
+                val: Expr::Load {
+                    ty: wnjr_core::njvm::MemType::F64,
+                    ptr: Expr::LocalGet(0).boxed(),
+                    offset: 8,
+                    align: 3,
+                }
+                .boxed(),
             }],
         },
     ];
-    m.functions.push(func(vec![Type::Ptr], vec![Type::I32], vec![], body));
+    m.functions
+        .push(func(vec![Type::Ptr], vec![Type::I32], vec![], body));
     m
 }
 

@@ -42,7 +42,7 @@ use alloc::collections::BTreeMap;
 use crate::collections::{vec, Vec};
 
 use super::expr::Expr;
-use super::module::{FunctionType, Function, ImportKind, Module};
+use super::module::{Function, FunctionType, ImportKind, Module};
 use super::op::{LabelId, Op};
 use super::types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
 
@@ -70,59 +70,119 @@ pub enum OpName {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VerifyErrorKind {
     /// An expression has type `got`; one of `expected` was required.
-    TypeMismatch { expected: Vec<Type>, got: Type },
+    TypeMismatch {
+        expected: Vec<Type>,
+        got: Type,
+    },
     /// A constant's value does not fit its declared type
     /// (I8..U32/Ptr need `ConstVal::I32`, I64/U64 `I64`, F32 `F32`, F64 `F64`).
-    ConstMismatch { ty: Type, val: ConstVal },
+    ConstMismatch {
+        ty: Type,
+        val: ConstVal,
+    },
     /// The operator is not defined for this type (e.g. `Sqrt` on I32, `Clz` on F64).
-    IllegalOp { op: OpName, ty: Type },
+    IllegalOp {
+        op: OpName,
+        ty: Type,
+    },
     /// Local index `idx` is not below `count` (params + locals).
-    LocalOutOfRange { idx: u32, count: u32 },
-    GlobalOutOfRange { idx: u32, count: u32 },
+    LocalOutOfRange {
+        idx: u32,
+        count: u32,
+    },
+    GlobalOutOfRange {
+        idx: u32,
+        count: u32,
+    },
     /// `GlobalSet` on an immutable global.
-    ImmutableGlobal { idx: u32 },
-    FuncOutOfRange { idx: u32, count: u32 },
+    ImmutableGlobal {
+        idx: u32,
+    },
+    FuncOutOfRange {
+        idx: u32,
+        count: u32,
+    },
     /// A type index (`CallIndirect`, or the type of an imported function) is
     /// not below `Module::types.len()`.
-    TypeOutOfRange { idx: u32, count: u32 },
-    TableOutOfRange { idx: u32, count: u32 },
-    TagOutOfRange { idx: u32, count: u32 },
+    TypeOutOfRange {
+        idx: u32,
+        count: u32,
+    },
+    TableOutOfRange {
+        idx: u32,
+        count: u32,
+    },
+    TagOutOfRange {
+        idx: u32,
+        count: u32,
+    },
     /// Call or throw arguments do not match the callee's or tag's params.
-    ArgMismatch { expected: Vec<Type>, got: Vec<Type> },
+    ArgMismatch {
+        expected: Vec<Type>,
+        got: Vec<Type>,
+    },
     /// A call used as an expression must have exactly one result.
-    CallResultArity { results: Vec<Type> },
+    CallResultArity {
+        results: Vec<Type>,
+    },
     /// `Return` values do not match the function's results.
-    ReturnMismatch { expected: Vec<Type>, got: Vec<Type> },
+    ReturnMismatch {
+        expected: Vec<Type>,
+        got: Vec<Type>,
+    },
     /// Control reaches the end of a function that has results.
     MissingReturn,
     /// A jump names a label not declared in this function.
-    UndeclaredLabel { label: LabelId },
+    UndeclaredLabel {
+        label: LabelId,
+    },
     /// `label` was already declared at `first`.
-    DuplicateLabel { label: LabelId, first: OpPath },
+    DuplicateLabel {
+        label: LabelId,
+        first: OpPath,
+    },
     /// A `Label` declares params; the operand stack must be empty at labels.
-    LabelParams { label: LabelId },
+    LabelParams {
+        label: LabelId,
+    },
     /// The CFG is irreducible. `VerifyError::at` is the source op of a retreating
     /// edge whose target (`target`, the label `label` when it is one) does not
     /// dominate it.
-    Irreducible { label: Option<LabelId>, target: OpPath },
+    Irreducible {
+        label: Option<LabelId>,
+        target: OpPath,
+    },
     /// A jump from outside a `TryTable` body to a label inside it.
-    JumpIntoTry { label: LabelId },
+    JumpIntoTry {
+        label: LabelId,
+    },
     /// A catch clause's `bind` locals do not have the types of its tag's
     /// params (catch_all binds nothing).
-    CatchBind { expected: Vec<Type>, got: Vec<Type> },
+    CatchBind {
+        expected: Vec<Type>,
+        got: Vec<Type>,
+    },
     /// A pre-lowering computed-goto marker (`Expr::LabelAddr` or
     /// `Op::GotoIndirect`) is still present; run `computed_goto::lower_module` first.
     UnloweredComputedGoto,
     /// An atomic op is missing an operand it needs, or carries one it does not.
-    AtomicShape { op: AtomicOp },
+    AtomicShape {
+        op: AtomicOp,
+    },
     /// An atomic access width no wasm instruction has (or does not match the
     /// width of the value operand).
-    AtomicWidth { width: u8 },
+    AtomicWidth {
+        width: u8,
+    },
 }
 
 impl core::fmt::Display for VerifyError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "function {} at {:?}: {:?}", self.func, self.at, self.kind)
+        write!(
+            f,
+            "function {} at {:?}: {:?}",
+            self.func, self.at, self.kind
+        )
     }
 }
 
@@ -143,7 +203,11 @@ pub fn verify_module(module: &Module) -> Result<(), VerifyError> {
     let env = Env::new(module);
     for (i, func) in module.functions.iter().enumerate() {
         let idx = env.imported_funcs + i as u32;
-        verify_function(&env, idx, func).map_err(|(at, kind)| VerifyError { func: idx, at, kind })?;
+        verify_function(&env, idx, func).map_err(|(at, kind)| VerifyError {
+            func: idx,
+            at,
+            kind,
+        })?;
     }
     Ok(())
 }
@@ -181,7 +245,14 @@ impl<'m> Env<'m> {
         globals.extend(module.globals.iter().map(|g| (g.ty.ty, g.ty.mutable)));
         tables += module.tables.len() as u32;
         tags.extend(module.tags.iter().map(|t| t.params.as_slice()));
-        Env { module, imported_funcs: import_funcs.len() as u32, import_funcs, globals, tables, tags }
+        Env {
+            module,
+            imported_funcs: import_funcs.len() as u32,
+            import_funcs,
+            globals,
+            tables,
+            tags,
+        }
     }
 
     fn func_count(&self) -> u32 {
@@ -192,9 +263,16 @@ impl<'m> Env<'m> {
         if let Some(&t) = self.import_funcs.get(idx as usize) {
             return self.type_at(t).cloned();
         }
-        match self.module.functions.get((idx - self.imported_funcs) as usize) {
+        match self
+            .module
+            .functions
+            .get((idx - self.imported_funcs) as usize)
+        {
             Some(f) => Ok(f.signature()),
-            None => Err(VerifyErrorKind::FuncOutOfRange { idx, count: self.func_count() }),
+            None => Err(VerifyErrorKind::FuncOutOfRange {
+                idx,
+                count: self.func_count(),
+            }),
         }
     }
 
@@ -202,7 +280,10 @@ impl<'m> Env<'m> {
         self.module
             .types
             .get(idx as usize)
-            .ok_or(VerifyErrorKind::TypeOutOfRange { idx, count: self.module.types.len() as u32 })
+            .ok_or(VerifyErrorKind::TypeOutOfRange {
+                idx,
+                count: self.module.types.len() as u32,
+            })
     }
 }
 
@@ -226,8 +307,17 @@ const ADDR: [Type; 2] = [Type::Ptr, Type::I32];
 /// 8-byte gc-tagged pointer (#634): an I64/U64 whose low 32 bits are the
 /// memory0 address; N7 strips the tag with i32.wrap_i64 before the access.
 const MEM_ADDR: [Type; 4] = [Type::Ptr, Type::I32, Type::I64, Type::U64];
-const INTS: [Type; 9] =
-    [Type::I8, Type::U8, Type::I16, Type::U16, Type::I32, Type::U32, Type::I64, Type::U64, Type::Ptr];
+const INTS: [Type; 9] = [
+    Type::I8,
+    Type::U8,
+    Type::I16,
+    Type::U16,
+    Type::I32,
+    Type::U32,
+    Type::I64,
+    Type::U64,
+    Type::Ptr,
+];
 
 fn const_fits(ty: Type, val: ConstVal) -> bool {
     match val {
@@ -295,7 +385,11 @@ fn child_bodies(op: &Op) -> Vec<&[Op]> {
     let mut v: Vec<&[Op]> = Vec::new();
     match op {
         Op::Block { body } | Op::Loop { body } => v.push(body),
-        Op::If { then_body, else_body, .. } => {
+        Op::If {
+            then_body,
+            else_body,
+            ..
+        } => {
             v.push(then_body);
             v.push(else_body);
         }
@@ -328,7 +422,12 @@ struct FnCx<'a, 'm> {
 }
 
 fn verify_function(env: &Env<'_>, _idx: u32, func: &Function) -> Result<(), Fail> {
-    let mut cx = FnCx { env, func, labels: BTreeMap::new(), next_try: 0 };
+    let mut cx = FnCx {
+        env,
+        func,
+        labels: BTreeMap::new(),
+        next_try: 0,
+    };
     let mut tries = Vec::new();
     cx.collect_labels(&func.body, &Vec::new(), &mut tries)?;
     cx.next_try = 0;
@@ -349,7 +448,10 @@ impl FnCx<'_, '_> {
         } else if let Some(&t) = self.func.locals.get(i - p) {
             Ok(t)
         } else {
-            Err(VerifyErrorKind::LocalOutOfRange { idx, count: self.local_count() })
+            Err(VerifyErrorKind::LocalOutOfRange {
+                idx,
+                count: self.local_count(),
+            })
         }
     }
 
@@ -358,22 +460,46 @@ impl FnCx<'_, '_> {
             .globals
             .get(idx as usize)
             .copied()
-            .ok_or(VerifyErrorKind::GlobalOutOfRange { idx, count: self.env.globals.len() as u32 })
+            .ok_or(VerifyErrorKind::GlobalOutOfRange {
+                idx,
+                count: self.env.globals.len() as u32,
+            })
     }
 
     /// Visit every op in the same order as [`Self::check_body`]; try bodies get
     /// ids in that order.
-    fn collect_labels(&mut self, body: &[Op], base: &OpPath, tries: &mut Vec<u32>) -> Result<(), Fail> {
+    fn collect_labels(
+        &mut self,
+        body: &[Op],
+        base: &OpPath,
+        tries: &mut Vec<u32>,
+    ) -> Result<(), Fail> {
         for (i, op) in body.iter().enumerate() {
-            let at = { let mut p = base.clone(); p.push(i); p };
+            let at = {
+                let mut p = base.clone();
+                p.push(i);
+                p
+            };
             if let Op::Label { id, params } = op {
                 if let Some(first) = self.labels.get(id) {
-                    return Err((at, VerifyErrorKind::DuplicateLabel { label: *id, first: first.at.clone() }));
+                    return Err((
+                        at,
+                        VerifyErrorKind::DuplicateLabel {
+                            label: *id,
+                            first: first.at.clone(),
+                        },
+                    ));
                 }
                 if !params.is_empty() {
                     return Err((at, VerifyErrorKind::LabelParams { label: *id }));
                 }
-                self.labels.insert(*id, LabelInfo { at: at.clone(), tries: tries.clone() });
+                self.labels.insert(
+                    *id,
+                    LabelInfo {
+                        at: at.clone(),
+                        tries: tries.clone(),
+                    },
+                );
             }
             self.for_children(op, &at, tries, |cx, b, p, t| cx.collect_labels(b, p, t))?;
         }
@@ -408,7 +534,11 @@ impl FnCx<'_, '_> {
 
     fn check_body(&mut self, body: &[Op], base: &OpPath, tries: &mut Vec<u32>) -> Result<(), Fail> {
         for (i, op) in body.iter().enumerate() {
-            let at = { let mut p = base.clone(); p.push(i); p };
+            let at = {
+                let mut p = base.clone();
+                p.push(i);
+                p
+            };
             self.check_op(op, tries).map_err(|k| (at.clone(), k))?;
             self.for_children(op, &at, tries, |cx, b, p, t| cx.check_body(b, p, t))?;
         }
@@ -416,7 +546,10 @@ impl FnCx<'_, '_> {
     }
 
     fn target(&self, label: LabelId, tries: &[u32]) -> Result<(), VerifyErrorKind> {
-        let info = self.labels.get(&label).ok_or(VerifyErrorKind::UndeclaredLabel { label })?;
+        let info = self
+            .labels
+            .get(&label)
+            .ok_or(VerifyErrorKind::UndeclaredLabel { label })?;
         // Allowed only from inside every try body that encloses the label.
         if !tries.starts_with(&info.tries) {
             return Err(VerifyErrorKind::JumpIntoTry { label });
@@ -429,14 +562,23 @@ impl FnCx<'_, '_> {
         if allowed.contains(&t) {
             Ok(t)
         } else {
-            Err(VerifyErrorKind::TypeMismatch { expected: allowed.to_vec(), got: t })
+            Err(VerifyErrorKind::TypeMismatch {
+                expected: allowed.to_vec(),
+                got: t,
+            })
         }
     }
 
     fn args(&self, args: &[Expr], params: &[Type]) -> Result<(), VerifyErrorKind> {
-        let got = args.iter().map(|a| self.expr(a)).collect::<Result<Vec<_>, _>>()?;
+        let got = args
+            .iter()
+            .map(|a| self.expr(a))
+            .collect::<Result<Vec<_>, _>>()?;
         if got != params {
-            return Err(VerifyErrorKind::ArgMismatch { expected: params.to_vec(), got });
+            return Err(VerifyErrorKind::ArgMismatch {
+                expected: params.to_vec(),
+                got,
+            });
         }
         Ok(())
     }
@@ -447,9 +589,18 @@ impl FnCx<'_, '_> {
         Ok(sig)
     }
 
-    fn call_indirect(&self, type_idx: u32, table_idx: u32, callee: &Expr, args: &[Expr]) -> Result<FunctionType, VerifyErrorKind> {
+    fn call_indirect(
+        &self,
+        type_idx: u32,
+        table_idx: u32,
+        callee: &Expr,
+        args: &[Expr],
+    ) -> Result<FunctionType, VerifyErrorKind> {
         if table_idx >= self.env.tables {
-            return Err(VerifyErrorKind::TableOutOfRange { idx: table_idx, count: self.env.tables });
+            return Err(VerifyErrorKind::TableOutOfRange {
+                idx: table_idx,
+                count: self.env.tables,
+            });
         }
         let sig = self.env.type_at(type_idx)?;
         self.expect(callee, &I32_LIKE)?;
@@ -462,18 +613,30 @@ impl FnCx<'_, '_> {
             .tags
             .get(tag_idx as usize)
             .copied()
-            .ok_or(VerifyErrorKind::TagOutOfRange { idx: tag_idx, count: self.env.tags.len() as u32 })
+            .ok_or(VerifyErrorKind::TagOutOfRange {
+                idx: tag_idx,
+                count: self.env.tags.len() as u32,
+            })
     }
 
     fn check_op(&self, op: &Op, tries: &[u32]) -> Result<(), VerifyErrorKind> {
         match op {
-            Op::Label { .. } | Op::Unreachable | Op::Nop | Op::MemorySize | Op::Block { .. } | Op::Loop { .. } => {}
+            Op::Label { .. }
+            | Op::Unreachable
+            | Op::Nop
+            | Op::MemorySize
+            | Op::Block { .. }
+            | Op::Loop { .. } => {}
             Op::Jmp { target } => self.target(*target, tries)?,
             Op::JmpIf { cond, target } => {
                 self.expect(cond, &INTS)?;
                 self.target(*target, tries)?;
             }
-            Op::BrTable { index, targets, default } => {
+            Op::BrTable {
+                index,
+                targets,
+                default,
+            } => {
                 self.expect(index, &I32_LIKE)?;
                 for t in targets {
                     self.target(*t, tries)?;
@@ -489,12 +652,20 @@ impl FnCx<'_, '_> {
                 self.expect(cond, &INTS)?;
             }
             Op::Return { vals } => {
-                let got = vals.iter().map(|v| self.expr(v)).collect::<Result<Vec<_>, _>>()?;
+                let got = vals
+                    .iter()
+                    .map(|v| self.expr(v))
+                    .collect::<Result<Vec<_>, _>>()?;
                 if got != self.func.results {
-                    return Err(VerifyErrorKind::ReturnMismatch { expected: self.func.results.clone(), got });
+                    return Err(VerifyErrorKind::ReturnMismatch {
+                        expected: self.func.results.clone(),
+                        got,
+                    });
                 }
             }
-            Op::Switch { scrutinee, cases, .. } => {
+            Op::Switch {
+                scrutinee, cases, ..
+            } => {
                 let t = self.expect(scrutinee, &INTS)?;
                 for (v, _) in cases {
                     if !const_fits(t, *v) {
@@ -508,7 +679,12 @@ impl FnCx<'_, '_> {
             Op::Call { func_idx, args } => {
                 self.call(*func_idx, args)?;
             }
-            Op::CallIndirect { type_idx, table_idx, callee, args } => {
+            Op::CallIndirect {
+                type_idx,
+                table_idx,
+                callee,
+                args,
+            } => {
                 self.call_indirect(*type_idx, *table_idx, callee, args)?;
             }
             Op::TryTable { catches, .. } => {
@@ -517,9 +693,16 @@ impl FnCx<'_, '_> {
                         Some(t) => self.tag(t)?.to_vec(),
                         None => Vec::new(),
                     };
-                    let got = c.bind.iter().map(|&l| self.local(l)).collect::<Result<Vec<_>, _>>()?;
+                    let got = c
+                        .bind
+                        .iter()
+                        .map(|&l| self.local(l))
+                        .collect::<Result<Vec<_>, _>>()?;
                     if got != params {
-                        return Err(VerifyErrorKind::CatchBind { expected: params, got });
+                        return Err(VerifyErrorKind::CatchBind {
+                            expected: params,
+                            got,
+                        });
                     }
                 }
             }
@@ -531,7 +714,10 @@ impl FnCx<'_, '_> {
                 self.expect(buf, &ADDR)?;
                 let t = self.local(*dest)?;
                 if t != Type::I32 {
-                    return Err(VerifyErrorKind::TypeMismatch { expected: vec![Type::I32], got: t });
+                    return Err(VerifyErrorKind::TypeMismatch {
+                        expected: vec![Type::I32],
+                        got: t,
+                    });
                 }
             }
             Op::Longjmp { buf, val } => {
@@ -568,7 +754,15 @@ impl FnCx<'_, '_> {
             Op::MemoryGrow { delta } => {
                 self.expect(delta, &I32_LIKE)?;
             }
-            Op::Atomic { op, width, ptr, val, replacement, dest, .. } => {
+            Op::Atomic {
+                op,
+                width,
+                ptr,
+                val,
+                replacement,
+                dest,
+                ..
+            } => {
                 // The shape table: which operands each atomic op takes. A load
                 // and a read-modify-write yield a value, a store does not, a
                 // fence takes nothing at all.
@@ -608,7 +802,8 @@ impl FnCx<'_, '_> {
                 }
                 if let Some(r) = replacement {
                     let got = self.expect(r, &INTS)?;
-                    let want_wide = *op != AtomicOp::Wait && is_wide_int(want_ty) || *op == AtomicOp::Wait;
+                    let want_wide =
+                        *op != AtomicOp::Wait && is_wide_int(want_ty) || *op == AtomicOp::Wait;
                     if is_wide_int(got) != want_wide {
                         return Err(VerifyErrorKind::AtomicWidth { width: *width });
                     }
@@ -649,7 +844,10 @@ impl FnCx<'_, '_> {
                 self.expect(lhs, &[*ty])?;
                 self.expect(rhs, &[*ty])?;
                 if !binary_ok(*op, *ty) {
-                    return Err(VerifyErrorKind::IllegalOp { op: OpName::Binary(*op), ty: *ty });
+                    return Err(VerifyErrorKind::IllegalOp {
+                        op: OpName::Binary(*op),
+                        ty: *ty,
+                    });
                 }
                 // `ty` is the operand type; a comparison yields an i32 boolean.
                 Ok(if is_comparison(*op) { Type::I32 } else { *ty })
@@ -657,7 +855,10 @@ impl FnCx<'_, '_> {
             Expr::Unary { op, val, ty } => {
                 self.expect(val, &[*ty])?;
                 if !unary_ok(*op, *ty) {
-                    return Err(VerifyErrorKind::IllegalOp { op: OpName::Unary(*op), ty: *ty });
+                    return Err(VerifyErrorKind::IllegalOp {
+                        op: OpName::Unary(*op),
+                        ty: *ty,
+                    });
                 }
                 Ok(*ty)
             }
@@ -665,7 +866,11 @@ impl FnCx<'_, '_> {
                 self.expect(val, &[*from])?;
                 Ok(*to)
             }
-            Expr::Select { cond, then_val, else_val } => {
+            Expr::Select {
+                cond,
+                then_val,
+                else_val,
+            } => {
                 self.expect(cond, &INTS)?;
                 let t = self.expr(then_val)?;
                 self.expect(else_val, &[t])?;
@@ -687,9 +892,12 @@ impl FnCx<'_, '_> {
                 Ok(Type::I32)
             }
             Expr::Call { func_idx, args } => single(self.call(*func_idx, args)?),
-            Expr::CallIndirect { type_idx, table_idx, callee, args } => {
-                single(self.call_indirect(*type_idx, *table_idx, callee, args)?)
-            }
+            Expr::CallIndirect {
+                type_idx,
+                table_idx,
+                callee,
+                args,
+            } => single(self.call_indirect(*type_idx, *table_idx, callee, args)?),
             Expr::LabelAddr(_) => Err(VerifyErrorKind::UnloweredComputedGoto),
         }
     }
@@ -698,7 +906,9 @@ impl FnCx<'_, '_> {
 fn single(sig: FunctionType) -> Result<Type, VerifyErrorKind> {
     match sig.results.as_slice() {
         [t] => Ok(*t),
-        _ => Err(VerifyErrorKind::CallResultArity { results: sig.results }),
+        _ => Err(VerifyErrorKind::CallResultArity {
+            results: sig.results,
+        }),
     }
 }
 
@@ -721,7 +931,12 @@ struct Cfg {
 
 impl Cfg {
     fn build(cx: &FnCx<'_, '_>) -> Cfg {
-        let mut b = CfgBuilder { paths: Vec::new(), label_of: Vec::new(), edges: Vec::new(), falls_off: Vec::new() };
+        let mut b = CfgBuilder {
+            paths: Vec::new(),
+            label_of: Vec::new(),
+            edges: Vec::new(),
+            falls_off: Vec::new(),
+        };
         b.body(&cx.func.body, &Vec::new(), None);
         let mut node_of = BTreeMap::new();
         for (n, l) in b.label_of.iter().enumerate() {
@@ -740,13 +955,22 @@ impl Cfg {
                 succs[from].push(t);
             }
         }
-        Cfg { paths: b.paths, label_of: b.label_of, succs, falls_off: b.falls_off }
+        Cfg {
+            paths: b.paths,
+            label_of: b.label_of,
+            succs,
+            falls_off: b.falls_off,
+        }
     }
 
     fn check(&self, func: &Function) -> Result<(), Fail> {
         let n = self.paths.len();
         if n == 0 {
-            return if func.results.is_empty() { Ok(()) } else { Err((Vec::new(), VerifyErrorKind::MissingReturn)) };
+            return if func.results.is_empty() {
+                Ok(())
+            } else {
+                Err((Vec::new(), VerifyErrorKind::MissingReturn))
+            };
         }
         let dfs = Dfs::run(&self.succs);
         if !func.results.is_empty() {
@@ -766,7 +990,10 @@ fn check_reducible(cfg: &Cfg, dfs: &Dfs) -> Result<(), Fail> {
         if !dominates(&idom, tgt, src) {
             return Err((
                 cfg.paths[src].clone(),
-                VerifyErrorKind::Irreducible { label: cfg.label_of[tgt], target: cfg.paths[tgt].clone() },
+                VerifyErrorKind::Irreducible {
+                    label: cfg.label_of[tgt],
+                    target: cfg.paths[tgt].clone(),
+                },
             ));
         }
     }
@@ -796,11 +1023,19 @@ impl CfgBuilder {
             let mut p = base.clone();
             p.push(i);
             self.paths.push(p);
-            self.label_of.push(if let Op::Label { id, .. } = op { Some(*id) } else { None });
+            self.label_of.push(if let Op::Label { id, .. } = op {
+                Some(*id)
+            } else {
+                None
+            });
         }
         for (i, op) in body.iter().enumerate() {
             let n = first + i;
-            let next = if i + 1 < body.len() { Some(n + 1) } else { exit };
+            let next = if i + 1 < body.len() {
+                Some(n + 1)
+            } else {
+                exit
+            };
             let at = self.paths[n].clone();
             let child = |b: &mut Self, c: usize, ops: &[Op]| {
                 let mut p = at.clone();
@@ -814,20 +1049,30 @@ impl CfgBuilder {
                     self.edges.push((n, To::Label(*target)));
                     self.edge(n, next);
                 }
-                Op::BrTable { targets, default, .. } => {
+                Op::BrTable {
+                    targets, default, ..
+                } => {
                     for t in targets {
                         self.edges.push((n, To::Label(*t)));
                     }
                     self.edges.push((n, To::Label(*default)));
                 }
-                Op::Return { .. } | Op::Unreachable | Op::Throw { .. } | Op::Longjmp { .. } | Op::GotoIndirect { .. } => {}
+                Op::Return { .. }
+                | Op::Unreachable
+                | Op::Throw { .. }
+                | Op::Longjmp { .. }
+                | Op::GotoIndirect { .. } => {}
                 Op::TypeSwitch { .. } | Op::Await { .. } => {
                     for (c, b) in child_bodies(op).into_iter().enumerate() {
                         child(self, c, b);
                     }
                     self.edge(n, next);
                 }
-                Op::Block { .. } | Op::Loop { .. } | Op::If { .. } | Op::Switch { .. } | Op::TryTable { .. } => {
+                Op::Block { .. }
+                | Op::Loop { .. }
+                | Op::If { .. }
+                | Op::Switch { .. }
+                | Op::TryTable { .. } => {
                     for (c, b) in child_bodies(op).into_iter().enumerate() {
                         child(self, c, b);
                     }
@@ -835,7 +1080,11 @@ impl CfgBuilder {
                 _ => self.edge(n, next),
             }
         }
-        if body.is_empty() { exit } else { Some(first) }
+        if body.is_empty() {
+            exit
+        } else {
+            Some(first)
+        }
     }
 }
 
@@ -881,7 +1130,11 @@ impl Dfs {
             }
         }
         post.reverse();
-        Dfs { pre, rpo: post, retreating }
+        Dfs {
+            pre,
+            rpo: post,
+            retreating,
+        }
     }
 }
 
@@ -910,7 +1163,11 @@ fn dominators(succs: &[Vec<usize>], dfs: &Dfs) -> Vec<usize> {
                 if idom[p] == UNSEEN {
                     continue;
                 }
-                new = if new == UNSEEN { p } else { intersect(&idom, &order, p, new) };
+                new = if new == UNSEEN {
+                    p
+                } else {
+                    intersect(&idom, &order, p, new)
+                };
             }
             if new != idom[v] {
                 idom[v] = new;
@@ -945,7 +1202,6 @@ fn dominates(idom: &[usize], a: usize, mut b: usize) -> bool {
         b = idom[b];
     }
 }
-
 
 #[cfg(test)]
 mod tests;

@@ -1720,6 +1720,21 @@ static E *gen_expr(Node *node) {
     return e_local((uint32_t)r, "I32");
   }
 
+  case ND_SETJMP: {
+    // The jmp_buf is an array of int: as an expression it is its address.
+    E *buf = as_type(gen_expr(node->lhs), "Ptr");
+    int r = new_temp("I32");
+    OP(nj_op_setjmp(out, buf, (uint32_t)r));
+    return e_local((uint32_t)r, "I32");
+  }
+
+  case ND_LONGJMP: {
+    E *buf = as_type(gen_expr(node->lhs), "Ptr");
+    E *val = as_type(gen_expr(node->rhs), "I32");
+    OP(nj_op_longjmp(out, buf, val));
+    return e_new(E_CONST_I32, "I32");
+  }
+
   case ND_ATOMIC_FENCE:
     OP(nj_op_atomic(out, "Fence", 0, 0, NULL, NULL, NULL, -1));
     return e_new(E_CONST_I32, "I32");

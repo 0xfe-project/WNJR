@@ -2986,9 +2986,7 @@ mod primitive_index_tests {
 #[cfg(test)]
 mod eh_scope_tests {
     use super::*;
-    use crate::vm::jit::wasm::sir::semantic_ir::{
-        SemanticCatchClause, SemanticTryScope,
-    };
+    use crate::vm::jit::wasm::sir::semantic_ir::{SemanticCatchClause, SemanticTryScope};
 
     fn block(id: u32, start: usize, end: usize) -> RewriteCfgBlock {
         RewriteCfgBlock {
@@ -3007,7 +3005,12 @@ mod eh_scope_tests {
         }
     }
 
-    fn scope(try_op: usize, start: usize, end: usize, catches: collections::Vec<SemanticCatchClause>) -> SemanticTryScope {
+    fn scope(
+        try_op: usize,
+        start: usize,
+        end: usize,
+        catches: collections::Vec<SemanticCatchClause>,
+    ) -> SemanticTryScope {
         SemanticTryScope {
             try_op,
             start,
@@ -3044,13 +3047,10 @@ mod eh_scope_tests {
         let (scopes, block_try_scope) = resolve_try_scopes(&semantic, &cfg);
 
         assert_eq!(scopes.len(), 2, "the unresolvable region must be dropped");
-        assert_eq!(block_try_scope, collections::vec![
-            None,
-            Some(0),
-            Some(1),
-            Some(0),
-            None
-        ]);
+        assert_eq!(
+            block_try_scope,
+            collections::vec![None, Some(0), Some(1), Some(0), None]
+        );
         // The handler of each clause is resolved to the block that contains it.
         assert_eq!(scopes[0].catches[0].handler, SsaTarget(4));
         assert_eq!(scopes[1].catches[0].handler, SsaTarget(2));
@@ -3072,9 +3072,6 @@ mod eh_scope_tests {
         let (scopes, block_try_scope) = resolve_try_scopes(&semantic, &cfg);
 
         assert_eq!(scopes.len(), 1);
-        assert_eq!(
-            block_try_scope,
-            collections::vec![Some(0), Some(0), None]
-        );
+        assert_eq!(block_try_scope, collections::vec![Some(0), Some(0), None]);
     }
 }

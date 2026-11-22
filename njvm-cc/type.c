@@ -393,6 +393,19 @@ void add_type(Node *node) {
   case ND_ATOMIC_FENCE:
     node->ty = ty_void;
     return;
+  case ND_SETJMP:
+    add_type(node->lhs);
+    if (node->lhs->ty->kind != TY_PTR && node->lhs->ty->kind != TY_ARRAY)
+      error_tok(node->lhs->tok, "pointer expected");
+    node->ty = ty_int;
+    return;
+  case ND_LONGJMP:
+    add_type(node->lhs);
+    add_type(node->rhs);
+    if (node->lhs->ty->kind != TY_PTR && node->lhs->ty->kind != TY_ARRAY)
+      error_tok(node->lhs->tok, "pointer expected");
+    node->ty = ty_void;
+    return;
   case ND_MEMORY_SIZE:
     // memory.size yields an i32 page count, and C multiplies it by a page size,
     // so it is carried as the eight-byte long this frontend uses for size_t.

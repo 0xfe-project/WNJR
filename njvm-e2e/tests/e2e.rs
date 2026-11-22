@@ -12,7 +12,11 @@ fn init() {
 }
 
 fn report(ms: &[Mismatch]) -> String {
-    ms.iter().take(20).map(|m| m.to_string()).collect::<Vec<_>>().join("\n")
+    ms.iter()
+        .take(20)
+        .map(|m| m.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[test]
@@ -51,14 +55,23 @@ fn wrong_pass_is_reported() {
     let all = cases::all();
     let passes = [Pass::new("add-to-sub", swap_add_for_sub)];
     let ms = check(&all, &passes).expect("harness");
-    assert!(!ms.is_empty(), "the harness accepted a pass that rewrites Add to Sub");
+    assert!(
+        !ms.is_empty(),
+        "the harness accepted a pass that rewrites Add to Sub"
+    );
     // It must be caught as a change against the baseline, on both hosts.
     for host in ["WNJR", "bun"] {
         let what = format!("passes vs baseline ({host})");
-        assert!(ms.iter().any(|m| m.what == what), "{host}: no baseline difference reported");
+        assert!(
+            ms.iter().any(|m| m.what == what),
+            "{host}: no baseline difference reported"
+        );
     }
     let cases_hit: std::collections::BTreeSet<_> = ms.iter().map(|m| m.case.as_str()).collect();
-    assert!(cases_hit.contains("control/loop_sum"), "loop_sum not caught: {cases_hit:?}");
+    assert!(
+        cases_hit.contains("control/loop_sum"),
+        "loop_sum not caught: {cases_hit:?}"
+    );
 }
 
 /// With several passes, check_each names the one that breaks things: the
@@ -67,10 +80,31 @@ fn wrong_pass_is_reported() {
 fn check_each_names_the_guilty_pass() {
     init();
     let all = cases::all();
-    let passes = [Pass::new("commute-pure-operands", commute_pure_operands), Pass::new("add-to-sub", swap_add_for_sub)];
+    let passes = [
+        Pass::new("commute-pure-operands", commute_pure_operands),
+        Pass::new("add-to-sub", swap_add_for_sub),
+    ];
     let per = njvm_e2e::check_each(&all, &passes).expect("harness");
-    let get = |name: &str| per.iter().find(|(l, _)| l == name).unwrap_or_else(|| panic!("no entry {name}: {:?}", per.iter().map(|p| &p.0).collect::<Vec<_>>())).1.len();
-    assert_eq!(get("commute-pure-operands"), 0, "the correct pass was blamed");
+    let get = |name: &str| {
+        per.iter()
+            .find(|(l, _)| l == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no entry {name}: {:?}",
+                    per.iter().map(|p| &p.0).collect::<Vec<_>>()
+                )
+            })
+            .1
+            .len()
+    };
+    assert_eq!(
+        get("commute-pure-operands"),
+        0,
+        "the correct pass was blamed"
+    );
     assert!(get("add-to-sub") > 0, "the wrong pass was not blamed");
-    assert!(get("commute-pure-operands + add-to-sub") > 0, "the combined list was not reported");
+    assert!(
+        get("commute-pure-operands + add-to-sub") > 0,
+        "the combined list was not reported"
+    );
 }

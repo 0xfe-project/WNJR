@@ -2673,7 +2673,10 @@ fn lowers_direct_local_call_with_continuation_block() {
             ref success,
             ref thrown,
         } => {
-            assert!(thrown.is_none(), "a call outside a try_table has no thrown edge");
+            assert!(
+                thrown.is_none(),
+                "a call outside a try_table has no thrown edge"
+            );
             assert_eq!(callee, MachineFuncId(1));
             assert_eq!(frame_delta, u32::from(caller_frame.operand_slot(1).0) * 8);
             assert_eq!(args.frame_params.base_slot, caller_frame.operand_slot(1).0);

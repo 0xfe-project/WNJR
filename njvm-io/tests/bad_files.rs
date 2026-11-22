@@ -2,8 +2,8 @@
 
 mod common;
 
-use wnjr_core::njvm::{Function, ModuleBuilder, Op, VerifyErrorKind};
 use njvm_io::{read_module, write_module, Error, FORMAT_VERSION};
+use wnjr_core::njvm::{Function, ModuleBuilder, Op, VerifyErrorKind};
 
 /// The envelope begins `82 a7 "version" <fixint>`; the version byte is at 9.
 const VERSION_BYTE: usize = 9;
@@ -23,11 +23,17 @@ fn truncated_bytes_are_a_decode_error() {
 #[test]
 fn wrong_version_is_a_version_error() {
     let mut bytes = write_module(&common::add());
-    assert_eq!(&bytes[..VERSION_BYTE], b"\x82\xa7version", "envelope prefix changed");
+    assert_eq!(
+        &bytes[..VERSION_BYTE],
+        b"\x82\xa7version",
+        "envelope prefix changed"
+    );
     assert_eq!(bytes[VERSION_BYTE], FORMAT_VERSION as u8);
     bytes[VERSION_BYTE] = 2; // positive fixint 2
     match read_module(&bytes) {
-        Err(Error::UnsupportedVersion { found: 2, expected }) => assert_eq!(expected, FORMAT_VERSION),
+        Err(Error::UnsupportedVersion { found: 2, expected }) => {
+            assert_eq!(expected, FORMAT_VERSION)
+        }
         other => panic!("expected UnsupportedVersion, got {other:?}"),
     }
 }

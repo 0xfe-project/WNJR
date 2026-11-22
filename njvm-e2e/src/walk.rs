@@ -33,8 +33,14 @@ pub fn walk_expr(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             walk_expr(lhs, f);
             walk_expr(rhs, f);
         }
-        Expr::Unary { val, .. } | Expr::Convert { val, .. } | Expr::LocalTee { val, .. } => walk_expr(val, f),
-        Expr::Select { cond, then_val, else_val } => {
+        Expr::Unary { val, .. } | Expr::Convert { val, .. } | Expr::LocalTee { val, .. } => {
+            walk_expr(val, f)
+        }
+        Expr::Select {
+            cond,
+            then_val,
+            else_val,
+        } => {
             walk_expr(cond, f);
             walk_expr(then_val, f);
             walk_expr(else_val, f);
@@ -62,13 +68,21 @@ pub fn walk_op(op: &mut Op, f: &mut dyn FnMut(&mut Expr)) {
             walk_expr(val, f);
         }
         Op::Block { body } | Op::Loop { body } => walk_ops(body, f),
-        Op::If { cond, then_body, else_body } => {
+        Op::If {
+            cond,
+            then_body,
+            else_body,
+        } => {
             walk_expr(cond, f);
             walk_ops(then_body, f);
             walk_ops(else_body, f);
         }
         Op::Return { vals } => walk_all(vals, f),
-        Op::Switch { scrutinee, cases, default } => {
+        Op::Switch {
+            scrutinee,
+            cases,
+            default,
+        } => {
             walk_expr(scrutinee, f);
             for (_, body) in cases {
                 walk_ops(body, f);
@@ -102,7 +116,10 @@ pub fn walk_op(op: &mut Op, f: &mut dyn FnMut(&mut Expr)) {
             walk_expr(channel, f);
             walk_ops(fallback, f);
         }
-        Op::Yield { val } | Op::LocalSet { val, .. } | Op::GlobalSet { val, .. } | Op::Drop { val } => walk_expr(val, f),
+        Op::Yield { val }
+        | Op::LocalSet { val, .. }
+        | Op::GlobalSet { val, .. }
+        | Op::Drop { val } => walk_expr(val, f),
         Op::MemoryCopy { dest, src, len } => {
             walk_expr(dest, f);
             walk_expr(src, f);
@@ -146,18 +163,30 @@ pub fn commute_pure_operands(module: &Module) -> Module {
             Expr::Const { .. } | Expr::LocalGet(_) | Expr::GlobalGet(_) => true,
             Expr::Binary { lhs, rhs, .. } => pure(lhs) && pure(rhs),
             Expr::Unary { val, .. } | Expr::Convert { val, .. } => pure(val),
-            Expr::Select { cond, then_val, else_val } => pure(cond) && pure(then_val) && pure(else_val),
+            Expr::Select {
+                cond,
+                then_val,
+                else_val,
+            } => pure(cond) && pure(then_val) && pure(else_val),
             Expr::Load { ptr, .. } => pure(ptr),
             // Both read or write the memory size, so neither is safe to
             // reorder against another access.
             Expr::MemorySize => true,
             Expr::MemoryGrow { .. } => false,
-            Expr::LocalTee { .. } | Expr::Call { .. } | Expr::CallIndirect { .. } | Expr::LabelAddr(_) => false,
+            Expr::LocalTee { .. }
+            | Expr::Call { .. }
+            | Expr::CallIndirect { .. }
+            | Expr::LabelAddr(_) => false,
         }
     }
     rewrite_exprs(module, &mut |e| {
         if let Expr::Binary { op, lhs, rhs, .. } = e {
-            if matches!(op, BinaryOp::Add | BinaryOp::Mul | BinaryOp::And | BinaryOp::Or | BinaryOp::Xor) && pure(lhs) && pure(rhs) {
+            if matches!(
+                op,
+                BinaryOp::Add | BinaryOp::Mul | BinaryOp::And | BinaryOp::Or | BinaryOp::Xor
+            ) && pure(lhs)
+                && pure(rhs)
+            {
                 core::mem::swap(lhs, rhs);
             }
         }

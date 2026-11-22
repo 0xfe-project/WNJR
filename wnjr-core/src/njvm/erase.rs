@@ -57,7 +57,9 @@
 //! The pass checks types itself and returns an error rather than panicking
 //! on input the N3 verifier would have rejected.
 
-use wasm_encoder::{BlockType, Catch as WasmCatch, Ieee32, Ieee64, InstructionSink, MemArg, ValType};
+use wasm_encoder::{
+    BlockType, Catch as WasmCatch, Ieee32, Ieee64, InstructionSink, MemArg, ValType,
+};
 
 use crate::collections::Vec;
 
@@ -84,39 +86,83 @@ pub enum EraseErrorKind {
     /// structured control flow.
     Stackify(StackifyError),
     /// An op this straight-line pass does not lower (structured control etc.).
-    Unsupported { op: &'static str },
+    Unsupported {
+        op: &'static str,
+    },
     /// An op whose lowering is deliberately not written in this version;
     /// `reason` says why (no consumer yet, operand shape undefined, ...).
-    NotImplemented { op: &'static str, reason: &'static str },
+    NotImplemented {
+        op: &'static str,
+        reason: &'static str,
+    },
     /// `Expr::LabelAddr` or `Op::GotoIndirect` is still present.
     UnloweredComputedGoto,
     /// A local declared with a narrow type; wasm has no such local type.
-    NarrowLocal { idx: u32, ty: Type },
+    NarrowLocal {
+        idx: u32,
+        ty: Type,
+    },
     /// A narrow type where a full wasm value is required (Binary/Unary/Select
     /// operand, Const, call argument, ...).
-    NarrowValue { ty: Type },
+    NarrowValue {
+        ty: Type,
+    },
     /// The operator is not defined for this type (e.g. Sqrt on I32).
-    IllegalBinary { op: BinaryOp, ty: Type },
-    IllegalUnary { op: UnaryOp, ty: Type },
+    IllegalBinary {
+        op: BinaryOp,
+        ty: Type,
+    },
+    IllegalUnary {
+        op: UnaryOp,
+        ty: Type,
+    },
     /// An operand has type `got` where `expected` was needed.
-    TypeMismatch { expected: Type, got: Type },
+    TypeMismatch {
+        expected: Type,
+        got: Type,
+    },
     /// A store/address/condition operand of the wrong wasm class.
-    ClassMismatch { expected: ValType, got: Type },
+    ClassMismatch {
+        expected: ValType,
+        got: Type,
+    },
     /// A constant whose value does not fit its declared type.
-    ConstMismatch { ty: Type, val: ConstVal },
-    LocalOutOfRange { idx: u32 },
-    GlobalOutOfRange { idx: u32 },
-    FuncOutOfRange { idx: u32 },
-    TypeOutOfRange { idx: u32 },
-    TagOutOfRange { idx: u32 },
+    ConstMismatch {
+        ty: Type,
+        val: ConstVal,
+    },
+    LocalOutOfRange {
+        idx: u32,
+    },
+    GlobalOutOfRange {
+        idx: u32,
+    },
+    FuncOutOfRange {
+        idx: u32,
+    },
+    TypeOutOfRange {
+        idx: u32,
+    },
+    TagOutOfRange {
+        idx: u32,
+    },
     /// Call/throw/return values do not match the signature.
-    ArityMismatch { expected: usize, got: usize },
+    ArityMismatch {
+        expected: usize,
+        got: usize,
+    },
     /// A call used as an expression must have exactly one result.
-    CallResultArity { results: usize },
+    CallResultArity {
+        results: usize,
+    },
     /// An atomic op missing an operand it needs, or carrying one it does not.
-    AtomicShape { op: AtomicOp },
+    AtomicShape {
+        op: AtomicOp,
+    },
     /// An access width wasm has no atomic instruction for.
-    AtomicWidth { width: u8 },
+    AtomicWidth {
+        width: u8,
+    },
 }
 
 impl core::fmt::Display for EraseError {
@@ -162,7 +208,13 @@ impl<'m> Env<'m> {
         }
         globals.extend(module.globals.iter().map(|g| g.ty.ty));
         tags.extend(module.tags.iter().map(|t| t.params.as_slice()));
-        Env { funcs, module, globals, tags, tag_blocks: Vec::new() }
+        Env {
+            funcs,
+            module,
+            globals,
+            tags,
+            tag_blocks: Vec::new(),
+        }
     }
 
     /// Supply the block type indices of multi-value tags (see `tag_blocks`).
@@ -214,7 +266,11 @@ fn wide(t: Type) -> Result<ValType, EraseErrorKind> {
 }
 
 fn memarg(offset: u32, align: u32) -> MemArg {
-    MemArg { offset: offset as u64, align, memory_index: 0 }
+    MemArg {
+        offset: offset as u64,
+        align,
+        memory_index: 0,
+    }
 }
 
 /// Does any op (at any depth) jump?
@@ -222,7 +278,11 @@ fn has_jumps(body: &[Op]) -> bool {
     body.iter().any(|op| match op {
         Op::Jmp { .. } | Op::JmpIf { .. } | Op::BrTable { .. } => true,
         Op::Block { body } | Op::Loop { body } => has_jumps(body),
-        Op::If { then_body, else_body, .. } => has_jumps(then_body) || has_jumps(else_body),
+        Op::If {
+            then_body,
+            else_body,
+            ..
+        } => has_jumps(then_body) || has_jumps(else_body),
         Op::Switch { cases, default, .. } => {
             cases.iter().any(|(_, b)| has_jumps(b)) || has_jumps(default)
         }
@@ -265,8 +325,10 @@ pub fn lower_function(env: &Env<'_>, func: &Function) -> Result<Lowered, EraseEr
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     if has_jumps(&func.body) {
         // N6: restructure the flat CFG into a tree, then emit it.
-        let tree = stackify(&func.body)
-            .map_err(|e| EraseError { at: None, kind: EraseErrorKind::Stackify(e) })?;
+        let tree = stackify(&func.body).map_err(|e| EraseError {
+            at: None,
+            kind: EraseErrorKind::Stackify(e),
+        })?;
         let mut sink = InstructionSink::new(&mut code);
         cx.emit_tree(&mut sink, &func.body, &tree, None)?;
         // A result-returning function whose structured body never falls off the
@@ -279,7 +341,8 @@ pub fn lower_function(env: &Env<'_>, func: &Function) -> Result<Lowered, EraseEr
     } else {
         let mut sink = InstructionSink::new(&mut code);
         for (i, op) in func.body.iter().enumerate() {
-            cx.op(&mut sink, op).map_err(|kind| EraseError { at: Some(i), kind })?;
+            cx.op(&mut sink, op)
+                .map_err(|kind| EraseError { at: Some(i), kind })?;
         }
         if !func.results.is_empty() {
             sink.unreachable();
@@ -292,7 +355,11 @@ pub fn lower_function(env: &Env<'_>, func: &Function) -> Result<Lowered, EraseEr
 
 impl Cx<'_, '_> {
     fn scratch(&mut self, vt: ValType) -> u32 {
-        let slot = if vt == ValType::I64 { &mut self.scratch_i64 } else { &mut self.scratch_i32 };
+        let slot = if vt == ValType::I64 {
+            &mut self.scratch_i64
+        } else {
+            &mut self.scratch_i32
+        };
         if let Some(i) = *slot {
             return i;
         }
@@ -381,45 +448,123 @@ impl Cx<'_, '_> {
         }
 
         match (op, width) {
-            (AtomicOp::Load, 1) => { s.i32_atomic_load8_u(m); }
-            (AtomicOp::Load, 2) => { s.i32_atomic_load16_u(m); }
-            (AtomicOp::Load, 4) => { s.i32_atomic_load(m); }
-            (AtomicOp::Load, 8) => { s.i64_atomic_load(m); }
-            (AtomicOp::Store, 1) => { s.i32_atomic_store8(m); }
-            (AtomicOp::Store, 2) => { s.i32_atomic_store16(m); }
-            (AtomicOp::Store, 4) => { s.i32_atomic_store(m); }
-            (AtomicOp::Store, 8) => { s.i64_atomic_store(m); }
-            (AtomicOp::Add, 1) => { s.i32_atomic_rmw8_add_u(m); }
-            (AtomicOp::Add, 2) => { s.i32_atomic_rmw16_add_u(m); }
-            (AtomicOp::Add, 4) => { s.i32_atomic_rmw_add(m); }
-            (AtomicOp::Add, 8) => { s.i64_atomic_rmw_add(m); }
-            (AtomicOp::Sub, 1) => { s.i32_atomic_rmw8_sub_u(m); }
-            (AtomicOp::Sub, 2) => { s.i32_atomic_rmw16_sub_u(m); }
-            (AtomicOp::Sub, 4) => { s.i32_atomic_rmw_sub(m); }
-            (AtomicOp::Sub, 8) => { s.i64_atomic_rmw_sub(m); }
-            (AtomicOp::And, 1) => { s.i32_atomic_rmw8_and_u(m); }
-            (AtomicOp::And, 2) => { s.i32_atomic_rmw16_and_u(m); }
-            (AtomicOp::And, 4) => { s.i32_atomic_rmw_and(m); }
-            (AtomicOp::And, 8) => { s.i64_atomic_rmw_and(m); }
-            (AtomicOp::Or, 1) => { s.i32_atomic_rmw8_or_u(m); }
-            (AtomicOp::Or, 2) => { s.i32_atomic_rmw16_or_u(m); }
-            (AtomicOp::Or, 4) => { s.i32_atomic_rmw_or(m); }
-            (AtomicOp::Or, 8) => { s.i64_atomic_rmw_or(m); }
-            (AtomicOp::Xor, 1) => { s.i32_atomic_rmw8_xor_u(m); }
-            (AtomicOp::Xor, 2) => { s.i32_atomic_rmw16_xor_u(m); }
-            (AtomicOp::Xor, 4) => { s.i32_atomic_rmw_xor(m); }
-            (AtomicOp::Xor, 8) => { s.i64_atomic_rmw_xor(m); }
-            (AtomicOp::Xchg, 1) => { s.i32_atomic_rmw8_xchg_u(m); }
-            (AtomicOp::Xchg, 2) => { s.i32_atomic_rmw16_xchg_u(m); }
-            (AtomicOp::Xchg, 4) => { s.i32_atomic_rmw_xchg(m); }
-            (AtomicOp::Xchg, 8) => { s.i64_atomic_rmw_xchg(m); }
-            (AtomicOp::Cmpxchg, 1) => { s.i32_atomic_rmw8_cmpxchg_u(m); }
-            (AtomicOp::Cmpxchg, 2) => { s.i32_atomic_rmw16_cmpxchg_u(m); }
-            (AtomicOp::Cmpxchg, 4) => { s.i32_atomic_rmw_cmpxchg(m); }
-            (AtomicOp::Cmpxchg, 8) => { s.i64_atomic_rmw_cmpxchg(m); }
-            (AtomicOp::Wait, 4) => { s.memory_atomic_wait32(m); }
-            (AtomicOp::Wait, 8) => { s.memory_atomic_wait64(m); }
-            (AtomicOp::Notify, 4) => { s.memory_atomic_notify(m); }
+            (AtomicOp::Load, 1) => {
+                s.i32_atomic_load8_u(m);
+            }
+            (AtomicOp::Load, 2) => {
+                s.i32_atomic_load16_u(m);
+            }
+            (AtomicOp::Load, 4) => {
+                s.i32_atomic_load(m);
+            }
+            (AtomicOp::Load, 8) => {
+                s.i64_atomic_load(m);
+            }
+            (AtomicOp::Store, 1) => {
+                s.i32_atomic_store8(m);
+            }
+            (AtomicOp::Store, 2) => {
+                s.i32_atomic_store16(m);
+            }
+            (AtomicOp::Store, 4) => {
+                s.i32_atomic_store(m);
+            }
+            (AtomicOp::Store, 8) => {
+                s.i64_atomic_store(m);
+            }
+            (AtomicOp::Add, 1) => {
+                s.i32_atomic_rmw8_add_u(m);
+            }
+            (AtomicOp::Add, 2) => {
+                s.i32_atomic_rmw16_add_u(m);
+            }
+            (AtomicOp::Add, 4) => {
+                s.i32_atomic_rmw_add(m);
+            }
+            (AtomicOp::Add, 8) => {
+                s.i64_atomic_rmw_add(m);
+            }
+            (AtomicOp::Sub, 1) => {
+                s.i32_atomic_rmw8_sub_u(m);
+            }
+            (AtomicOp::Sub, 2) => {
+                s.i32_atomic_rmw16_sub_u(m);
+            }
+            (AtomicOp::Sub, 4) => {
+                s.i32_atomic_rmw_sub(m);
+            }
+            (AtomicOp::Sub, 8) => {
+                s.i64_atomic_rmw_sub(m);
+            }
+            (AtomicOp::And, 1) => {
+                s.i32_atomic_rmw8_and_u(m);
+            }
+            (AtomicOp::And, 2) => {
+                s.i32_atomic_rmw16_and_u(m);
+            }
+            (AtomicOp::And, 4) => {
+                s.i32_atomic_rmw_and(m);
+            }
+            (AtomicOp::And, 8) => {
+                s.i64_atomic_rmw_and(m);
+            }
+            (AtomicOp::Or, 1) => {
+                s.i32_atomic_rmw8_or_u(m);
+            }
+            (AtomicOp::Or, 2) => {
+                s.i32_atomic_rmw16_or_u(m);
+            }
+            (AtomicOp::Or, 4) => {
+                s.i32_atomic_rmw_or(m);
+            }
+            (AtomicOp::Or, 8) => {
+                s.i64_atomic_rmw_or(m);
+            }
+            (AtomicOp::Xor, 1) => {
+                s.i32_atomic_rmw8_xor_u(m);
+            }
+            (AtomicOp::Xor, 2) => {
+                s.i32_atomic_rmw16_xor_u(m);
+            }
+            (AtomicOp::Xor, 4) => {
+                s.i32_atomic_rmw_xor(m);
+            }
+            (AtomicOp::Xor, 8) => {
+                s.i64_atomic_rmw_xor(m);
+            }
+            (AtomicOp::Xchg, 1) => {
+                s.i32_atomic_rmw8_xchg_u(m);
+            }
+            (AtomicOp::Xchg, 2) => {
+                s.i32_atomic_rmw16_xchg_u(m);
+            }
+            (AtomicOp::Xchg, 4) => {
+                s.i32_atomic_rmw_xchg(m);
+            }
+            (AtomicOp::Xchg, 8) => {
+                s.i64_atomic_rmw_xchg(m);
+            }
+            (AtomicOp::Cmpxchg, 1) => {
+                s.i32_atomic_rmw8_cmpxchg_u(m);
+            }
+            (AtomicOp::Cmpxchg, 2) => {
+                s.i32_atomic_rmw16_cmpxchg_u(m);
+            }
+            (AtomicOp::Cmpxchg, 4) => {
+                s.i32_atomic_rmw_cmpxchg(m);
+            }
+            (AtomicOp::Cmpxchg, 8) => {
+                s.i64_atomic_rmw_cmpxchg(m);
+            }
+            (AtomicOp::Wait, 4) => {
+                s.memory_atomic_wait32(m);
+            }
+            (AtomicOp::Wait, 8) => {
+                s.memory_atomic_wait64(m);
+            }
+            (AtomicOp::Notify, 4) => {
+                s.memory_atomic_notify(m);
+            }
             (AtomicOp::Notify, 8) => return Err(EraseErrorKind::AtomicWidth { width }),
             (AtomicOp::Fence, _) => unreachable!("fence returned above"),
             // The combinations wasm does not have: a 64-bit operand with a
@@ -439,7 +584,10 @@ impl Cx<'_, '_> {
             Some(d) => {
                 let have = self.local(d)?;
                 if class(have) != vt {
-                    return Err(EraseErrorKind::ClassMismatch { expected: vt, got: have });
+                    return Err(EraseErrorKind::ClassMismatch {
+                        expected: vt,
+                        got: have,
+                    });
                 }
                 s.local_set(d);
             }
@@ -466,7 +614,10 @@ impl Cx<'_, '_> {
                 s.i32_wrap_i64();
                 Ok(())
             }
-            _ => Err(EraseErrorKind::ClassMismatch { expected: ValType::I32, got: t }),
+            _ => Err(EraseErrorKind::ClassMismatch {
+                expected: ValType::I32,
+                got: t,
+            }),
         }
     }
 
@@ -476,16 +627,29 @@ impl Cx<'_, '_> {
         if i < p {
             Ok(self.func.params[i])
         } else {
-            self.func.locals.get(i - p).copied().ok_or(EraseErrorKind::LocalOutOfRange { idx })
+            self.func
+                .locals
+                .get(i - p)
+                .copied()
+                .ok_or(EraseErrorKind::LocalOutOfRange { idx })
         }
     }
 
     fn global(&self, idx: u32) -> Result<Type, EraseErrorKind> {
-        self.env.globals.get(idx as usize).copied().ok_or(EraseErrorKind::GlobalOutOfRange { idx })
+        self.env
+            .globals
+            .get(idx as usize)
+            .copied()
+            .ok_or(EraseErrorKind::GlobalOutOfRange { idx })
     }
 
     /// Lower `e` and require exactly type `t`.
-    fn expect(&mut self, s: &mut InstructionSink<'_>, e: &Expr, t: Type) -> Result<(), EraseErrorKind> {
+    fn expect(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        e: &Expr,
+        t: Type,
+    ) -> Result<(), EraseErrorKind> {
         let got = self.expr(s, e)?;
         if got != t {
             return Err(EraseErrorKind::TypeMismatch { expected: t, got });
@@ -494,7 +658,12 @@ impl Cx<'_, '_> {
     }
 
     /// Lower `e` and require its wasm class to be `vt` (narrow allowed for i32).
-    fn expect_class(&mut self, s: &mut InstructionSink<'_>, e: &Expr, vt: ValType) -> Result<Type, EraseErrorKind> {
+    fn expect_class(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        e: &Expr,
+        vt: ValType,
+    ) -> Result<Type, EraseErrorKind> {
         let got = self.expr(s, e)?;
         if class(got) != vt {
             return Err(EraseErrorKind::ClassMismatch { expected: vt, got });
@@ -511,13 +680,24 @@ impl Cx<'_, '_> {
                 s.i64_const(0).i64_ne();
                 Ok(())
             }
-            _ => Err(EraseErrorKind::ClassMismatch { expected: ValType::I32, got: t }),
+            _ => Err(EraseErrorKind::ClassMismatch {
+                expected: ValType::I32,
+                got: t,
+            }),
         }
     }
 
-    fn args(&mut self, s: &mut InstructionSink<'_>, args: &[Expr], params: &[Type]) -> Result<(), EraseErrorKind> {
+    fn args(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        args: &[Expr],
+        params: &[Type],
+    ) -> Result<(), EraseErrorKind> {
         if args.len() != params.len() {
-            return Err(EraseErrorKind::ArityMismatch { expected: params.len(), got: args.len() });
+            return Err(EraseErrorKind::ArityMismatch {
+                expected: params.len(),
+                got: args.len(),
+            });
         }
         for (a, &p) in args.iter().zip(params) {
             self.expect(s, a, p)?;
@@ -526,7 +706,11 @@ impl Cx<'_, '_> {
     }
 
     fn func_sig(&self, idx: u32) -> Result<(&[Type], &[Type]), EraseErrorKind> {
-        self.env.funcs.get(idx as usize).copied().ok_or(EraseErrorKind::FuncOutOfRange { idx })
+        self.env
+            .funcs
+            .get(idx as usize)
+            .copied()
+            .ok_or(EraseErrorKind::FuncOutOfRange { idx })
     }
 
     fn type_sig(&self, idx: u32) -> Result<(&[Type], &[Type]), EraseErrorKind> {
@@ -539,7 +723,12 @@ impl Cx<'_, '_> {
     }
 
     /// Emit a direct call; returns the result types.
-    fn call(&mut self, s: &mut InstructionSink<'_>, func_idx: u32, args: &[Expr]) -> Result<Vec<Type>, EraseErrorKind> {
+    fn call(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        func_idx: u32,
+        args: &[Expr],
+    ) -> Result<Vec<Type>, EraseErrorKind> {
         let (params, results) = self.func_sig(func_idx)?;
         let (params, results) = (params.to_vec(), results.to_vec());
         self.args(s, args, &params)?;
@@ -560,7 +749,10 @@ impl Cx<'_, '_> {
         self.args(s, args, &params)?;
         let t = self.expr(s, callee)?;
         if is_narrow(t) || class(t) != ValType::I32 {
-            return Err(EraseErrorKind::ClassMismatch { expected: ValType::I32, got: t });
+            return Err(EraseErrorKind::ClassMismatch {
+                expected: ValType::I32,
+                got: t,
+            });
         }
         s.call_indirect(table_idx, type_idx);
         Ok(results)
@@ -574,8 +766,12 @@ impl Cx<'_, '_> {
                 match (class(*ty), *val) {
                     (ValType::I32, ConstVal::I32(v)) => s.i32_const(v),
                     (ValType::I64, ConstVal::I64(v)) => s.i64_const(v),
-                    (ValType::F32, ConstVal::F32(b)) => s.f32_const(Ieee32::from(f32::from_bits(b))),
-                    (ValType::F64, ConstVal::F64(b)) => s.f64_const(Ieee64::from(f64::from_bits(b))),
+                    (ValType::F32, ConstVal::F32(b)) => {
+                        s.f32_const(Ieee32::from(f32::from_bits(b)))
+                    }
+                    (ValType::F64, ConstVal::F64(b)) => {
+                        s.f64_const(Ieee64::from(f64::from_bits(b)))
+                    }
                     _ => return Err(EraseErrorKind::ConstMismatch { ty: *ty, val: *val }),
                 };
                 Ok(*ty)
@@ -587,7 +783,11 @@ impl Cx<'_, '_> {
                 convert(s, *from, *to);
                 Ok(*to)
             }
-            Expr::Select { cond, then_val, else_val } => {
+            Expr::Select {
+                cond,
+                then_val,
+                else_val,
+            } => {
                 let t = self.expr(s, then_val)?;
                 wide(t)?;
                 self.expect(s, else_val, t)?;
@@ -595,18 +795,47 @@ impl Cx<'_, '_> {
                 s.select();
                 Ok(t)
             }
-            Expr::Load { ty, ptr, offset, align } => {
+            Expr::Load {
+                ty,
+                ptr,
+                offset,
+                align,
+            } => {
                 self.addr(s, ptr)?;
                 let m = memarg(*offset, *align);
                 Ok(match ty {
-                    MemType::I8 => { s.i32_load8_s(m); Type::I8 }
-                    MemType::U8 => { s.i32_load8_u(m); Type::U8 }
-                    MemType::I16 => { s.i32_load16_s(m); Type::I16 }
-                    MemType::U16 => { s.i32_load16_u(m); Type::U16 }
-                    MemType::I32 => { s.i32_load(m); Type::I32 }
-                    MemType::I64 => { s.i64_load(m); Type::I64 }
-                    MemType::F32 => { s.f32_load(m); Type::F32 }
-                    MemType::F64 => { s.f64_load(m); Type::F64 }
+                    MemType::I8 => {
+                        s.i32_load8_s(m);
+                        Type::I8
+                    }
+                    MemType::U8 => {
+                        s.i32_load8_u(m);
+                        Type::U8
+                    }
+                    MemType::I16 => {
+                        s.i32_load16_s(m);
+                        Type::I16
+                    }
+                    MemType::U16 => {
+                        s.i32_load16_u(m);
+                        Type::U16
+                    }
+                    MemType::I32 => {
+                        s.i32_load(m);
+                        Type::I32
+                    }
+                    MemType::I64 => {
+                        s.i64_load(m);
+                        Type::I64
+                    }
+                    MemType::F32 => {
+                        s.f32_load(m);
+                        Type::F32
+                    }
+                    MemType::F64 => {
+                        s.f64_load(m);
+                        Type::F64
+                    }
                 })
             }
             Expr::LocalGet(idx) => {
@@ -638,7 +867,12 @@ impl Cx<'_, '_> {
                 let r = self.call(s, *func_idx, args)?;
                 single(&r)
             }
-            Expr::CallIndirect { type_idx, table_idx, callee, args } => {
+            Expr::CallIndirect {
+                type_idx,
+                table_idx,
+                callee,
+                args,
+            } => {
                 let r = self.call_indirect(s, *type_idx, *table_idx, callee, args)?;
                 single(&r)
             }
@@ -696,7 +930,10 @@ impl Cx<'_, '_> {
         let t = self.expr(s, scrutinee)?;
         let vt = class(t);
         if !matches!(vt, ValType::I32 | ValType::I64) {
-            return Err(EraseErrorKind::ClassMismatch { expected: ValType::I32, got: t });
+            return Err(EraseErrorKind::ClassMismatch {
+                expected: ValType::I32,
+                got: t,
+            });
         }
         // Distinct case values (first wins), as integers in the order of the
         // scrutinee's signedness, with the index of the arm they select.
@@ -716,7 +953,9 @@ impl Cx<'_, '_> {
         let k = arms.len() as u32;
         let (min, max) = arms
             .iter()
-            .fold((i128::MAX, i128::MIN), |(lo, hi), (n, _)| (lo.min(*n), hi.max(*n)));
+            .fold((i128::MAX, i128::MIN), |(lo, hi), (n, _)| {
+                (lo.min(*n), hi.max(*n))
+            });
         let span = if arms.is_empty() { 0 } else { max - min + 1 };
         let dense = arms.len() >= DENSE_MIN_CASES
             && span <= DENSE_MAX_SPAN_PER_CASE * arms.len() as i128
@@ -803,19 +1042,61 @@ impl Cx<'_, '_> {
                 Add => s.i32_add(),
                 Sub => s.i32_sub(),
                 Mul => s.i32_mul(),
-                Div => if u { s.i32_div_u() } else { s.i32_div_s() },
-                Rem => if u { s.i32_rem_u() } else { s.i32_rem_s() },
+                Div => {
+                    if u {
+                        s.i32_div_u()
+                    } else {
+                        s.i32_div_s()
+                    }
+                }
+                Rem => {
+                    if u {
+                        s.i32_rem_u()
+                    } else {
+                        s.i32_rem_s()
+                    }
+                }
                 And => s.i32_and(),
                 Or => s.i32_or(),
                 Xor => s.i32_xor(),
                 Shl => s.i32_shl(),
-                Shr => if u { s.i32_shr_u() } else { s.i32_shr_s() },
+                Shr => {
+                    if u {
+                        s.i32_shr_u()
+                    } else {
+                        s.i32_shr_s()
+                    }
+                }
                 Rotl => s.i32_rotl(),
                 Rotr => s.i32_rotr(),
-                Lt => if u { s.i32_lt_u() } else { s.i32_lt_s() },
-                Le => if u { s.i32_le_u() } else { s.i32_le_s() },
-                Gt => if u { s.i32_gt_u() } else { s.i32_gt_s() },
-                Ge => if u { s.i32_ge_u() } else { s.i32_ge_s() },
+                Lt => {
+                    if u {
+                        s.i32_lt_u()
+                    } else {
+                        s.i32_lt_s()
+                    }
+                }
+                Le => {
+                    if u {
+                        s.i32_le_u()
+                    } else {
+                        s.i32_le_s()
+                    }
+                }
+                Gt => {
+                    if u {
+                        s.i32_gt_u()
+                    } else {
+                        s.i32_gt_s()
+                    }
+                }
+                Ge => {
+                    if u {
+                        s.i32_ge_u()
+                    } else {
+                        s.i32_ge_s()
+                    }
+                }
                 Eq => s.i32_eq(),
                 Ne => s.i32_ne(),
                 Min | Max | Copysign => unreachable!("checked above"),
@@ -824,19 +1105,61 @@ impl Cx<'_, '_> {
                 Add => s.i64_add(),
                 Sub => s.i64_sub(),
                 Mul => s.i64_mul(),
-                Div => if u { s.i64_div_u() } else { s.i64_div_s() },
-                Rem => if u { s.i64_rem_u() } else { s.i64_rem_s() },
+                Div => {
+                    if u {
+                        s.i64_div_u()
+                    } else {
+                        s.i64_div_s()
+                    }
+                }
+                Rem => {
+                    if u {
+                        s.i64_rem_u()
+                    } else {
+                        s.i64_rem_s()
+                    }
+                }
                 And => s.i64_and(),
                 Or => s.i64_or(),
                 Xor => s.i64_xor(),
                 Shl => s.i64_shl(),
-                Shr => if u { s.i64_shr_u() } else { s.i64_shr_s() },
+                Shr => {
+                    if u {
+                        s.i64_shr_u()
+                    } else {
+                        s.i64_shr_s()
+                    }
+                }
                 Rotl => s.i64_rotl(),
                 Rotr => s.i64_rotr(),
-                Lt => if u { s.i64_lt_u() } else { s.i64_lt_s() },
-                Le => if u { s.i64_le_u() } else { s.i64_le_s() },
-                Gt => if u { s.i64_gt_u() } else { s.i64_gt_s() },
-                Ge => if u { s.i64_ge_u() } else { s.i64_ge_s() },
+                Lt => {
+                    if u {
+                        s.i64_lt_u()
+                    } else {
+                        s.i64_lt_s()
+                    }
+                }
+                Le => {
+                    if u {
+                        s.i64_le_u()
+                    } else {
+                        s.i64_le_s()
+                    }
+                }
+                Gt => {
+                    if u {
+                        s.i64_gt_u()
+                    } else {
+                        s.i64_gt_s()
+                    }
+                }
+                Ge => {
+                    if u {
+                        s.i64_ge_u()
+                    } else {
+                        s.i64_ge_s()
+                    }
+                }
                 Eq => s.i64_eq(),
                 Ne => s.i64_ne(),
                 Min | Max | Copysign => unreachable!("checked above"),
@@ -874,10 +1197,20 @@ impl Cx<'_, '_> {
                 _ => unreachable!("checked above"),
             },
         };
-        Ok(if matches!(op, Lt | Le | Gt | Ge | Eq | Ne) { Type::I32 } else { ty })
+        Ok(if matches!(op, Lt | Le | Gt | Ge | Eq | Ne) {
+            Type::I32
+        } else {
+            ty
+        })
     }
 
-    fn unary(&mut self, s: &mut InstructionSink<'_>, op: UnaryOp, val: &Expr, ty: Type) -> Result<Type, EraseErrorKind> {
+    fn unary(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        op: UnaryOp,
+        val: &Expr,
+        ty: Type,
+    ) -> Result<Type, EraseErrorKind> {
         use UnaryOp::*;
         let vt = wide(ty)?;
         let legal = match op {
@@ -906,13 +1239,21 @@ impl Cx<'_, '_> {
                 // (x ^ m) - m, m = x >> 31
                 self.expect(s, val, ty)?;
                 let x = self.scratch(ValType::I32);
-                s.local_tee(x).local_get(x).i32_const(31).i32_shr_s().i32_xor();
+                s.local_tee(x)
+                    .local_get(x)
+                    .i32_const(31)
+                    .i32_shr_s()
+                    .i32_xor();
                 s.local_get(x).i32_const(31).i32_shr_s().i32_sub();
             }
             (ValType::I64, Abs) => {
                 self.expect(s, val, ty)?;
                 let x = self.scratch(ValType::I64);
-                s.local_tee(x).local_get(x).i64_const(63).i64_shr_s().i64_xor();
+                s.local_tee(x)
+                    .local_get(x)
+                    .i64_const(63)
+                    .i64_shr_s()
+                    .i64_xor();
                 s.local_get(x).i64_const(63).i64_shr_s().i64_sub();
             }
             (ValType::I32, _) => {
@@ -969,10 +1310,16 @@ impl Cx<'_, '_> {
     /// is stackified on its own; `exit` is the `br` depth that leaves it.
     /// An error inside the region is reported with its kind only; its `at`
     /// is the enclosing top-level op.
-    fn region(&mut self, s: &mut InstructionSink<'_>, ops: &[Op], exit: u32) -> Result<(), EraseErrorKind> {
+    fn region(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        ops: &[Op],
+        exit: u32,
+    ) -> Result<(), EraseErrorKind> {
         if has_jumps(ops) {
             let tree = stackify(ops).map_err(EraseErrorKind::Stackify)?;
-            self.emit_tree(s, ops, &tree, Some(exit)).map_err(|e| e.kind)
+            self.emit_tree(s, ops, &tree, Some(exit))
+                .map_err(|e| e.kind)
         } else {
             for op in ops {
                 self.op(s, op)?;
@@ -1003,21 +1350,37 @@ impl Cx<'_, '_> {
     ///
     /// Catch labels are resolved outside the try_table, so catch k targets
     /// h_k at depth k. A handler block's result type is its tag's params.
-    fn try_table(&mut self, s: &mut InstructionSink<'_>, body: &[Op], catches: &[Catch]) -> Result<(), EraseErrorKind> {
+    fn try_table(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        body: &[Op],
+        catches: &[Catch],
+    ) -> Result<(), EraseErrorKind> {
         let n = catches.len() as u32;
         let mut bts: Vec<BlockType> = Vec::with_capacity(catches.len());
         for c in catches {
             let params: Vec<Type> = match c.tag {
-                Some(t) => self.env.tags.get(t as usize).ok_or(EraseErrorKind::TagOutOfRange { idx: t })?.to_vec(),
+                Some(t) => self
+                    .env
+                    .tags
+                    .get(t as usize)
+                    .ok_or(EraseErrorKind::TagOutOfRange { idx: t })?
+                    .to_vec(),
                 None => Vec::new(),
             };
             if c.bind.len() != params.len() {
-                return Err(EraseErrorKind::ArityMismatch { expected: params.len(), got: c.bind.len() });
+                return Err(EraseErrorKind::ArityMismatch {
+                    expected: params.len(),
+                    got: c.bind.len(),
+                });
             }
             for (&l, &p) in c.bind.iter().zip(params.iter()) {
                 let lt = self.local(l)?;
                 if lt != p {
-                    return Err(EraseErrorKind::TypeMismatch { expected: p, got: lt });
+                    return Err(EraseErrorKind::TypeMismatch {
+                        expected: p,
+                        got: lt,
+                    });
                 }
             }
             let bt = match params.len() {
@@ -1044,7 +1407,10 @@ impl Cx<'_, '_> {
             .iter()
             .enumerate()
             .map(|(k, c)| match c.tag {
-                Some(tag) => WasmCatch::One { tag, label: k as u32 },
+                Some(tag) => WasmCatch::One {
+                    tag,
+                    label: k as u32,
+                },
                 None => WasmCatch::All { label: k as u32 },
             })
             .collect();
@@ -1073,7 +1439,13 @@ impl Cx<'_, '_> {
     /// `TryTable` body/handler). `exit` is the `br` depth, at the tree's top
     /// level, that leaves the region; `None` for the function body, where
     /// falling off the end returns or traps.
-    fn emit_tree(&mut self, s: &mut InstructionSink<'_>, ops: &[Op], nodes: &[Node], exit: Option<u32>) -> Result<(), EraseError> {
+    fn emit_tree(
+        &mut self,
+        s: &mut InstructionSink<'_>,
+        ops: &[Op],
+        nodes: &[Node],
+        exit: Option<u32>,
+    ) -> Result<(), EraseError> {
         let inner = exit.map(|d| d + 1);
         for node in nodes {
             match node {
@@ -1087,9 +1459,16 @@ impl Cx<'_, '_> {
                     self.emit_tree(s, ops, body, inner)?;
                     s.end();
                 }
-                Node::If { cond, then_body, else_body } => {
+                Node::If {
+                    cond,
+                    then_body,
+                    else_body,
+                } => {
                     let c = jmp_cond(ops, *cond);
-                    self.cond(s, c).map_err(|kind| EraseError { at: Some(*cond), kind })?;
+                    self.cond(s, c).map_err(|kind| EraseError {
+                        at: Some(*cond),
+                        kind,
+                    })?;
                     s.if_(BlockType::Empty);
                     self.emit_tree(s, ops, then_body, inner)?;
                     if !else_body.is_empty() {
@@ -1103,18 +1482,31 @@ impl Cx<'_, '_> {
                 }
                 Node::BrIf { cond, depth } => {
                     let c = jmp_cond(ops, *cond);
-                    self.cond(s, c).map_err(|kind| EraseError { at: Some(*cond), kind })?;
+                    self.cond(s, c).map_err(|kind| EraseError {
+                        at: Some(*cond),
+                        kind,
+                    })?;
                     s.br_if(*depth);
                 }
-                Node::BrTable { index, targets, default } => {
+                Node::BrTable {
+                    index,
+                    targets,
+                    default,
+                } => {
                     let e = brtable_index(ops, *index);
                     // The index selects a target; wasm br_table wants an i32.
                     self.expect_class(s, e, ValType::I32)
-                        .map_err(|kind| EraseError { at: Some(*index), kind })?;
+                        .map_err(|kind| EraseError {
+                            at: Some(*index),
+                            kind,
+                        })?;
                     s.br_table(targets.iter().copied(), *default);
                 }
                 Node::Stmt { idx } => {
-                    self.op(s, &ops[*idx]).map_err(|kind| EraseError { at: Some(*idx), kind })?;
+                    self.op(s, &ops[*idx]).map_err(|kind| EraseError {
+                        at: Some(*idx),
+                        kind,
+                    })?;
                 }
                 Node::FallOffEnd if exit.is_some() => {
                     // End of a TryTable region: continue after the TryTable.
@@ -1285,17 +1677,27 @@ fn brtable_index(ops: &[Op], idx: usize) -> &Expr {
 fn single(results: &[Type]) -> Result<Type, EraseErrorKind> {
     match results {
         [t] => Ok(*t),
-        _ => Err(EraseErrorKind::CallResultArity { results: results.len() }),
+        _ => Err(EraseErrorKind::CallResultArity {
+            results: results.len(),
+        }),
     }
 }
 
 /// Bring an i32 holding any value down to the normalized form of narrow `to`.
 fn normalize(s: &mut InstructionSink<'_>, to: Type) {
     match to {
-        Type::I8 => { s.i32_extend8_s(); }
-        Type::I16 => { s.i32_extend16_s(); }
-        Type::U8 => { s.i32_const(0xff).i32_and(); }
-        Type::U16 => { s.i32_const(0xffff).i32_and(); }
+        Type::I8 => {
+            s.i32_extend8_s();
+        }
+        Type::I16 => {
+            s.i32_extend16_s();
+        }
+        Type::U8 => {
+            s.i32_const(0xff).i32_and();
+        }
+        Type::U16 => {
+            s.i32_const(0xffff).i32_and();
+        }
         _ => {}
     }
 }
@@ -1319,20 +1721,40 @@ fn convert(s: &mut InstructionSink<'_>, from: Type, to: Type) {
         (ValType::I32, ValType::I64) => {
             // Narrow sources are already normalized, so extending the i32
             // by the source's signedness gives the right value.
-            if is_unsigned(from) { s.i64_extend_i32_u(); } else { s.i64_extend_i32_s(); }
+            if is_unsigned(from) {
+                s.i64_extend_i32_u();
+            } else {
+                s.i64_extend_i32_s();
+            }
         }
         (ValType::I64, ValType::I64) => {}
         (ValType::I32, ValType::F32) => {
-            if is_unsigned(from) { s.f32_convert_i32_u(); } else { s.f32_convert_i32_s(); }
+            if is_unsigned(from) {
+                s.f32_convert_i32_u();
+            } else {
+                s.f32_convert_i32_s();
+            }
         }
         (ValType::I32, ValType::F64) => {
-            if is_unsigned(from) { s.f64_convert_i32_u(); } else { s.f64_convert_i32_s(); }
+            if is_unsigned(from) {
+                s.f64_convert_i32_u();
+            } else {
+                s.f64_convert_i32_s();
+            }
         }
         (ValType::I64, ValType::F32) => {
-            if is_unsigned(from) { s.f32_convert_i64_u(); } else { s.f32_convert_i64_s(); }
+            if is_unsigned(from) {
+                s.f32_convert_i64_u();
+            } else {
+                s.f32_convert_i64_s();
+            }
         }
         (ValType::I64, ValType::F64) => {
-            if is_unsigned(from) { s.f64_convert_i64_u(); } else { s.f64_convert_i64_s(); }
+            if is_unsigned(from) {
+                s.f64_convert_i64_u();
+            } else {
+                s.f64_convert_i64_s();
+            }
         }
         (ValType::F32, ValType::I32) => {
             if is_narrow(to) {
@@ -1355,18 +1777,30 @@ fn convert(s: &mut InstructionSink<'_>, from: Type, to: Type) {
             }
         }
         (ValType::F32, ValType::I64) => {
-            if is_unsigned(to) { s.i64_trunc_f32_u(); } else { s.i64_trunc_f32_s(); }
+            if is_unsigned(to) {
+                s.i64_trunc_f32_u();
+            } else {
+                s.i64_trunc_f32_s();
+            }
         }
         (ValType::F64, ValType::I64) => {
-            if is_unsigned(to) { s.i64_trunc_f64_u(); } else { s.i64_trunc_f64_s(); }
+            if is_unsigned(to) {
+                s.i64_trunc_f64_u();
+            } else {
+                s.i64_trunc_f64_s();
+            }
         }
-        (ValType::F32, ValType::F64) => { s.f64_promote_f32(); }
-        (ValType::F64, ValType::F32) => { s.f32_demote_f64(); }
+        (ValType::F32, ValType::F64) => {
+            s.f64_promote_f32();
+        }
+        (ValType::F64, ValType::F32) => {
+            s.f32_demote_f64();
+        }
         _ => {}
     }
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod lower_tests;
+#[cfg(test)]
+mod tests;

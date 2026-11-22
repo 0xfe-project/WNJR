@@ -601,6 +601,32 @@ void nj_op_gotoindirect(Mp *m, const E *target) {
   mp_end_container(m, mk, 1);
 }
 
+void nj_op_setjmp(Mp *m, const E *buf, uint32_t dest) {
+  int fields;
+  int mk = op_variant(m, "Setjmp", &fields);
+  size_t n = 0;
+  mp_key(m, "buf");
+  nj_emit_expr(m, buf);
+  n++;
+  mp_key(m, "dest");
+  mp_uint(m, dest);
+  n++;
+  op_end(m, mk, fields, n);
+}
+
+void nj_op_longjmp(Mp *m, const E *buf, const E *val) {
+  int fields;
+  int mk = op_variant(m, "Longjmp", &fields);
+  size_t n = 0;
+  mp_key(m, "buf");
+  nj_emit_expr(m, buf);
+  n++;
+  mp_key(m, "val");
+  nj_emit_expr(m, val);
+  n++;
+  op_end(m, mk, fields, n);
+}
+
 void nj_op_localset_call(Mp *m, uint32_t idx, uint32_t func, E *const *args, size_t nargs) {
   int mk = mp_variant(m, "LocalSet");
   int fields = mp_begin_map(m);

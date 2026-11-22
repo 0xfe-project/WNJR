@@ -40,7 +40,9 @@ fn usage(program: &str) -> String {
 }
 
 fn main() -> ExitCode {
-    let program = std::env::args().next().unwrap_or_else(|| "njvm-cli".to_string());
+    let program = std::env::args()
+        .next()
+        .unwrap_or_else(|| "njvm-cli".to_string());
     let program = program.rsplit('/').next().unwrap_or("njvm-cli").to_string();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(|s| s.as_str()) {
@@ -152,7 +154,9 @@ fn batch(path: &str, calls_path: &str, guest_args: &[String]) -> Result<ExitCode
         let mut inputs = Vec::new();
         let mut label = export.clone();
         for w in words {
-            let v: i32 = w.parse().map_err(|_| format!("bad i32 argument {w:?} in {line:?}"))?;
+            let v: i32 = w
+                .parse()
+                .map_err(|_| format!("bad i32 argument {w:?} in {line:?}"))?;
             inputs.push(Arg::I32(v));
             label.push(' ');
             label.push_str(w);

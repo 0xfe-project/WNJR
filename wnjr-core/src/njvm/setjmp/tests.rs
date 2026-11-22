@@ -10,7 +10,10 @@ use crate::njvm::{verify_module, ModuleBuilder};
 use crate::{Config, Engine, RuntimeWorld, Value};
 
 fn c(v: i32) -> Expr {
-    Expr::Const { ty: Type::I32, val: ConstVal::I32(v) }
+    Expr::Const {
+        ty: Type::I32,
+        val: ConstVal::I32(v),
+    }
 }
 fn get(i: u32) -> Expr {
     Expr::LocalGet(i)
@@ -39,13 +42,25 @@ fn func(params: Vec<Type>, results: Vec<Type>, locals: Vec<Type>, body: Vec<Op>)
 
 /// `g(buf, v) { longjmp(buf, v); }`
 fn longjmper() -> Function {
-    func(vec![Type::I32, Type::I32], vec![], vec![], vec![Op::Longjmp { buf: get(0), val: get(1) }])
+    func(
+        vec![Type::I32, Type::I32],
+        vec![],
+        vec![],
+        vec![Op::Longjmp {
+            buf: get(0),
+            val: get(1),
+        }],
+    )
 }
 
 /// Module of `funcs` (function 0 exported as "f"), one page of memory.
 fn module(funcs: Vec<Function>) -> Module {
     let mut mb = ModuleBuilder::new();
-    mb.add_memory(MemoryType { min: 1, max: Some(1), shared: false });
+    mb.add_memory(MemoryType {
+        min: 1,
+        max: Some(1),
+        shared: false,
+    });
     for f in funcs {
         mb.add_function(f);
     }
@@ -61,12 +76,12 @@ fn run(m: &Module, calls: &[Vec<Value>]) -> Vec<Result<Vec<Value>, ()>> {
     let module = crate::Module::new("n9", &bytes).expect("WNJR parse + validate");
     let engine = Engine::new(Config::new()).expect("engine");
     let mut world = RuntimeWorld::new();
-    let id = world.instantiate(&engine, module, &[]).expect("instantiate");
+    let id = world
+        .instantiate(&engine, module, &[])
+        .expect("instantiate");
     let out = calls
         .iter()
-        .map(|a| {
-            world.invoke(id, "f", a).map_err(|_| ())
-        })
+        .map(|a| world.invoke(id, "f", a).map_err(|_| ()))
         .collect();
     world.free(id).expect("free");
     out
@@ -87,8 +102,14 @@ fn run_i32(m: &Module, args: Vec<Value>) -> i32 {
 fn single_level() {
     let body = vec![
         setjmp(16, 0),
-        Op::JmpIf { cond: get(0), target: 1 },
-        Op::Longjmp { buf: c(16), val: c(7) },
+        Op::JmpIf {
+            cond: get(0),
+            target: 1,
+        },
+        Op::Longjmp {
+            buf: c(16),
+            val: c(7),
+        },
         label(1),
         ret(get(0)),
     ];
@@ -106,15 +127,31 @@ fn across_two_calls() {
         vec![Type::I32],
         vec![
             setjmp(16, 0),
-            Op::JmpIf { cond: get(0), target: 1 },
+            Op::JmpIf {
+                cond: get(0),
+                target: 1,
+            },
             call(1, vec![]),
             ret(c(0)),
             label(1),
             ret(add(get(0), c(100))),
         ],
     );
-    let a = func(vec![], vec![], vec![], vec![call(2, vec![]), Op::Return { vals: vec![] }]);
-    let b = func(vec![], vec![], vec![], vec![Op::Longjmp { buf: c(16), val: c(5) }]);
+    let a = func(
+        vec![],
+        vec![],
+        vec![],
+        vec![call(2, vec![]), Op::Return { vals: vec![] }],
+    );
+    let b = func(
+        vec![],
+        vec![],
+        vec![],
+        vec![Op::Longjmp {
+            buf: c(16),
+            val: c(5),
+        }],
+    );
     let m = module(vec![main, a, b]);
     assert_eq!(run_i32(&m, vec![]), 105);
 }
@@ -138,16 +175,39 @@ fn recursive_longjmp_resumes_the_innermost_activation() {
     let buf = add(c(16), Expr::binary(BinaryOp::Mul, get(0), c(16), Type::I32));
     let body = vec![
         Op::Setjmp { buf, dest: 1 },
-        Op::JmpIf { cond: get(1), target: 1 },
-        Op::JmpIf { cond: get(0), target: 2 },
-        Op::Longjmp { buf: c(32), val: c(7) },
+        Op::JmpIf {
+            cond: get(1),
+            target: 1,
+        },
+        Op::JmpIf {
+            cond: get(0),
+            target: 2,
+        },
+        Op::Longjmp {
+            buf: c(32),
+            val: c(7),
+        },
         label(2),
-        Op::LocalSet { idx: 2, val: Expr::Call { func_idx: 0, args: vec![add(get(0), c(-1))] } },
+        Op::LocalSet {
+            idx: 2,
+            val: Expr::Call {
+                func_idx: 0,
+                args: vec![add(get(0), c(-1))],
+            },
+        },
         ret(add(get(2), c(9000))),
         label(1),
-        ret(add(Expr::binary(BinaryOp::Mul, get(0), c(100), Type::I32), get(1))),
+        ret(add(
+            Expr::binary(BinaryOp::Mul, get(0), c(100), Type::I32),
+            get(1),
+        )),
     ];
-    let m = module(vec![func(vec![Type::I32], vec![Type::I32], vec![Type::I32, Type::I32], body)]);
+    let m = module(vec![func(
+        vec![Type::I32],
+        vec![Type::I32],
+        vec![Type::I32, Type::I32],
+        body,
+    )]);
     assert_eq!(run_i32(&m, vec![Value::I32(1)]), 9007);
 }
 
@@ -162,16 +222,25 @@ fn two_sites_in_one_function() {
         vec![Type::I32, Type::I32],
         vec![
             setjmp(16, 0),
-            Op::JmpIf { cond: get(0), target: 1 },
+            Op::JmpIf {
+                cond: get(0),
+                target: 1,
+            },
             setjmp(32, 1),
-            Op::JmpIf { cond: get(1), target: 2 },
+            Op::JmpIf {
+                cond: get(1),
+                target: 2,
+            },
             call(1, vec![c(32), c(22)]),
             Op::Unreachable,
             label(2),
             call(1, vec![c(16), c(11)]),
             Op::Unreachable,
             label(1),
-            ret(add(Expr::binary(BinaryOp::Mul, get(0), c(100), Type::I32), get(1))),
+            ret(add(
+                Expr::binary(BinaryOp::Mul, get(0), c(100), Type::I32),
+                get(1),
+            )),
         ],
     );
     let m = module(vec![main, longjmper()]);
@@ -188,7 +257,10 @@ fn longjmp_value_zero_is_one() {
         vec![Type::I32],
         vec![
             setjmp(16, 1),
-            Op::JmpIf { cond: get(1), target: 1 },
+            Op::JmpIf {
+                cond: get(1),
+                target: 1,
+            },
             call(1, vec![c(16), get(0)]),
             Op::Unreachable,
             label(1),
@@ -197,7 +269,10 @@ fn longjmp_value_zero_is_one() {
     );
     let m = module(vec![main, longjmper()]);
     let xs = [0, 42, 1, -3];
-    let out = run(&m, &xs.iter().map(|x| vec![Value::I32(*x)]).collect::<Vec<_>>());
+    let out = run(
+        &m,
+        &xs.iter().map(|x| vec![Value::I32(*x)]).collect::<Vec<_>>(),
+    );
     let got: Vec<i32> = out
         .into_iter()
         .map(|r| match r.expect("no trap").as_slice() {
@@ -215,20 +290,32 @@ fn longjmp_value_zero_is_one() {
 #[test]
 fn setjmp_in_loop() {
     let (i, r, sum) = (0, 1, 2);
-    let inc = |l: u32, e: Expr| Op::LocalSet { idx: l, val: add(get(l), e) };
+    let inc = |l: u32, e: Expr| Op::LocalSet {
+        idx: l,
+        val: add(get(l), e),
+    };
     let main = func(
         vec![],
         vec![Type::I32],
         vec![Type::I32, Type::I32, Type::I32],
         vec![
             Op::LocalSet { idx: i, val: c(0) },
-            Op::LocalSet { idx: sum, val: c(0) },
+            Op::LocalSet {
+                idx: sum,
+                val: c(0),
+            },
             label(0),
-            Op::JmpIf { cond: Expr::binary(BinaryOp::Ge, get(i), c(3), Type::I32), target: 9 },
+            Op::JmpIf {
+                cond: Expr::binary(BinaryOp::Ge, get(i), c(3), Type::I32),
+                target: 9,
+            },
             setjmp(16, r),
             inc(sum, get(r)),
             inc(i, c(1)),
-            Op::JmpIf { cond: get(r), target: 0 },
+            Op::JmpIf {
+                cond: get(r),
+                target: 0,
+            },
             call(1, vec![c(16), c(10)]),
             Op::Jmp { target: 0 },
             label(9),
@@ -247,7 +334,17 @@ fn foreign_label_is_rethrown() {
         vec![],
         vec![Type::I32],
         vec![Type::I32],
-        vec![setjmp(16, 0), Op::JmpIf { cond: get(0), target: 1 }, call(1, vec![]), ret(c(0)), label(1), ret(get(0))],
+        vec![
+            setjmp(16, 0),
+            Op::JmpIf {
+                cond: get(0),
+                target: 1,
+            },
+            call(1, vec![]),
+            ret(c(0)),
+            label(1),
+            ret(get(0)),
+        ],
     );
     let inner = func(
         vec![],
@@ -255,7 +352,10 @@ fn foreign_label_is_rethrown() {
         vec![Type::I32],
         vec![
             setjmp(32, 0),
-            Op::JmpIf { cond: get(0), target: 1 },
+            Op::JmpIf {
+                cond: get(0),
+                target: 1,
+            },
             call(2, vec![c(16), c(9)]),
             Op::Return { vals: vec![] },
             label(1),
@@ -269,7 +369,15 @@ fn foreign_label_is_rethrown() {
 /// longjmp through a jmp_buf no setjmp filled (number 0): uncaught, traps.
 #[test]
 fn unset_jmp_buf_traps() {
-    let m = module(vec![func(vec![], vec![Type::I32], vec![], vec![Op::Longjmp { buf: c(16), val: c(1) }])]);
+    let m = module(vec![func(
+        vec![],
+        vec![Type::I32],
+        vec![],
+        vec![Op::Longjmp {
+            buf: c(16),
+            val: c(1),
+        }],
+    )]);
     assert!(run(&m, &[vec![]])[0].is_err());
 }
 
@@ -281,7 +389,12 @@ fn module_without_setjmp_is_unchanged() {
 
 #[test]
 fn nested_setjmp_is_rejected() {
-    let body = vec![Op::Block { body: vec![setjmp(16, 0)] }, ret(c(0))];
+    let body = vec![
+        Op::Block {
+            body: vec![setjmp(16, 0)],
+        },
+        ret(c(0)),
+    ];
     let m = module(vec![func(vec![], vec![Type::I32], vec![Type::I32], body)]);
     assert_eq!(lower_module(&m), Err(SetjmpError::NotTopLevel { func: 0 }));
 }
@@ -289,10 +402,22 @@ fn nested_setjmp_is_rejected() {
 /// One tag for the whole module, `(i32, i32)`; site numbers disjoint.
 #[test]
 fn one_tag_disjoint_numbers() {
-    let f = |buf| func(vec![], vec![], vec![Type::I32], vec![setjmp(buf, 0), Op::Return { vals: vec![] }]);
+    let f = |buf| {
+        func(
+            vec![],
+            vec![],
+            vec![Type::I32],
+            vec![setjmp(buf, 0), Op::Return { vals: vec![] }],
+        )
+    };
     let m = module(vec![f(16), f(32)]);
     let l = lower_module(&m).unwrap();
-    assert_eq!(l.tags, vec![Tag { params: TAG_PARAMS.to_vec() }]);
+    assert_eq!(
+        l.tags,
+        vec![Tag {
+            params: TAG_PARAMS.to_vec()
+        }]
+    );
     let numbers: Vec<i32> = l
         .functions
         .iter()
@@ -300,7 +425,15 @@ fn one_tag_disjoint_numbers() {
             let mut n = None;
             fn find(ops: &[Op], n: &mut Option<i32>) {
                 for op in ops {
-                    if let Op::Store { val: Expr::Const { val: ConstVal::I32(v), .. }, .. } = op {
+                    if let Op::Store {
+                        val:
+                            Expr::Const {
+                                val: ConstVal::I32(v),
+                                ..
+                            },
+                        ..
+                    } = op
+                    {
                         *n = Some(*v);
                     }
                     for b in child_bodies(op) {
@@ -314,7 +447,6 @@ fn one_tag_disjoint_numbers() {
         .collect();
     assert_eq!(numbers, vec![1, 2]);
 }
-
 
 // ── engine EH probe (not NJVM): catch of a throw from a callee ─────────────
 //
@@ -350,7 +482,10 @@ const THROW_IF: &str = "(local.get 0) (i32.const 0) (if (i32.ne) (then (throw $t
 
 #[test]
 fn engine_catches_throw_from_inlined_callee() {
-    assert_eq!(catch_from_callee(THROW_IF).expect("caught"), vec![Value::I32(23)]);
+    assert_eq!(
+        catch_from_callee(THROW_IF).expect("caught"),
+        vec![Value::I32(23)]
+    );
 }
 
 /// Same callee padded past the inliner's size limit, so it stays a real call.
@@ -387,7 +522,10 @@ fn engine_rethrows_an_unmatched_throw_across_a_call() {
     let r = catch_from_callee_other_tag(&nops);
     let err = r.expect_err("no clause matches, so the throw escapes");
     assert!(err.is_exception(), "escaped as {err:?}");
-    assert!(err.exception_tag().is_some(), "the tag survives the rethrow");
+    assert!(
+        err.exception_tag().is_some(),
+        "the tag survives the rethrow"
+    );
 }
 
 fn catch_from_callee_other_tag(nops: &str) -> Result<Vec<Value>, crate::WasmError> {
@@ -549,24 +687,39 @@ fn locals_survive_a_call_and_a_caught_throw() {
 #[test]
 fn resume_sees_locals_from_before_the_call() {
     let (i, r, sum) = (0, 1, 2);
-    let inc = |l: u32, e: Expr| Op::LocalSet { idx: l, val: add(get(l), e) };
+    let inc = |l: u32, e: Expr| Op::LocalSet {
+        idx: l,
+        val: add(get(l), e),
+    };
     let main = func(
         vec![],
         vec![Type::I32],
         vec![Type::I32, Type::I32, Type::I32],
         vec![
             Op::LocalSet { idx: i, val: c(0) },
-            Op::LocalSet { idx: sum, val: c(0) },
+            Op::LocalSet {
+                idx: sum,
+                val: c(0),
+            },
             label(0),
-            Op::JmpIf { cond: Expr::binary(BinaryOp::Ge, get(i), c(3), Type::I32), target: 9 },
+            Op::JmpIf {
+                cond: Expr::binary(BinaryOp::Ge, get(i), c(3), Type::I32),
+                target: 9,
+            },
             setjmp(16, r),
             inc(sum, get(r)),
             inc(i, c(1)),
-            Op::JmpIf { cond: get(r), target: 7 },
+            Op::JmpIf {
+                cond: get(r),
+                target: 7,
+            },
             call(1, vec![c(16), c(10)]),
             Op::Jmp { target: 0 },
             label(7),
-            ret(add(Expr::binary(BinaryOp::Mul, get(i), c(100), Type::I32), get(sum))),
+            ret(add(
+                Expr::binary(BinaryOp::Mul, get(i), c(100), Type::I32),
+                get(sum),
+            )),
             label(9),
             ret(c(-1)),
         ],

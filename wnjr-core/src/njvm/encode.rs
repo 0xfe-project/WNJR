@@ -17,7 +17,7 @@ use wasm_encoder::{
 
 use crate::collections::Vec;
 
-use super::erase::{lower_function, EraseError, Env as EraseEnv};
+use super::erase::{lower_function, Env as EraseEnv, EraseError};
 use super::module::{ExportKind, ImportKind, InitExpr, Module, SegmentMode};
 use super::types::{ConstVal, Type};
 
@@ -52,16 +52,25 @@ impl core::fmt::Display for EncodeError {
                 "function signature at index {index} contains unsupported narrow type {ty:?}"
             ),
             EncodeError::NarrowTypeInDeclaredType { index, ty } => {
-                write!(f, "declared type {index} contains unsupported narrow type {ty:?}")
+                write!(
+                    f,
+                    "declared type {index} contains unsupported narrow type {ty:?}"
+                )
             }
             EncodeError::NarrowTypeInGlobal { index, ty } => {
-                write!(f, "global at index {index} has unsupported narrow type {ty:?}")
+                write!(
+                    f,
+                    "global at index {index} has unsupported narrow type {ty:?}"
+                )
             }
             EncodeError::NarrowTypeInTag { index, ty } => {
                 write!(f, "tag at index {index} has unsupported narrow type {ty:?}")
             }
             EncodeError::NarrowTypeInImport { index, ty } => {
-                write!(f, "import at index {index} has unsupported narrow type {ty:?}")
+                write!(
+                    f,
+                    "import at index {index} has unsupported narrow type {ty:?}"
+                )
             }
             EncodeError::Body { index, error } => {
                 write!(f, "function {index}: {error}")
@@ -164,7 +173,11 @@ pub fn encode(module: &Module) -> Result<Vec<u8>, EncodeError> {
     for params in all_tags {
         tag_blocks.push(if params.len() >= 2 {
             // Narrow params already failed above.
-            let vals = params.iter().map(|&t| to_val_type(t)).collect::<Result<Vec<_>, _>>().ok();
+            let vals = params
+                .iter()
+                .map(|&t| to_val_type(t))
+                .collect::<Result<Vec<_>, _>>()
+                .ok();
             vals.map(|v| types.intern(Vec::new(), v))
         } else {
             None
@@ -266,11 +279,12 @@ pub fn encode(module: &Module) -> Result<Vec<u8>, EncodeError> {
     if !module.globals.is_empty() {
         let mut globals = GlobalSection::new();
         for (i, global) in module.globals.iter().enumerate() {
-            let val_ty = to_val_type(global.ty.ty).map_err(|_| EncodeError::NarrowTypeInGlobal {
-                // Global index space: imported globals first.
-                index: module.imported_globals() + i as u32,
-                ty: global.ty.ty,
-            })?;
+            let val_ty =
+                to_val_type(global.ty.ty).map_err(|_| EncodeError::NarrowTypeInGlobal {
+                    // Global index space: imported globals first.
+                    index: module.imported_globals() + i as u32,
+                    ty: global.ty.ty,
+                })?;
             let init = to_const_expr(&global.init);
             globals.global(
                 WasmGlobalType {
@@ -439,7 +453,6 @@ fn to_const_expr(init: &InitExpr) -> ConstExpr {
         InitExpr::GlobalGet(idx) => ConstExpr::global_get(*idx),
     }
 }
-
 
 #[cfg(test)]
 mod tests {

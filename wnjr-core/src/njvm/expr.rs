@@ -3,9 +3,9 @@
 //! An `Expr` computes a single value. Binary/Unary operands are themselves
 //! `Expr` nodes (boxed), so the representation is a tree rather than a stack.
 
-use serde::{Deserialize, Serialize};
 use crate::collections::Vec;
 use alloc::boxed::Box;
+use serde::{Deserialize, Serialize};
 
 use super::op::LabelId;
 use super::types::{BinaryOp, ConstVal, MemType, Type, UnaryOp};

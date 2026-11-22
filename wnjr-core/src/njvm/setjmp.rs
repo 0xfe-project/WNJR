@@ -89,24 +89,35 @@ pub const TAG_PARAMS: [Type; 2] = [Type::I32, Type::I32];
 /// only if some function uses setjmp or longjmp; otherwise returns the module
 /// unchanged.
 pub fn lower_module(module: &Module) -> Result<Module, SetjmpError> {
-    if !module.functions.iter().any(|f| any_op(&f.body, &|o| matches!(o, Op::Setjmp { .. } | Op::Longjmp { .. }))) {
+    if !module.functions.iter().any(|f| {
+        any_op(&f.body, &|o| {
+            matches!(o, Op::Setjmp { .. } | Op::Longjmp { .. })
+        })
+    }) {
         return Ok(module.clone());
     }
     let mut out = module.clone();
     let tag = out.imported_tags() + out.tags.len() as u32;
-    out.tags.push(Tag { params: TAG_PARAMS.to_vec() });
+    out.tags.push(Tag {
+        params: TAG_PARAMS.to_vec(),
+    });
     let imported = out.imported_functions();
     let mut base: u32 = 0;
     for (i, f) in out.functions.iter_mut().enumerate() {
         let l = lower_function(f, imported + i as u32, base, tag)?;
-        base = base.checked_add(l.sites).ok_or(SetjmpError::NumberOverflow)?;
+        base = base
+            .checked_add(l.sites)
+            .ok_or(SetjmpError::NumberOverflow)?;
         *f = l.function;
     }
     Ok(out)
 }
 
 fn i32c(v: i32) -> Expr {
-    Expr::Const { ty: Type::I32, val: ConstVal::I32(v) }
+    Expr::Const {
+        ty: Type::I32,
+        val: ConstVal::I32(v),
+    }
 }
 
 fn bin(op: BinaryOp, ty: Type, a: Expr, b: Expr) -> Expr {
@@ -115,17 +126,31 @@ fn bin(op: BinaryOp, ty: Type, a: Expr, b: Expr) -> Expr {
 
 /// Lower one function. `func_idx` is only used in errors; `base` is the
 /// last site number used by earlier functions; `tag` the setjmp tag index.
-pub fn lower_function(func: &Function, func_idx: u32, base: u32, tag: u32) -> Result<Lowered, SetjmpError> {
+pub fn lower_function(
+    func: &Function,
+    func_idx: u32,
+    base: u32,
+    tag: u32,
+) -> Result<Lowered, SetjmpError> {
     let is_setjmp = |o: &Op| matches!(o, Op::Setjmp { .. });
     for op in &func.body {
         if child_bodies(op).into_iter().any(|b| any_op(b, &is_setjmp)) {
             return Err(SetjmpError::NotTopLevel { func: func_idx });
         }
     }
-    let sites: Vec<usize> = func.body.iter().enumerate().filter(|(_, o)| is_setjmp(o)).map(|(i, _)| i).collect();
+    let sites: Vec<usize> = func
+        .body
+        .iter()
+        .enumerate()
+        .filter(|(_, o)| is_setjmp(o))
+        .map(|(i, _)| i)
+        .collect();
     let has_longjmp = any_op(&func.body, &|o| matches!(o, Op::Longjmp { .. }));
     if sites.is_empty() && !has_longjmp {
-        return Ok(Lowered { function: func.clone(), sites: 0 });
+        return Ok(Lowered {
+            function: func.clone(),
+            sites: 0,
+        });
     }
     let n = sites.len() as u32;
     if base.checked_add(n).map_or(true, |m| m > i32::MAX as u32) {
@@ -147,7 +172,15 @@ pub fn lower_function(func: &Function, func_idx: u32, base: u32, tag: u32) -> Re
         rewrite_longjmp(&mut body, tv, tag);
     }
     if sites.is_empty() {
-        return Ok(Lowered { function: Function { params: func.params.clone(), results: func.results.clone(), locals, body }, sites: 0 });
+        return Ok(Lowered {
+            function: Function {
+                params: func.params.clone(),
+                results: func.results.clone(),
+                locals,
+                body,
+            },
+            sites: 0,
+        });
     }
     let sel = alloc_i32(&mut locals);
     let cl = alloc_i32(&mut locals);
@@ -196,10 +229,20 @@ pub fn lower_function(func: &Function, func_idx: u32, base: u32, tag: u32) -> Re
     let mut targets = vec![entry];
     targets.extend(first_hop);
     let mut tb: Vec<Op> = vec![
-        Op::BrTable { index: Expr::LocalGet(sel), targets, default: trap },
-        Op::Label { id: trap, params: Vec::new() },
+        Op::BrTable {
+            index: Expr::LocalGet(sel),
+            targets,
+            default: trap,
+        },
+        Op::Label {
+            id: trap,
+            params: Vec::new(),
+        },
         Op::Unreachable,
-        Op::Label { id: entry, params: Vec::new() },
+        Op::Label {
+            id: entry,
+            params: Vec::new(),
+        },
     ];
     let mut site_k = 0usize;
     for (p, op) in body.into_iter().enumerate() {
@@ -208,18 +251,42 @@ pub fn lower_function(func: &Function, func_idx: u32, base: u32, tag: u32) -> Re
                 let k = site_k;
                 site_k += 1;
                 let number = (base + k as u32 + 1) as i32;
-                tb.push(Op::Store { ty: MemType::I32, ptr: buf, val: i32c(number), offset: 0, align: 2 });
-                tb.push(Op::LocalSet { idx: dest, val: i32c(0) });
+                tb.push(Op::Store {
+                    ty: MemType::I32,
+                    ptr: buf,
+                    val: i32c(number),
+                    offset: 0,
+                    align: 2,
+                });
+                tb.push(Op::LocalSet {
+                    idx: dest,
+                    val: i32c(0),
+                });
                 tb.push(Op::Jmp { target: cont[k] });
-                tb.push(Op::Label { id: resume[k], params: Vec::new() });
-                tb.push(Op::LocalSet { idx: dest, val: Expr::LocalGet(cv) });
-                tb.push(Op::LocalSet { idx: sel, val: i32c(0) });
-                tb.push(Op::Label { id: cont[k], params: Vec::new() });
+                tb.push(Op::Label {
+                    id: resume[k],
+                    params: Vec::new(),
+                });
+                tb.push(Op::LocalSet {
+                    idx: dest,
+                    val: Expr::LocalGet(cv),
+                });
+                tb.push(Op::LocalSet {
+                    idx: sel,
+                    val: i32c(0),
+                });
+                tb.push(Op::Label {
+                    id: cont[k],
+                    params: Vec::new(),
+                });
             }
             op @ Op::Label { .. } => {
                 tb.push(op);
                 for &(i, to) in checks.get(&p).map(|v| v.as_slice()).unwrap_or(&[]) {
-                    tb.push(Op::JmpIf { cond: bin(BinaryOp::Eq, Type::I32, Expr::LocalGet(sel), i32c(i)), target: to });
+                    tb.push(Op::JmpIf {
+                        cond: bin(BinaryOp::Eq, Type::I32, Expr::LocalGet(sel), i32c(i)),
+                        target: to,
+                    });
                 }
             }
             op => tb.push(op),
@@ -227,31 +294,85 @@ pub fn lower_function(func: &Function, func_idx: u32, base: u32, tag: u32) -> Re
     }
     // Falling off the original body ends the function; it must not reach the
     // `jmp H` after the try.
-    tb.push(if func.results.is_empty() { Op::Return { vals: Vec::new() } } else { Op::Unreachable });
+    tb.push(if func.results.is_empty() {
+        Op::Return { vals: Vec::new() }
+    } else {
+        Op::Unreachable
+    });
 
     let lo = base as i32 + 1;
     let out_of_range = bin(
         BinaryOp::Ge,
         Type::U32,
-        Expr::Convert { from: Type::I32, to: Type::U32, val: bin(BinaryOp::Sub, Type::I32, Expr::LocalGet(cl), i32c(lo)).boxed() },
-        Expr::Const { ty: Type::U32, val: ConstVal::I32(n as i32) },
+        Expr::Convert {
+            from: Type::I32,
+            to: Type::U32,
+            val: bin(BinaryOp::Sub, Type::I32, Expr::LocalGet(cl), i32c(lo)).boxed(),
+        },
+        Expr::Const {
+            ty: Type::U32,
+            val: ConstVal::I32(n as i32),
+        },
     );
     let handler = vec![
-        Op::JmpIf { cond: out_of_range, target: rethrow },
-        Op::LocalSet { idx: sel, val: bin(BinaryOp::Sub, Type::I32, Expr::LocalGet(cl), i32c(base as i32)) },
-        Op::Jmp { target: handler_end },
-        Op::Label { id: rethrow, params: Vec::new() },
-        Op::Throw { tag_idx: tag, args: vec![Expr::LocalGet(cl), Expr::LocalGet(cv)] },
-        Op::Label { id: handler_end, params: Vec::new() },
+        Op::JmpIf {
+            cond: out_of_range,
+            target: rethrow,
+        },
+        Op::LocalSet {
+            idx: sel,
+            val: bin(
+                BinaryOp::Sub,
+                Type::I32,
+                Expr::LocalGet(cl),
+                i32c(base as i32),
+            ),
+        },
+        Op::Jmp {
+            target: handler_end,
+        },
+        Op::Label {
+            id: rethrow,
+            params: Vec::new(),
+        },
+        Op::Throw {
+            tag_idx: tag,
+            args: vec![Expr::LocalGet(cl), Expr::LocalGet(cv)],
+        },
+        Op::Label {
+            id: handler_end,
+            params: Vec::new(),
+        },
     ];
 
     let out = vec![
-        Op::LocalSet { idx: sel, val: i32c(0) },
-        Op::Label { id: h, params: Vec::new() },
-        Op::TryTable { body: tb, catches: vec![Catch { tag: Some(tag), bind: vec![cl, cv], body: handler }] },
+        Op::LocalSet {
+            idx: sel,
+            val: i32c(0),
+        },
+        Op::Label {
+            id: h,
+            params: Vec::new(),
+        },
+        Op::TryTable {
+            body: tb,
+            catches: vec![Catch {
+                tag: Some(tag),
+                bind: vec![cl, cv],
+                body: handler,
+            }],
+        },
         Op::Jmp { target: h },
     ];
-    Ok(Lowered { function: Function { params: func.params.clone(), results: func.results.clone(), locals, body: out }, sites: n })
+    Ok(Lowered {
+        function: Function {
+            params: func.params.clone(),
+            results: func.results.clone(),
+            locals,
+            body: out,
+        },
+        sites: n,
+    })
 }
 
 /// `Longjmp { buf, val }` -> `Throw tag [load.i32 buf, (tv = val) + (tv == 0)]`.
@@ -266,17 +387,29 @@ fn rewrite_longjmp(body: &mut [Op], tv: u32, tag: u32) {
             let v = bin(
                 BinaryOp::Add,
                 Type::I32,
-                Expr::LocalTee { idx: tv, val: val.boxed() },
+                Expr::LocalTee {
+                    idx: tv,
+                    val: val.boxed(),
+                },
                 bin(BinaryOp::Eq, Type::I32, Expr::LocalGet(tv), i32c(0)),
             );
-            let label = Expr::Load { ty: MemType::I32, ptr: buf.boxed(), offset: 0, align: 2 };
-            *op = Op::Throw { tag_idx: tag, args: vec![label, v] };
+            let label = Expr::Load {
+                ty: MemType::I32,
+                ptr: buf.boxed(),
+                offset: 0,
+                align: 2,
+            };
+            *op = Op::Throw {
+                tag_idx: tag,
+                args: vec![label, v],
+            };
         }
     }
 }
 
 fn any_op(body: &[Op], f: &dyn Fn(&Op) -> bool) -> bool {
-    body.iter().any(|op| f(op) || child_bodies(op).into_iter().any(|b| any_op(b, f)))
+    body.iter()
+        .any(|op| f(op) || child_bodies(op).into_iter().any(|b| any_op(b, f)))
 }
 
 fn max_label(body: &[Op]) -> Option<LabelId> {
@@ -287,7 +420,9 @@ fn max_label(body: &[Op]) -> Option<LabelId> {
             match op {
                 Op::Label { id, .. } => bump(*id),
                 Op::Jmp { target } | Op::JmpIf { target, .. } => bump(*target),
-                Op::BrTable { targets, default, .. } => {
+                Op::BrTable {
+                    targets, default, ..
+                } => {
                     targets.iter().for_each(|t| bump(*t));
                     bump(*default);
                 }
@@ -306,7 +441,11 @@ fn child_bodies(op: &Op) -> Vec<&Vec<Op>> {
     let mut v = Vec::new();
     match op {
         Op::Block { body } | Op::Loop { body } => v.push(body),
-        Op::If { then_body, else_body, .. } => {
+        Op::If {
+            then_body,
+            else_body,
+            ..
+        } => {
             v.push(then_body);
             v.push(else_body);
         }
@@ -329,7 +468,11 @@ fn child_bodies_mut(op: &mut Op) -> Vec<&mut Vec<Op>> {
     let mut v = Vec::new();
     match op {
         Op::Block { body } | Op::Loop { body } => v.push(body),
-        Op::If { then_body, else_body, .. } => {
+        Op::If {
+            then_body,
+            else_body,
+            ..
+        } => {
             v.push(then_body);
             v.push(else_body);
         }
@@ -367,7 +510,14 @@ struct Cfg {
 fn is_terminator(op: &Op) -> bool {
     matches!(
         op,
-        Op::Jmp { .. } | Op::JmpIf { .. } | Op::BrTable { .. } | Op::Return { .. } | Op::Unreachable | Op::Throw { .. } | Op::Longjmp { .. } | Op::GotoIndirect { .. }
+        Op::Jmp { .. }
+            | Op::JmpIf { .. }
+            | Op::BrTable { .. }
+            | Op::Return { .. }
+            | Op::Unreachable
+            | Op::Throw { .. }
+            | Op::Longjmp { .. }
+            | Op::GotoIndirect { .. }
     )
 }
 
@@ -376,7 +526,8 @@ impl Cfg {
         let n = body.len();
         let mut starts: Vec<usize> = Vec::new();
         for i in 0..n {
-            let leader = i == 0 || matches!(body[i], Op::Label { .. }) || is_terminator(&body[i - 1]);
+            let leader =
+                i == 0 || matches!(body[i], Op::Label { .. }) || is_terminator(&body[i - 1]);
             if leader {
                 starts.push(i);
             }
@@ -411,7 +562,9 @@ impl Cfg {
                     add(target, s);
                     s.extend(fall);
                 }
-                Op::BrTable { targets, default, .. } => {
+                Op::BrTable {
+                    targets, default, ..
+                } => {
                     targets.iter().for_each(|t| add(t, s));
                     add(default, s);
                 }
@@ -488,7 +641,13 @@ impl Cfg {
                 }
             }
         }
-        let mut cfg = Cfg { starts, block_of, preds, idom, loops: BTreeMap::new() };
+        let mut cfg = Cfg {
+            starts,
+            block_of,
+            preds,
+            idom,
+            loops: BTreeMap::new(),
+        };
         for &b in &rpo {
             for &h in &succs[b] {
                 if cfg.dominates(h, b) {
@@ -524,7 +683,12 @@ impl Cfg {
 
     /// Headers of the loops containing `b`, outermost first.
     fn enclosing_headers(&self, b: usize) -> Vec<usize> {
-        let mut hs: Vec<(usize, usize)> = self.loops.iter().filter(|(_, body)| body.contains(&b)).map(|(&h, body)| (body.len(), h)).collect();
+        let mut hs: Vec<(usize, usize)> = self
+            .loops
+            .iter()
+            .filter(|(_, body)| body.contains(&b))
+            .map(|(&h, body)| (body.len(), h))
+            .collect();
         hs.sort_by(|x, y| y.0.cmp(&x.0).then(x.1.cmp(&y.1)));
         hs.into_iter().map(|(_, h)| h).collect()
     }

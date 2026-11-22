@@ -12,6 +12,7 @@ design/_bak-*/
 PURPLE.md
 BLUE.md
 NJVM.md
+GC.md
 vendor/
 *.o.tmp
 njvm-cc/wcc-asan*

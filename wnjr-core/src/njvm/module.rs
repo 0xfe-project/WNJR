@@ -5,8 +5,8 @@
 //! A function index `i` means import function `i` when `i` is below the
 //! number of imported functions, otherwise `functions[i - imported]`.
 
-use serde::{Deserialize, Serialize};
 use alloc::string::String;
+use serde::{Deserialize, Serialize};
 
 use crate::collections::Vec;
 

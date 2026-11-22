@@ -112,7 +112,9 @@ pub fn lower_function(func: &Function, base: u32) -> Result<Lowered, ComputedGot
                 bump(*id);
             }
             Op::Jmp { target } | Op::JmpIf { target, .. } => bump(*target),
-            Op::BrTable { targets, default, .. } => {
+            Op::BrTable {
+                targets, default, ..
+            } => {
                 targets.iter().for_each(|t| bump(*t));
                 bump(*default);
             }
@@ -131,7 +133,10 @@ pub fn lower_function(func: &Function, base: u32) -> Result<Lowered, ComputedGot
     });
 
     if taken.is_empty() && !has_indirect {
-        return Ok(Lowered { function: func.clone(), dispatch: None });
+        return Ok(Lowered {
+            function: func.clone(),
+            dispatch: None,
+        });
     }
 
     let mut numbers: BTreeMap<LabelId, i32> = BTreeMap::new();
@@ -162,7 +167,14 @@ pub fn lower_function(func: &Function, base: u32) -> Result<Lowered, ComputedGot
     let entry = fresh();
     let sel = (func.params.len() + func.locals.len()) as u32;
 
-    let mut rw = Rewriter { numbers: &numbers, d, sel, tramp: BTreeMap::new(), tramp_ops: Vec::new(), fresh: &mut fresh };
+    let mut rw = Rewriter {
+        numbers: &numbers,
+        d,
+        sel,
+        tramp: BTreeMap::new(),
+        tramp_ops: Vec::new(),
+        fresh: &mut fresh,
+    };
     let body = rw.seq(func.body.clone());
     let tramp_ops = core::mem::take(&mut rw.tramp_ops);
 
@@ -170,25 +182,52 @@ pub fn lower_function(func: &Function, base: u32) -> Result<Lowered, ComputedGot
     let index = Expr::binary(
         BinaryOp::Sub,
         Expr::LocalGet(sel),
-        Expr::Const { ty: Type::I32, val: ConstVal::I32(base.wrapping_add(1) as i32) },
+        Expr::Const {
+            ty: Type::I32,
+            val: ConstVal::I32(base.wrapping_add(1) as i32),
+        },
         Type::I32,
     );
 
     let mut out = Vec::new();
     out.push(Op::Jmp { target: entry });
-    out.push(Op::Label { id: d, params: Vec::new() });
-    out.push(Op::BrTable { index, targets: table.iter().map(|(l, _)| *l).collect(), default: trap });
-    out.push(Op::Label { id: trap, params: Vec::new() });
+    out.push(Op::Label {
+        id: d,
+        params: Vec::new(),
+    });
+    out.push(Op::BrTable {
+        index,
+        targets: table.iter().map(|(l, _)| *l).collect(),
+        default: trap,
+    });
+    out.push(Op::Label {
+        id: trap,
+        params: Vec::new(),
+    });
     out.push(Op::Unreachable);
     out.extend(tramp_ops);
-    out.push(Op::Label { id: entry, params: Vec::new() });
+    out.push(Op::Label {
+        id: entry,
+        params: Vec::new(),
+    });
     out.extend(body);
 
     let mut locals = func.locals.clone();
     locals.push(Type::I32);
     Ok(Lowered {
-        function: Function { params: func.params.clone(), results: func.results.clone(), locals, body: out },
-        dispatch: Some(Dispatch { label: d, trap, entry, selector: sel, numbers: table }),
+        function: Function {
+            params: func.params.clone(),
+            results: func.results.clone(),
+            locals,
+            body: out,
+        },
+        dispatch: Some(Dispatch {
+            label: d,
+            trap,
+            entry,
+            selector: sel,
+            numbers: table,
+        }),
     })
 }
 
@@ -207,7 +246,9 @@ pub fn lower_module(module: &Module) -> Result<Module, ComputedGotoError> {
     for f in out.functions.iter_mut() {
         let l = lower_function(f, base)?;
         if let Some(d) = &l.dispatch {
-            base = base.checked_add(d.numbers.len() as u32).ok_or(ComputedGotoError::NumberOverflow)?;
+            base = base
+                .checked_add(d.numbers.len() as u32)
+                .ok_or(ComputedGotoError::NumberOverflow)?;
             numbers.push(Some(d.numbers.clone()));
         } else {
             numbers.push(None);
@@ -252,7 +293,13 @@ struct Rewriter<'a, F: FnMut() -> LabelId> {
 
 impl<F: FnMut() -> LabelId> Rewriter<'_, F> {
     fn set_sel(&self, n: i32) -> Op {
-        Op::LocalSet { idx: self.sel, val: Expr::Const { ty: Type::I32, val: ConstVal::I32(n) } }
+        Op::LocalSet {
+            idx: self.sel,
+            val: Expr::Const {
+                ty: Type::I32,
+                val: ConstVal::I32(n),
+            },
+        }
     }
 
     fn trampoline(&mut self, l: LabelId) -> LabelId {
@@ -261,7 +308,10 @@ impl<F: FnMut() -> LabelId> Rewriter<'_, F> {
         }
         let t = (self.fresh)();
         let n = self.numbers[&l];
-        self.tramp_ops.push(Op::Label { id: t, params: Vec::new() });
+        self.tramp_ops.push(Op::Label {
+            id: t,
+            params: Vec::new(),
+        });
         self.tramp_ops.push(self.set_sel(n));
         self.tramp_ops.push(Op::Jmp { target: self.d });
         self.tramp.insert(l, t);
@@ -278,7 +328,10 @@ impl<F: FnMut() -> LabelId> Rewriter<'_, F> {
             for_each_expr_mut(&mut op, &mut |e| {
                 walk_expr_mut(e, &mut |e| {
                     if let Expr::LabelAddr(l) = e {
-                        *e = Expr::Const { ty: Type::I32, val: ConstVal::I32(numbers[l]) };
+                        *e = Expr::Const {
+                            ty: Type::I32,
+                            val: ConstVal::I32(numbers[l]),
+                        };
                     }
                 })
             });
@@ -296,7 +349,10 @@ impl<F: FnMut() -> LabelId> Rewriter<'_, F> {
                     out.push(op);
                 }
                 Op::GotoIndirect { target } => {
-                    out.push(Op::LocalSet { idx: self.sel, val: target });
+                    out.push(Op::LocalSet {
+                        idx: self.sel,
+                        val: target,
+                    });
                     out.push(Op::Jmp { target: self.d });
                 }
                 Op::Jmp { target } if self.numbers.contains_key(&target) => {
@@ -305,13 +361,30 @@ impl<F: FnMut() -> LabelId> Rewriter<'_, F> {
                 }
                 Op::JmpIf { cond, target } if self.numbers.contains_key(&target) => {
                     out.push(self.set_sel(self.numbers[&target]));
-                    out.push(Op::JmpIf { cond, target: self.d });
+                    out.push(Op::JmpIf {
+                        cond,
+                        target: self.d,
+                    });
                 }
-                Op::BrTable { index, targets, default } => {
-                    let redirect = |l: LabelId, me: &mut Self| if me.numbers.contains_key(&l) { me.trampoline(l) } else { l };
+                Op::BrTable {
+                    index,
+                    targets,
+                    default,
+                } => {
+                    let redirect = |l: LabelId, me: &mut Self| {
+                        if me.numbers.contains_key(&l) {
+                            me.trampoline(l)
+                        } else {
+                            l
+                        }
+                    };
                     let targets = targets.into_iter().map(|t| redirect(t, self)).collect();
                     let default = redirect(default, self);
-                    out.push(Op::BrTable { index, targets, default });
+                    out.push(Op::BrTable {
+                        index,
+                        targets,
+                        default,
+                    });
                 }
                 other => out.push(other),
             }
@@ -348,7 +421,11 @@ fn child_bodies(op: &Op) -> Vec<&Vec<Op>> {
     let mut v = Vec::new();
     match op {
         Op::Block { body } | Op::Loop { body } => v.push(body),
-        Op::If { then_body, else_body, .. } => {
+        Op::If {
+            then_body,
+            else_body,
+            ..
+        } => {
             v.push(then_body);
             v.push(else_body);
         }
@@ -371,7 +448,11 @@ fn child_bodies_mut(op: &mut Op) -> Vec<&mut Vec<Op>> {
     let mut v = Vec::new();
     match op {
         Op::Block { body } | Op::Loop { body } => v.push(body),
-        Op::If { then_body, else_body, .. } => {
+        Op::If {
+            then_body,
+            else_body,
+            ..
+        } => {
             v.push(then_body);
             v.push(else_body);
         }
@@ -416,7 +497,10 @@ macro_rules! op_exprs {
                 $f(val);
             }
             Op::Await { channel, .. } => $f(channel),
-            Op::Yield { val } | Op::LocalSet { val, .. } | Op::GlobalSet { val, .. } | Op::Drop { val } => $f(val),
+            Op::Yield { val }
+            | Op::LocalSet { val, .. }
+            | Op::GlobalSet { val, .. }
+            | Op::Drop { val } => $f(val),
             Op::MemoryCopy { dest, src, len } => {
                 $f(dest);
                 $f(src);
@@ -457,8 +541,14 @@ fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
             walk_expr(lhs, f);
             walk_expr(rhs, f);
         }
-        Expr::Unary { val, .. } | Expr::Convert { val, .. } | Expr::LocalTee { val, .. } => walk_expr(val, f),
-        Expr::Select { cond, then_val, else_val } => {
+        Expr::Unary { val, .. } | Expr::Convert { val, .. } | Expr::LocalTee { val, .. } => {
+            walk_expr(val, f)
+        }
+        Expr::Select {
+            cond,
+            then_val,
+            else_val,
+        } => {
             walk_expr(cond, f);
             walk_expr(then_val, f);
             walk_expr(else_val, f);
@@ -482,8 +572,14 @@ fn walk_expr_mut(e: &mut Expr, f: &mut dyn FnMut(&mut Expr)) {
             walk_expr_mut(lhs, f);
             walk_expr_mut(rhs, f);
         }
-        Expr::Unary { val, .. } | Expr::Convert { val, .. } | Expr::LocalTee { val, .. } => walk_expr_mut(val, f),
-        Expr::Select { cond, then_val, else_val } => {
+        Expr::Unary { val, .. } | Expr::Convert { val, .. } | Expr::LocalTee { val, .. } => {
+            walk_expr_mut(val, f)
+        }
+        Expr::Select {
+            cond,
+            then_val,
+            else_val,
+        } => {
             walk_expr_mut(cond, f);
             walk_expr_mut(then_val, f);
             walk_expr_mut(else_val, f);

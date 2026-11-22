@@ -69,13 +69,21 @@ pub enum Node {
     /// A wasm `loop`: a `br` to it lands back at the top of `body`.
     Loop { body: Vec<Node> },
     /// A wasm `if`. `cond` is the body op holding the condition expression.
-    If { cond: usize, then_body: Vec<Node>, else_body: Vec<Node> },
+    If {
+        cond: usize,
+        then_body: Vec<Node>,
+        else_body: Vec<Node>,
+    },
     /// `br depth` (0 = innermost enclosing construct).
     Br { depth: u32 },
     /// `br_if depth`; `cond` is the body op holding the condition.
     BrIf { cond: usize, depth: u32 },
     /// `br_table`; `index` is the body op holding the index expression.
-    BrTable { index: usize, targets: Vec<u32>, default: u32 },
+    BrTable {
+        index: usize,
+        targets: Vec<u32>,
+        default: u32,
+    },
     /// A straight-line statement: body op `idx` (anything but a label or jump).
     Stmt { idx: usize },
     /// Control reaches the end of the function body. N5 emits `return` for a
@@ -91,9 +99,11 @@ pub fn max_depth(nodes: &[Node]) -> usize {
         .iter()
         .map(|n| match n {
             Node::Block { body } | Node::Loop { body } => 1 + max_depth(body),
-            Node::If { then_body, else_body, .. } => {
-                1 + max_depth(then_body).max(max_depth(else_body))
-            }
+            Node::If {
+                then_body,
+                else_body,
+                ..
+            } => 1 + max_depth(then_body).max(max_depth(else_body)),
             _ => 0,
         })
         .max()
@@ -113,9 +123,17 @@ enum Term {
     /// One edge (`Jmp`, or fallthrough into the next label).
     Uncond(usize),
     /// `JmpIf`: `cond` taken -> `taken`, else -> `not_taken`.
-    Cond { cond: usize, taken: usize, not_taken: usize },
+    Cond {
+        cond: usize,
+        taken: usize,
+        not_taken: usize,
+    },
     /// `BrTable`.
-    Switch { index: usize, targets: Vec<usize>, default: usize },
+    Switch {
+        index: usize,
+        targets: Vec<usize>,
+        default: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -133,7 +151,11 @@ fn op_has_jump(op: &Op) -> bool {
     match op {
         Op::Jmp { .. } | Op::JmpIf { .. } | Op::BrTable { .. } => true,
         Op::Block { body } | Op::Loop { body } => body_has_jump(body),
-        Op::If { then_body, else_body, .. } => body_has_jump(then_body) || body_has_jump(else_body),
+        Op::If {
+            then_body,
+            else_body,
+            ..
+        } => body_has_jump(then_body) || body_has_jump(else_body),
         Op::Switch { cases, default, .. } => {
             cases.iter().any(|(_, b)| body_has_jump(b)) || body_has_jump(default)
         }
@@ -148,7 +170,12 @@ fn op_has_jump(op: &Op) -> bool {
 
 /// Does this top-level body contain a flat CFG op at its top level?
 pub fn needs_stackify(body: &[Op]) -> bool {
-    body.iter().any(|op| matches!(op, Op::Label { .. } | Op::Jmp { .. } | Op::JmpIf { .. } | Op::BrTable { .. }))
+    body.iter().any(|op| {
+        matches!(
+            op,
+            Op::Label { .. } | Op::Jmp { .. } | Op::JmpIf { .. } | Op::BrTable { .. }
+        )
+    })
 }
 
 /// Cut `body` into basic blocks. Returns the blocks (block 0 is the entry) and
@@ -203,7 +230,12 @@ fn build_blocks(body: &[Op]) -> Result<Vec<Block>, StackifyError> {
             label_block.insert(*id, bi);
         }
     }
-    let resolve = |l: LabelId| label_block.get(&l).copied().ok_or(StackifyError::UnknownLabel(l));
+    let resolve = |l: LabelId| {
+        label_block
+            .get(&l)
+            .copied()
+            .ok_or(StackifyError::UnknownLabel(l))
+    };
 
     // Build each block from its span.
     let mut blocks: Vec<Block> = Vec::with_capacity(starts.len());
@@ -222,15 +254,25 @@ fn build_blocks(body: &[Op]) -> Result<Vec<Block>, StackifyError> {
                 Op::JmpIf { target, .. } => {
                     let taken = resolve(*target)?;
                     let not_taken = block_of_index.get(&(i + 1)).copied().unwrap_or(END);
-                    term = Term::Cond { cond: i, taken, not_taken };
+                    term = Term::Cond {
+                        cond: i,
+                        taken,
+                        not_taken,
+                    };
                     ended = true;
                 }
-                Op::BrTable { targets, default, .. } => {
+                Op::BrTable {
+                    targets, default, ..
+                } => {
                     let mut ts = Vec::with_capacity(targets.len());
                     for t in targets {
                         ts.push(resolve(*t)?);
                     }
-                    term = Term::Switch { index: i, targets: ts, default: resolve(*default)? };
+                    term = Term::Switch {
+                        index: i,
+                        targets: ts,
+                        default: resolve(*default)?,
+                    };
                     ended = true;
                 }
                 Op::Return { .. } | Op::Unreachable | Op::Throw { .. } => {
@@ -262,9 +304,15 @@ fn succs(t: &Term) -> Vec<usize> {
     match t {
         Term::Stop => Vec::new(),
         Term::Uncond(x) => {
-            if *x == END { Vec::new() } else { vec![*x] }
+            if *x == END {
+                Vec::new()
+            } else {
+                vec![*x]
+            }
         }
-        Term::Cond { taken, not_taken, .. } => {
+        Term::Cond {
+            taken, not_taken, ..
+        } => {
             let mut v = Vec::new();
             if *taken != END {
                 v.push(*taken);
@@ -274,7 +322,9 @@ fn succs(t: &Term) -> Vec<usize> {
             }
             v
         }
-        Term::Switch { targets, default, .. } => {
+        Term::Switch {
+            targets, default, ..
+        } => {
             let mut v: Vec<usize> = Vec::new();
             for &x in targets {
                 if x != END && !v.contains(&x) {
@@ -419,7 +469,10 @@ impl Cfg {
                 }
             }
             // BrTable forward targets must be branchable (get a block).
-            if let Term::Switch { targets, default, .. } = &cfg.blocks[b].term {
+            if let Term::Switch {
+                targets, default, ..
+            } = &cfg.blocks[b].term
+            {
                 for &t in targets.iter().chain(core::iter::once(default)) {
                     if t != END && cfg.reach[t] && !cfg.dominates(t, b) {
                         force_block[t] = true;
@@ -521,20 +574,30 @@ impl Emit<'_> {
     }
 
     fn node_body(&mut self, v: usize, ctx: &mut Vec<Ctx>) -> Result<Vec<Node>, StackifyError> {
-        let mut out: Vec<Node> =
-            self.cfg.blocks[v].stmts.iter().map(|&idx| Node::Stmt { idx }).collect();
+        let mut out: Vec<Node> = self.cfg.blocks[v]
+            .stmts
+            .iter()
+            .map(|&idx| Node::Stmt { idx })
+            .collect();
         match self.cfg.blocks[v].term.clone() {
             Term::Stop => {}
             Term::Uncond(t) => {
                 let tail = self.edge(v, t, ctx)?;
                 out.extend(tail);
             }
-            Term::Cond { cond, taken, not_taken } => {
+            Term::Cond {
+                cond,
+                taken,
+                not_taken,
+            } => {
                 if taken == not_taken {
                     let tail = self.edge(v, taken, ctx)?;
                     out.extend(tail);
                 } else if taken != END && self.cfg.branches(v, taken) {
-                    out.push(Node::BrIf { cond, depth: self.depth(v, taken, ctx)? });
+                    out.push(Node::BrIf {
+                        cond,
+                        depth: self.depth(v, taken, ctx)?,
+                    });
                     let tail = self.edge(v, not_taken, ctx)?;
                     out.extend(tail);
                 } else {
@@ -542,16 +605,28 @@ impl Emit<'_> {
                     let then_body = self.edge(v, taken, ctx)?;
                     let else_body = self.edge(v, not_taken, ctx)?;
                     ctx.pop();
-                    out.push(Node::If { cond, then_body, else_body });
+                    out.push(Node::If {
+                        cond,
+                        then_body,
+                        else_body,
+                    });
                 }
             }
-            Term::Switch { index, targets, default } => {
+            Term::Switch {
+                index,
+                targets,
+                default,
+            } => {
                 let mut ts = Vec::with_capacity(targets.len());
                 for t in targets {
                     ts.push(self.depth(v, t, ctx)?);
                 }
                 let d = self.depth(v, default, ctx)?;
-                out.push(Node::BrTable { index, targets: ts, default: d });
+                out.push(Node::BrTable {
+                    index,
+                    targets: ts,
+                    default: d,
+                });
             }
         }
         Ok(out)
@@ -564,7 +639,9 @@ impl Emit<'_> {
             return Ok(vec![Node::FallOffEnd]);
         }
         if self.cfg.branches(v, t) {
-            Ok(vec![Node::Br { depth: self.depth(v, t, ctx)? }])
+            Ok(vec![Node::Br {
+                depth: self.depth(v, t, ctx)?,
+            }])
         } else {
             self.do_tree(t, ctx)
         }
@@ -596,7 +673,10 @@ pub fn stackify(body: &[Op]) -> Result<Vec<Node>, StackifyError> {
         return Ok(Vec::new());
     }
     let cfg = Cfg::analyze(blocks);
-    let mut emit = Emit { cfg: &cfg, emitted: BTreeSet::new() };
+    let mut emit = Emit {
+        cfg: &cfg,
+        emitted: BTreeSet::new(),
+    };
     let mut ctx: Vec<Ctx> = Vec::new();
     emit.do_tree(0, &mut ctx)
 }

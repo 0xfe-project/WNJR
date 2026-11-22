@@ -9,8 +9,8 @@
 
 use std::process::ExitCode;
 
-use wnjr_core::njvm::verify_module;
 use njvm_io::{decode_module, dump::dump_module, FORMAT_VERSION};
+use wnjr_core::njvm::verify_module;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();

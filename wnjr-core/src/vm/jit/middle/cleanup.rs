@@ -1075,7 +1075,11 @@ fn remove_one_block(program: &mut SsaProgram, removed_index: usize) {
         if is_removed {
             mapping.push(SsaTarget::default());
         } else {
-            let target = if index > removed_index { index - 1 } else { index };
+            let target = if index > removed_index {
+                index - 1
+            } else {
+                index
+            };
             mapping.push(SsaTarget(target as u32));
         }
     }

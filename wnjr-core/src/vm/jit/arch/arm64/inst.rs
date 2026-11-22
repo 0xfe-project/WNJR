@@ -4195,7 +4195,9 @@ impl<'a> super::backend::Arm64Backend<'a> {
                     .emit_u32(enc::mov_reg_64(dst_gp, result_scratch));
                 self.gp_scratch.free_index(result_scratch_idx);
             }
-            EhHelperOp::Clear => self.emit_preserved_call_and_close(preserved_op::EH_CLEAR, None)?,
+            EhHelperOp::Clear => {
+                self.emit_preserved_call_and_close(preserved_op::EH_CLEAR, None)?
+            }
             EhHelperOp::Rethrow => {
                 self.emit_preserved_call_and_close(preserved_op::EH_RETHROW, None)?
             }

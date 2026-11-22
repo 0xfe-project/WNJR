@@ -197,4 +197,3 @@ pub fn read_module(bytes: &[u8]) -> Result<Module, Error> {
 }
 
 pub mod dump;
-

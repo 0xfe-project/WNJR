@@ -1,7 +1,7 @@
 //! NJVM-IR operation (statement/control flow) enum, groups A–H.
 
-use serde::{Deserialize, Serialize};
 use crate::collections::Vec;
+use serde::{Deserialize, Serialize};
 
 use super::expr::Expr;
 use super::types::{AtomicOp, ConstVal, MemType, Type};
@@ -134,10 +134,7 @@ pub enum Op {
     /// own: a jump inside one may only target a label of the same region (N3
     /// rejects jumps into a try; stackify N6 restructures each region alone).
     /// Falling off the end of the body or a handler continues after the op.
-    TryTable {
-        body: Vec<Op>,
-        catches: Vec<Catch>,
-    },
+    TryTable { body: Vec<Op>, catches: Vec<Catch> },
 
     /// Throw an exception with the given tag and arguments.
     Throw { tag_idx: u32, args: Vec<Expr> },
@@ -156,10 +153,7 @@ pub enum Op {
     // Group F: coroutines / async
     // ─────────────────────────────────────────────────────────────────────────
     /// Await: suspend until `channel` is ready, execute `fallback` if canceled.
-    Await {
-        channel: Expr,
-        fallback: Vec<Op>,
-    },
+    Await { channel: Expr, fallback: Vec<Op> },
 
     /// Yield: suspend and produce `val` to the caller.
     Yield { val: Expr },
@@ -174,18 +168,10 @@ pub enum Op {
     GlobalSet { idx: u32, val: Expr },
 
     /// Bulk memory copy.
-    MemoryCopy {
-        dest: Expr,
-        src: Expr,
-        len: Expr,
-    },
+    MemoryCopy { dest: Expr, src: Expr, len: Expr },
 
     /// Bulk memory fill.
-    MemoryFill {
-        dest: Expr,
-        val: Expr,
-        len: Expr,
-    },
+    MemoryFill { dest: Expr, val: Expr, len: Expr },
 
     /// Query current memory size in pages.
     MemorySize,

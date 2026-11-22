@@ -321,6 +321,8 @@ typedef enum {
   ND_ATOMIC_FENCE,    // __sync_synchronize
   ND_MEMORY_SIZE,     // __builtin_wasm_memory_size(0)
   ND_MEMORY_GROW,     // __builtin_wasm_memory_grow(0, n)
+  ND_SETJMP,          // __njvm_setjmp(buf): lhs = buf
+  ND_LONGJMP,         // __njvm_longjmp(buf, val): lhs = buf, rhs = val
   ND_FLOAT_TEST,      // __builtin_isinf, isfinite, isnormal, signbit
   ND_FLOAT_CMP,       // __builtin_isunordered, islessgreater
   ND_OVERFLOW,        // __builtin_add_overflow, sub_overflow, mul_overflow

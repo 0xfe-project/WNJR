@@ -142,6 +142,9 @@ void nj_op_memorysize(Mp *m);
 // replacement may be NULL, and `dest` is -1 when the result is discarded.
 void nj_op_atomic(Mp *m, const char *op, uint32_t width, uint32_t offset, const E *ptr,
                   const E *val, const E *replacement, int32_t dest);
+// Op::Setjmp { buf, dest } and Op::Longjmp { buf, val }: the pre-lowering markers.
+void nj_op_setjmp(Mp *m, const E *buf, uint32_t dest);
+void nj_op_longjmp(Mp *m, const E *buf, const E *val);
 // Op::Call (result discarded).
 void nj_op_call(Mp *m, uint32_t func, E *const *args, size_t nargs);
 void nj_op_return(Mp *m, const E *val);

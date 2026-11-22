@@ -4,11 +4,12 @@ use crate::{
     error::WasmError,
     vm::{
         jit::machine::machine_ir::{
-            EhHelperOp, MachineCompareKind, MachineConvertOp, MachineFloatBinaryOp, MachineFloatUnaryOp,
-            MachineFloatWidth, MachineIndexExtend, MachineInst, MachineInstKind,
-            MachineIntBinaryOp, MachineIntUnaryOp, MachineIntWidth, MachineLoadExtension,
-            MachineMemWidth, MachineReg, MachineShiftOp, MachineSign, MachineStorageType,
-            MachineTrapKind, MachineValue, MACHINE_CTX_REG, MACHINE_FP_REG, MACHINE_MEM0_SIZE_REG,
+            EhHelperOp, MachineCompareKind, MachineConvertOp, MachineFloatBinaryOp,
+            MachineFloatUnaryOp, MachineFloatWidth, MachineIndexExtend, MachineInst,
+            MachineInstKind, MachineIntBinaryOp, MachineIntUnaryOp, MachineIntWidth,
+            MachineLoadExtension, MachineMemWidth, MachineReg, MachineShiftOp, MachineSign,
+            MachineStorageType, MachineTrapKind, MachineValue, MACHINE_CTX_REG, MACHINE_FP_REG,
+            MACHINE_MEM0_SIZE_REG,
         },
         jit::runtime::preserved,
     },

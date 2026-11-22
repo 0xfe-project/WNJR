@@ -1,0 +1,11 @@
+through_levels 5
+through_levels 0
+through_levels 1
+nested 3
+nested 0
+loop_static 0
+loop_static 4
+from_recursion 0
+from_recursion 6
+volatile_local 9
+volatile_local 0

@@ -59,8 +59,12 @@ impl PartialEq for Arg {
         match (*self, *other) {
             (Arg::I32(a), Arg::I32(b)) => a == b,
             (Arg::I64(a), Arg::I64(b)) => a == b,
-            (Arg::F32(a), Arg::F32(b)) => a == b || (f32::from_bits(a).is_nan() && f32::from_bits(b).is_nan()),
-            (Arg::F64(a), Arg::F64(b)) => a == b || (f64::from_bits(a).is_nan() && f64::from_bits(b).is_nan()),
+            (Arg::F32(a), Arg::F32(b)) => {
+                a == b || (f32::from_bits(a).is_nan() && f32::from_bits(b).is_nan())
+            }
+            (Arg::F64(a), Arg::F64(b)) => {
+                a == b || (f64::from_bits(a).is_nan() && f64::from_bits(b).is_nan())
+            }
             _ => false,
         }
     }
@@ -199,13 +203,17 @@ pub struct Pass {
 
 impl Pass {
     pub fn new(name: &str, run: impl Fn(&Module) -> Module + 'static) -> Pass {
-        Pass { name: name.to_string(), run: Box::new(run) }
+        Pass {
+            name: name.to_string(),
+            run: Box::new(run),
+        }
     }
 }
 
 /// Run the whole pipeline on `module` with `passes`, returning wasm bytes.
 pub fn compile(module: &Module, passes: &[Pass]) -> Result<Vec<u8>, String> {
-    let mut m = njvm::computed_goto::lower_module(module).map_err(|e| format!("computed goto lowering: {e:?}"))?;
+    let mut m = njvm::computed_goto::lower_module(module)
+        .map_err(|e| format!("computed goto lowering: {e:?}"))?;
     njvm::verify_module(&m).map_err(|e| format!("verifier (input): {e}"))?;
     for p in passes {
         m = (p.run)(&m);
@@ -227,7 +235,10 @@ pub fn result_kinds(module: &Module, export: &str) -> Result<Vec<Kind>, String> 
         .index
         .checked_sub(module.imported_functions())
         .ok_or("exported function is an import")?;
-    let f = module.functions.get(local as usize).ok_or("export index out of range")?;
+    let f = module
+        .functions
+        .get(local as usize)
+        .ok_or("export index out of range")?;
     f.results.iter().map(|&t| Kind::of(t)).collect()
 }
 
@@ -275,13 +286,16 @@ pub fn run_wnjr_sequence(
     let engine = Engine::new(Config::new()).map_err(|e| format!("engine: {e:?}"))?;
     let mut out = Vec::new();
     // Parse, validate and decode once; the instance is reused across calls.
-    let parsed = WasmModule::new("njvm-e2e", bytes).map_err(|e| format!("WNJR Module::new: {e:?}"))?;
+    let parsed =
+        WasmModule::new("njvm-e2e", bytes).map_err(|e| format!("WNJR Module::new: {e:?}"))?;
     let mut live: Option<(RuntimeWorld, _)> = None;
     for (export, args) in calls {
         if live.is_none() {
             let mut world = RuntimeWorld::new();
             let imports = wasi_imports(guest_args);
-            let id = world.instantiate(&engine, parsed.clone(), &imports).map_err(|e| format!("WNJR instantiate: {e:?}"))?;
+            let id = world
+                .instantiate(&engine, parsed.clone(), &imports)
+                .map_err(|e| format!("WNJR instantiate: {e:?}"))?;
             live = Some((world, id));
         }
         let (world, id) = live.as_mut().expect("instance");
@@ -322,7 +336,10 @@ pub fn run_wnjr(
     // stateless is one whose calls must each start from a clean instance. A
     // stateless case may reuse one instance, which no case asks for yet — it
     // would stop matching bun.
-    let calls: Vec<(String, Vec<Arg>)> = inputs.iter().map(|a| (export.to_string(), a.clone())).collect();
+    let calls: Vec<(String, Vec<Arg>)> = inputs
+        .iter()
+        .map(|a| (export.to_string(), a.clone()))
+        .collect();
     run_wnjr_sequence(bytes, &calls, !stateless, guest_args)
 }
 /// One module to run on a host.
@@ -336,7 +353,11 @@ pub struct Job {
 
 impl Job {
     fn to_json(&self) -> serde_json::Value {
-        let hex = self.bytes.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let hex = self
+            .bytes
+            .iter()
+            .map(|x| format!("{x:02x}"))
+            .collect::<String>();
         serde_json::json!({
             "hex": hex,
             "export": self.export,
@@ -350,7 +371,9 @@ impl Job {
 fn outcome_to_json(o: &Outcome) -> serde_json::Value {
     match o {
         Outcome::Trap => serde_json::json!({ "trap": true }),
-        Outcome::Ret(v) => serde_json::json!({ "ret": v.iter().map(|x| x.to_json()).collect::<Vec<_>>() }),
+        Outcome::Ret(v) => {
+            serde_json::json!({ "ret": v.iter().map(|x| x.to_json()).collect::<Vec<_>>() })
+        }
     }
 }
 
@@ -360,9 +383,15 @@ fn bun_command() -> String {
 
 /// `bun --version`, or an error when bun cannot be started.
 pub fn bun_version() -> Result<String, String> {
-    let out = Command::new(bun_command()).arg("--version").output().map_err(|e| format!("cannot start bun: {e}"))?;
+    let out = Command::new(bun_command())
+        .arg("--version")
+        .output()
+        .map_err(|e| format!("cannot start bun: {e}"))?;
     if !out.status.success() {
-        return Err(format!("bun --version failed: {}", String::from_utf8_lossy(&out.stderr)));
+        return Err(format!(
+            "bun --version failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
@@ -418,12 +447,16 @@ fn host_command(host: Host) -> Result<Command, String> {
 /// (`NJVM_E2E_JOB_MS`, default 3000). A job that exceeds it is reported as
 /// timed out (a loop that does not terminate), not as a harness failure.
 pub fn job_deadline() -> Duration {
-    let ms = std::env::var("NJVM_E2E_JOB_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(3000);
+    let ms = std::env::var("NJVM_E2E_JOB_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000);
     Duration::from_millis(ms)
 }
 
 fn parse_line(line: &str) -> Result<Result<Vec<Outcome>, String>, String> {
-    let r: serde_json::Value = serde_json::from_str(line).map_err(|e| format!("host output is not JSON: {e}: {line}"))?;
+    let r: serde_json::Value =
+        serde_json::from_str(line).map_err(|e| format!("host output is not JSON: {e}: {line}"))?;
     if let Some(e) = r.get("error") {
         return Ok(Err(e.as_str().unwrap_or("?").to_string()));
     }
@@ -434,7 +467,9 @@ fn parse_line(line: &str) -> Result<Result<Vec<Outcome>, String>, String> {
             v.push(Outcome::Trap);
         } else {
             let rets = o["ret"].as_array().ok_or("outcome without ret")?;
-            v.push(Outcome::Ret(rets.iter().map(Arg::from_json).collect::<Result<_, _>>()?));
+            v.push(Outcome::Ret(
+                rets.iter().map(Arg::from_json).collect::<Result<_, _>>()?,
+            ));
         }
     }
     Ok(Ok(v))
@@ -450,7 +485,8 @@ pub fn run_jobs(host: Host, jobs: &[Job]) -> Result<Vec<Result<Vec<Outcome>, Str
     let mut start = 0;
     let mut dead_in_a_row = 0;
     while start < jobs.len() {
-        let payload = serde_json::Value::Array(jobs[start..].iter().map(Job::to_json).collect()).to_string();
+        let payload =
+            serde_json::Value::Array(jobs[start..].iter().map(Job::to_json).collect()).to_string();
         let mut child = host_command(host)?
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -500,7 +536,9 @@ pub fn run_jobs(host: Host, jobs: &[Job]) -> Result<Vec<Result<Vec<Outcome>, Str
         if timed_out {
             let _ = child.kill();
         }
-        let status = child.wait().map_err(|e| format!("wait for {}: {e}", host.name()))?;
+        let status = child
+            .wait()
+            .map_err(|e| format!("wait for {}: {e}", host.name()))?;
         let _ = writer.join();
         let _ = reader.join();
         let stderr_text = err_reader.join().unwrap_or_default();
@@ -510,14 +548,30 @@ pub fn run_jobs(host: Host, jobs: &[Job]) -> Result<Vec<Result<Vec<Outcome>, Str
         // The job at start + got did not answer.
         if timed_out {
             dead_in_a_row = 0;
-            results.push(Err(format!("timed out after {} ms (does not terminate?)", deadline.as_millis())));
+            results.push(Err(format!(
+                "timed out after {} ms (does not terminate?)",
+                deadline.as_millis()
+            )));
         } else {
             dead_in_a_row = if got == 0 { dead_in_a_row + 1 } else { 0 };
             if dead_in_a_row >= 3 {
-                return Err(format!("{} died three times in a row ({status}): {stderr_text}", host.name()));
+                return Err(format!(
+                    "{} died three times in a row ({status}): {stderr_text}",
+                    host.name()
+                ));
             }
-            let tail: String = stderr_text.chars().rev().take(400).collect::<String>().chars().rev().collect();
-            results.push(Err(format!("{} process died on this job ({status}): {tail}", host.name())));
+            let tail: String = stderr_text
+                .chars()
+                .rev()
+                .take(400)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect();
+            results.push(Err(format!(
+                "{} process died on this job ({status}): {tail}",
+                host.name()
+            )));
         }
         start += got + 1;
     }
@@ -528,8 +582,11 @@ pub fn run_jobs(host: Host, jobs: &[Job]) -> Result<Vec<Result<Vec<Outcome>, Str
 /// reads) from stdin, run each on WNJR and print one result line per job.
 pub fn wnjr_runner_main() -> Result<(), String> {
     let mut text = String::new();
-    std::io::stdin().read_to_string(&mut text).map_err(|e| format!("stdin: {e}"))?;
-    let jobs: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("stdin is not JSON: {e}"))?;
+    std::io::stdin()
+        .read_to_string(&mut text)
+        .map_err(|e| format!("stdin: {e}"))?;
+    let jobs: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("stdin is not JSON: {e}"))?;
     let stdout = std::io::stdout();
     for job in jobs.as_array().ok_or("jobs is not an array")? {
         let line = (|| -> Result<Vec<Outcome>, String> {
@@ -542,12 +599,26 @@ pub fn wnjr_runner_main() -> Result<(), String> {
                 .as_array()
                 .ok_or("job without inputs")?
                 .iter()
-                .map(|a| a.as_array().ok_or("input is not an array".to_string())?.iter().map(Arg::from_json).collect::<Result<Vec<_>, _>>())
+                .map(|a| {
+                    a.as_array()
+                        .ok_or("input is not an array".to_string())?
+                        .iter()
+                        .map(Arg::from_json)
+                        .collect::<Result<Vec<_>, _>>()
+                })
                 .collect::<Result<Vec<_>, _>>()?;
-            run_wnjr(&bytes, export, &inputs, job["stateless"].as_bool().unwrap_or(false), &[])
+            run_wnjr(
+                &bytes,
+                export,
+                &inputs,
+                job["stateless"].as_bool().unwrap_or(false),
+                &[],
+            )
         })();
         let json = match line {
-            Ok(outs) => serde_json::json!({ "outs": outs.iter().map(outcome_to_json).collect::<Vec<_>>() }),
+            Ok(outs) => {
+                serde_json::json!({ "outs": outs.iter().map(outcome_to_json).collect::<Vec<_>>() })
+            }
             Err(e) => serde_json::json!({ "error": e }),
         };
         let mut w = stdout.lock();
@@ -578,11 +649,20 @@ pub fn execute(cases: &[Case], passes: &[Pass]) -> Result<Vec<CaseRun>, String> 
             Ok((bytes, ret))
         });
         match compiled {
-            Err(e) => runs.push(Some(CaseRun { wnjr: Err(e.clone()), bun: Err(e) })),
+            Err(e) => runs.push(Some(CaseRun {
+                wnjr: Err(e.clone()),
+                bun: Err(e),
+            })),
             Ok((bytes, ret)) => {
                 let inputs: Vec<Vec<Arg>> = c.calls.iter().map(|(a, _)| a.clone()).collect();
                 runs.push(None);
-                jobs.push(Job { bytes, export: c.export.clone(), ret, inputs, stateless: c.stateless });
+                jobs.push(Job {
+                    bytes,
+                    export: c.export.clone(),
+                    ret,
+                    inputs,
+                    stateless: c.stateless,
+                });
                 job_of.push(i);
             }
         }
@@ -696,7 +776,11 @@ pub fn check(cases: &[Case], passes: &[Pass]) -> Result<Vec<Mismatch>, String> {
 }
 
 /// Like [check] with the baseline already run.
-pub fn check_against(cases: &[Case], base: &[CaseRun], passes: &[Pass]) -> Result<Vec<Mismatch>, String> {
+pub fn check_against(
+    cases: &[Case],
+    base: &[CaseRun],
+    passes: &[Pass],
+) -> Result<Vec<Mismatch>, String> {
     let mut out = compare_run(cases, base, "baseline", true);
     if passes.is_empty() {
         return Ok(out);
@@ -706,7 +790,14 @@ pub fn check_against(cases: &[Case], base: &[CaseRun], passes: &[Pass]) -> Resul
     for (c, (b, o)) in cases.iter().zip(base.iter().zip(&opt)) {
         for (host, bb, oo) in [("WNJR", &b.wnjr, &o.wnjr), ("bun", &b.bun, &o.bun)] {
             if let (Ok(x), Ok(y)) = (bb, oo) {
-                cmp_outcomes(&mut out, &c.name, "with passes", &format!("passes vs baseline ({host})"), x, y);
+                cmp_outcomes(
+                    &mut out,
+                    &c.name,
+                    "with passes",
+                    &format!("passes vs baseline ({host})"),
+                    x,
+                    y,
+                );
             }
         }
     }
@@ -724,7 +815,11 @@ pub fn check_each(cases: &[Case], passes: &[Pass]) -> Result<Vec<(String, Vec<Mi
             out.push((p.name.clone(), check_against(cases, &base, one)?));
         }
     }
-    let label = passes.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(" + ");
+    let label = passes
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" + ");
     out.push((label, check_against(cases, &base, passes)?));
     Ok(out)
 }

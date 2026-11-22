@@ -14,13 +14,13 @@
 
 pub mod builder;
 pub mod computed_goto;
+pub mod encode;
+pub mod erase;
 pub mod expr;
 pub mod module;
 pub mod op;
-pub mod encode;
 pub mod setjmp;
 pub mod stackify;
-pub mod erase;
 pub mod types;
 pub mod verify;
 
@@ -28,12 +28,13 @@ pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use computed_goto::{lower_function, lower_module, ComputedGotoError, Dispatch, Lowered};
 pub use expr::Expr;
 pub use module::{
-    DataLabelFixup, DataSegment, ElementSegment, Export, ExportKind, Function, FunctionType, Global,
-    GlobalType, Import, ImportKind, InitExpr, MemoryType, Module, SegmentMode, TableType, Tag,
+    DataLabelFixup, DataSegment, ElementSegment, Export, ExportKind, Function, FunctionType,
+    Global, GlobalType, Import, ImportKind, InitExpr, MemoryType, Module, SegmentMode, TableType,
+    Tag,
 };
 pub use op::{Catch, LabelId, Op};
+pub use stackify::{max_depth, stackify, Node, StackifyError};
 pub use types::{AtomicOp, BinaryOp, ConstVal, MemType, Type, UnaryOp};
-pub use stackify::{stackify, max_depth, Node, StackifyError};
 pub use verify::{verify_module, OpName, OpPath, VerifyError, VerifyErrorKind};
 
 #[cfg(test)]
@@ -71,7 +72,13 @@ mod tests {
 
         // Body: Label then Return.
         assert_eq!(func.body.len(), 2);
-        assert_eq!(func.body[0], Op::Label { id: 0, params: vec![] });
+        assert_eq!(
+            func.body[0],
+            Op::Label {
+                id: 0,
+                params: vec![]
+            }
+        );
 
         match &func.body[1] {
             Op::Return { vals } => {
@@ -165,8 +172,20 @@ mod tests {
 
         // Body shape: LocalSet, Label(head), JmpIf, LocalSet, Jmp(head), Label(exit), Return.
         assert_eq!(func.body.len(), 7);
-        assert_eq!(func.body[1], Op::Label { id: head, params: vec![] });
-        assert_eq!(func.body[5], Op::Label { id: exit, params: vec![] });
+        assert_eq!(
+            func.body[1],
+            Op::Label {
+                id: head,
+                params: vec![]
+            }
+        );
+        assert_eq!(
+            func.body[5],
+            Op::Label {
+                id: exit,
+                params: vec![]
+            }
+        );
 
         // The JmpIf targets exit.
         match &func.body[2] {
