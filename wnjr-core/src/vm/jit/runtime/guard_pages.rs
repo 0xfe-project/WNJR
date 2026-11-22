@@ -81,7 +81,7 @@ impl Drop for Reservation {
 /// It runs on the thread that grew the memory, while the engine holds the
 /// instance, so it must not call back into the engine. Recording the new length
 /// and returning is the intended use.
-pub(crate) type GrowListener = dyn Fn(u64, usize) + Send + Sync;
+pub type GrowListener = dyn Fn(u64, usize) + Send + Sync;
 
 /// The part of a guarded memory that more than one owner reads: the committed
 /// length and the grow callback.
