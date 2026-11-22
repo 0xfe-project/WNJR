@@ -101,6 +101,137 @@ pub struct Extern {
     pub(crate) source: InstanceId,
 }
 
+/// What kind of object an [`Extern`] is.
+///
+/// An embedder needs this to build the right host wrapper: the same map of
+/// exports holds functions, memories, tables and globals, and only the kind
+/// says which one a name refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ExternKind {
+    Func,
+    Memory,
+    Table,
+    Global,
+    Tag,
+}
+
+impl Extern {
+    /// Which kind of object this export is.
+    pub fn kind(&self) -> ExternKind {
+        match &self.value {
+            ImportValue::Func(_) => ExternKind::Func,
+            ImportValue::Global(..) => ExternKind::Global,
+            ImportValue::Memory(..) => ExternKind::Memory,
+            ImportValue::Table(..) => ExternKind::Table,
+            ImportValue::Tag(_) => ExternKind::Tag,
+        }
+    }
+
+    /// The declared limits of an exported memory or table.
+    pub fn limits(&self) -> Option<Limits> {
+        match &self.value {
+            ImportValue::Memory(limits, _) | ImportValue::Table(limits, _) => Some(*limits),
+            _ => None,
+        }
+    }
+
+    /// Whether an exported global is declared mutable.
+    pub fn is_mutable(&self) -> Option<bool> {
+        match &self.value {
+            ImportValue::Global(_, mutable) => Some(*mutable),
+            _ => None,
+        }
+    }
+
+    /// A host handle to an exported memory, if it is guard-page backed.
+    ///
+    /// `None` for anything that is not a memory, and for a heap-backed memory
+    /// whose base would move on grow.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    pub fn memory_handle(&self) -> Option<crate::vm::handle::MemHandle> {
+        let ImportValue::Memory(limits, Some(mem)) = &self.value else {
+            return None;
+        };
+        mem.guarded()
+            .map(|guard| crate::vm::handle::MemHandle::from_guard(guard, mem.id(), *limits))
+    }
+
+    /// The function this export refers to, as a world-bound reference.
+    pub(crate) fn func_handle(&self) -> Option<&ImportedFunction> {
+        match &self.value {
+            ImportValue::Func(func) => Some(func),
+            _ => None,
+        }
+    }
+
+    /// Read the value of an exported or imported global.
+    ///
+    /// `None` for anything that is not a global. An imported global bound by
+    /// value has no shared cell to read, and reports the value it was bound to.
+    pub fn global_value(&self) -> Option<Value> {
+        match &self.value {
+            ImportValue::Global(global, _) => Some(match global {
+                ImportedGlobal::Value(value) => *value,
+                ImportedGlobal::State(state) => state.global.get(self.source.world()),
+            }),
+            _ => None,
+        }
+    }
+
+    /// Write the value of a mutable global.
+    ///
+    /// Errors when the export is not a global, when it is immutable, or when
+    /// the value does not have the global's type.
+    pub fn set_global_value(&self, value: Value) -> Result<(), WasmError> {
+        let ImportValue::Global(global, mutable) = &self.value else {
+            return Err(WasmError::invalid("export is not a global"));
+        };
+        if !*mutable {
+            return Err(WasmError::invalid("global is immutable"));
+        }
+        let ImportedGlobal::State(state) = global else {
+            return Err(WasmError::invalid("global has no shared cell to write"));
+        };
+        state.global.set(value)
+    }
+
+    /// The current size of an exported or imported table.
+    pub fn table_size(&self) -> Option<usize> {
+        match &self.value {
+            ImportValue::Table(_, Some(state)) => Some(state.table.size()),
+            _ => None,
+        }
+    }
+
+    /// Read one element of a table.
+    pub fn table_get(&self, index: usize) -> Option<Result<Value, WasmError>> {
+        let ImportValue::Table(_, Some(state)) = &self.value else {
+            return None;
+        };
+        Some(state.table.get(index, self.source.world()))
+    }
+
+    /// Write one element of a table.
+    pub fn table_set(&self, index: usize, value: Value) -> Result<(), WasmError> {
+        let ImportValue::Table(limits, Some(state)) = &self.value else {
+            return Err(WasmError::invalid("export is not a table"));
+        };
+        let _ = limits;
+        state.table.set(index, value)
+    }
+
+    /// Grow a table by `delta` elements, filling them with `init`.
+    ///
+    /// Returns the previous size, like `table.grow`.
+    pub fn table_grow(&self, delta: usize, init: Value) -> Result<usize, WasmError> {
+        let ImportValue::Table(limits, Some(state)) = &self.value else {
+            return Err(WasmError::invalid("export is not a table"));
+        };
+        let _ = limits;
+        state.table.grow(delta, init)
+    }
+}
+
 impl Import {
     /// Bind an exported object under the module/name requested by an importer.
     /// Both instances must belong to the same RuntimeWorld.

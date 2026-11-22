@@ -322,6 +322,74 @@ impl TableInst {
     pub(crate) fn size(&self) -> usize {
         self.elements.borrow().len()
     }
+
+    pub(crate) fn value_type(&self) -> ValueType {
+        self.value_type
+    }
+
+    /// One element as a host value, with references tagged for `world`.
+    pub(crate) fn get(&self, index: usize, world: usize) -> Result<crate::value::Value, WasmError> {
+        let elements = self.elements.borrow();
+        let Some(element) = elements.get(index) else {
+            return Err(WasmError::invalid("table index out of bounds"));
+        };
+        Ok(match self.value_type {
+            ValueType::Ref(ref_type) => crate::value::Value::Ref(
+                crate::value::RefValue::from_vm(*element, world),
+                ref_type,
+            ),
+            _ => crate::value::Value::Unknown,
+        })
+    }
+
+    /// Write one element, which must be a reference of this table's type.
+    pub(crate) fn set(
+        &self,
+        index: usize,
+        value: crate::value::Value,
+    ) -> Result<(), WasmError> {
+        let crate::value::Value::Ref(reference, _) = value else {
+            return Err(WasmError::invalid("table element is not a reference"));
+        };
+        self.set_raw(index, reference.raw)
+    }
+
+    pub(crate) fn set_raw(&self, index: usize, element: RefValue) -> Result<(), WasmError> {
+        let mut elements = self.elements_mut();
+        let Some(slot) = elements.get_mut(index) else {
+            return Err(WasmError::invalid("table index out of bounds"));
+        };
+        *slot = element;
+        Ok(())
+    }
+
+    /// Grow by `delta` elements filled with `init`, returning the old size.
+    pub(crate) fn grow(
+        &self,
+        delta: usize,
+        init: crate::value::Value,
+    ) -> Result<usize, WasmError> {
+        let crate::value::Value::Ref(reference, _) = init else {
+            return Err(WasmError::invalid("table element is not a reference"));
+        };
+        let old = self.size();
+        let new = old
+            .checked_add(delta)
+            .ok_or_else(|| WasmError::invalid("table grow overflow"))?;
+        let address_cap = if self.limits.is64 {
+            crate::constants::MAX_TABLE_SIZE_64
+        } else {
+            crate::constants::MAX_TABLE_SIZE
+        };
+        if new > self.limits.effective_max().min(address_cap) {
+            return Err(WasmError::invalid("table grow exceeds the declared maximum"));
+        }
+        let mut elements = self.elements_mut();
+        for _ in 0..delta {
+            elements.push(reference.raw);
+        }
+        Ok(old)
+    }
 }
 
 #[derive(Debug)]
@@ -638,7 +706,7 @@ impl GlobalInst {
     }
 
     #[inline]
-    pub(crate) fn set_raw(&mut self, raw: u64) {
+    pub(crate) fn set_raw(&self, raw: u64) {
         // Safety: see `raw`.
         unsafe {
             *self.raw_ptr = raw;
@@ -648,5 +716,64 @@ impl GlobalInst {
     #[inline]
     pub(crate) fn raw_ptr(&self) -> *mut u64 {
         self.raw_ptr
+    }
+
+    /// The global as a host value.
+    ///
+    /// `v128` is not representable as a scalar raw cell, so reading one is an
+    /// error rather than a silent zero.
+    pub(crate) fn get(&self, world: usize) -> crate::value::Value {
+        let raw = self.raw();
+        match self.value_type {
+            ValueType::I32 => crate::value::Value::I32(raw as i32),
+            ValueType::I64 => crate::value::Value::I64(raw as i64),
+            ValueType::F32 => crate::value::Value::F32(f32::from_bits(raw as u32)),
+            ValueType::F64 => crate::value::Value::F64(f64::from_bits(raw)),
+            ValueType::Ref(ref_type) => crate::value::Value::Ref(
+                crate::value::RefValue::from_vm(crate::vm::value::RefValue::new(raw as usize), world),
+                ref_type,
+            ),
+            ValueType::V128 | ValueType::Unknown => crate::value::Value::Unknown,
+        }
+    }
+
+    /// Write the global from a host value, which must match its declared type.
+    pub(crate) fn set(&self, value: crate::value::Value) -> Result<(), WasmError> {
+        if !self.mutable {
+            return Err(WasmError::invalid("global is immutable"));
+        }
+        use crate::value::Value as HostValue;
+        let raw = match value {
+            HostValue::I32(v) => v as u32 as u64,
+            HostValue::I64(v) => v as u64,
+            HostValue::F32(v) => f32::to_bits(v) as u64,
+            HostValue::F64(v) => f64::to_bits(v),
+            HostValue::Ref(r, _) => r.raw.encoded() as u64,
+            HostValue::V128(_) | HostValue::Unknown => {
+                return Err(WasmError::invalid("global value has the wrong type"));
+            }
+        };
+        let matches = match (self.value_type, value) {
+            (ValueType::Ref(_), HostValue::Ref(..)) => true,
+            (ValueType::I32, HostValue::I32(_)) => true,
+            (ValueType::I64, HostValue::I64(_)) => true,
+            (ValueType::F32, HostValue::F32(_)) => true,
+            (ValueType::F64, HostValue::F64(_)) => true,
+            _ => false,
+        };
+        if !matches {
+            return Err(WasmError::invalid("global value has the wrong type"));
+        }
+        self.set_raw(raw);
+        Ok(())
+    }
+}
+
+/// Two value types that carry the same scalar cell, ignoring the specific
+/// reference kind: `funcref` and `externref` are both a pointer in the cell.
+fn same_scalar_type(a: ValueType, b: ValueType) -> bool {
+    match (a, b) {
+        (ValueType::Ref(_), ValueType::Ref(_)) => true,
+        (a, b) => a == b,
     }
 }
