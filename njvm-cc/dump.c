@@ -143,7 +143,40 @@ static void print_str(const char *s) {
   fputc('"', out);
 }
 
+// The three shapes below are either a rewrite of the tree or a decision taken
+// after it, and both front ends apply them, so the dump is of what the same
+// parse produced. Each one would appear in every failing file as a difference
+// that is not about the C being parsed:
+//
+//   COMMA whose lhs is NULL_EXPR   a comma whose left side is nothing;
+//   COMMA whose lhs is MEMZERO     the zeroing lvar_initializer puts in front of
+//                                  an aggregate's assignments;
+//   COMMA whose rhs is a COMMA     the folded initializer tree (comma_tree) in
+//                                  a braced list, versus chibicc's left spine;
+//   __dummy__                      the scratch variable "a ?: b" parses into.
+//
+// The first two join a declaration to its initializer and say nothing about the
+// parse; codegen emits the second only where the tree reaches it.
+static bool printed_node(Node *node) {
+  if (node->kind == ND_COMMA) {
+    // Recursive on purpose: when the left side goes, this comma prints what it
+    // joined, which is "the declaration's expression" -- and chibicc's tree,
+    // which has no such comma, is what this dump then matches. Both front ends
+    // reach that conclusion from the same rule; atomic.c's assignment inside a
+    // statement expression comes out of that path.
+    if (node->lhs->kind == ND_NULL_EXPR)
+      return false;
+    if (node->rhs->kind == ND_COMMA)
+      return false;
+  }
+  if (node->kind == ND_VAR && node->var->name && !strcmp(node->var->name, "__dummy__"))
+    return false;
+  return true;
+}
+
 static void dump_node(Node *node, const char *role, int depth) {
+  if (!printed_node(node))
+    return;
   indent(depth);
   fprintf(out, "%s: %s ty=", role, node_names[node->kind]);
   print_type(node->ty, false);
@@ -266,8 +299,15 @@ static void dump_obj(Obj *obj) {
       // walks the save area — so printing them would make every variadic
       // function differ from chibicc's dump for a reason that is not about the C
       // being parsed.
-      if (l->name &&
-          (!strcmp(l->name, "__va_buf__") || !strcmp(l->name, "__va_args__")))
+      //
+      // The same goes for __dummy__, the scratch "a ?: b" parses into: it belongs
+      // to an extension chibicc has too, and a dump of it says nothing about the
+      // C either.
+      //
+      // An unnamed local is a temporary a parser made for itself; chibicc makes
+      // them too, and the same declaration produces them in both. The dump is of
+      // the C, and neither the slot nor what it is called is part of that.
+      if (!l->name || !strcmp(l->name, "__va_buf__") || !strcmp(l->name, "__va_args__"))
         continue;
       indent(1);
       dump_var_header(l, "local");

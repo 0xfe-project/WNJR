@@ -59,6 +59,11 @@ typedef struct {
 // This struct represents a variable initializer. Since initializers
 // can be nested (e.g. `int x[2][2] = {{1, 2}, {3, 4}}`), this struct
 // is a tree data structure.
+//
+// `has_list` says this part of the initializer was written as a list rather than
+// as one expression: a braced list, or a string literal filling a char array.
+// Only a list can leave elements unspecified, so it is the only case where
+// zeroing the object first decides what anything holds; see lvar_initializer.
 typedef struct Initializer Initializer;
 struct Initializer {
   Initializer *next;
@@ -77,6 +82,9 @@ struct Initializer {
   // Only one member can be initialized for a union.
   // `mem` is used to clarify which member is initialized.
   Member *mem;
+
+  // Written as a list: a braced one, or a string filling a char array.
+  bool has_list;
 };
 
 // For local variable initializer.
@@ -1302,9 +1310,16 @@ static void union_initializer(Token **rest, Token *tok, Initializer *init) {
 //             | assign
 static void initializer2(Token **rest, Token *tok, Initializer *init) {
   if (init->ty->kind == TY_ARRAY && tok->kind == TK_STR) {
+    // "char x[8] = "abc"" leaves the rest zero, so this is a list for the same
+    // reason a braced one is.
+    init->has_list = true;
     string_initializer(rest, tok, init);
     return;
   }
+
+  // A list at this level covers every branch below, whatever the type.
+  if (equal(tok, "{"))
+    init->has_list = true;
 
   if (init->ty->kind == TY_ARRAY) {
     if (equal(tok, "{"))
@@ -1493,20 +1508,16 @@ static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
   // unspecified elements are set to 0. Here, we simply zero-initialize the entire
   // memory region of a variable before initializing it with user-supplied values.
   //
-  // Only an aggregate can be left partly unspecified -- "int a[4] = {1}" -- so
-  // only there does that zeroing decide what anything holds. A scalar assignment
-  // writes every byte of the object, so zeroing first is work the assignment
-  // immediately undoes; "unsigned free = x;" was a four-byte fill followed by a
-  // four-byte store to the same address.
-  switch (var->ty->kind) {
-  case TY_STRUCT:
-  case TY_UNION:
-  case TY_ARRAY:
-  case TY_VLA:
-    break;
-  default:
+  // The condition is the braced list, not the type. A list can stop early --
+  // "int a[4] = {1}", "struct S s = {.b = 2}" -- and only then does the zeroing
+  // decide what anything holds. One expression gives every element by itself:
+  // "int a[2] = {b}" arrives here as a[0] = b[0], a[1] = b[1], which writes the
+  // whole object, so the fill was work the assignments immediately undid.
+  // chibicc zeroes every aggregate; the extra pass is what "unsigned free = x;"
+  // showed up as -- a four-byte fill and then a four-byte store to the address
+  // just zeroed -- and it costs a fill of the object on every such declaration.
+  if (!init->has_list)
     return rhs;
-  }
 
   Node *lhs = new_node(ND_MEMZERO, tok);
   lhs->var = var;

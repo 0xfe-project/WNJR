@@ -54,3 +54,23 @@
  
  //
 
+--- a/parse.c
++++ b/parse.c
+@@ -1384,8 +1384,15 @@
+   Node *lhs = new_node(ND_MEMZERO, tok);
+   lhs->var = var;
+ 
+   Node *rhs = create_lvar_init(init, var->ty, &desg, tok);
+-  return new_binary(ND_COMMA, lhs, rhs, tok);
+-}
++
++  // njvm-cc dump patch: wcc zeroes an object before its initializer's
++  // assignments only when the initializer is a list, the one case where
++  // elements can be left unspecified; chibicc zeroes every one. That is a
++  // decision about zeroing and not about the C being parsed, so it is
++  // dropped here as well and neither side's dump shows it.
++  return rhs;
++}
++
+ 
+ static uint64_t read_buf(char *buf, int sz) {
