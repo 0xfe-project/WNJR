@@ -236,13 +236,6 @@ static Node *new_num(int64_t val, Token *tok) {
   return node;
 }
 
-static Node *new_long(int64_t val, Token *tok) {
-  Node *node = new_node(ND_NUM, tok);
-  node->val = val;
-  node->ty = ty_long;
-  return node;
-}
-
 static Node *new_ulong(long val, Token *tok) {
   Node *node = new_node(ND_NUM, tok);
   node->val = val;
@@ -2595,7 +2588,12 @@ static Node *new_add(Node *lhs, Node *rhs, Token *tok) {
   }
 
   // ptr + num
-  rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size, tok), tok);
+  // The scale stays an `int`, not a `long`: it is multiplied by the index, and
+  // an index that is already 32 bits has no business widening to 64 first --
+  // the elements of an array are addressed inside a 32-bit linear memory. When
+  // the index is wider the usual arithmetic conversions widen the product
+  // anyway, so nothing that needs 64 bits loses it.
+  rhs = new_binary(ND_MUL, rhs, new_num(lhs->ty->base->size, tok), tok);
   return new_binary(ND_ADD, lhs, rhs, tok);
 }
 
@@ -2619,7 +2617,7 @@ static Node *new_sub(Node *lhs, Node *rhs, Token *tok) {
 
   // ptr - num
   if (lhs->ty->base && is_integer(rhs->ty)) {
-    rhs = new_binary(ND_MUL, rhs, new_long(lhs->ty->base->size, tok), tok);
+    rhs = new_binary(ND_MUL, rhs, new_num(lhs->ty->base->size, tok), tok);
     add_type(rhs);
     Node *node = new_binary(ND_SUB, lhs, rhs, tok);
     node->ty = lhs->ty;
