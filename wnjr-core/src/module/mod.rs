@@ -10,7 +10,10 @@ use self::type_defs::{CompositeType, StorageType};
 use crate::value_type::ValueType;
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 use entities::FunctionType;
-use entities::{Data, Element, ElementInit, Function, Global, Memory, Table, Tag};
+use entities::{
+    Data, Element, ElementInit, Function, FunctionDef, Global, GlobalDef, Memory, MemoryDef, Table,
+    TableDef, Tag, TagDef,
+};
 
 pub(crate) mod entities;
 pub(crate) mod parser;
@@ -19,6 +22,27 @@ pub(crate) mod type_defs;
 pub(crate) mod validator;
 
 use crate::error::WasmError;
+
+/// One entry of a module's import section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportDecl<'a> {
+    /// The module the entry is asked of, as the binary spells it.
+    pub module: &'a str,
+    /// The name within that module.
+    pub name: &'a str,
+    /// What kind of thing it is.
+    pub kind: ImportKind,
+}
+
+/// The kinds of thing a module can import.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportKind {
+    Func,
+    Table,
+    Memory,
+    Global,
+    Tag,
+}
 
 /// A parsed, validated WebAssembly module, ready for instantiation.
 ///
@@ -129,6 +153,61 @@ impl Module {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Everything this module imports, in the order the binary declares it.
+    ///
+    /// The embedder needs this to check an import object before instantiating:
+    /// an entry it cannot find is a link error, and the message has to name what
+    /// is missing. The kinds are the four this engine links plus tags.
+    pub fn imports(&self) -> collections::Vec<ImportDecl<'_>> {
+        let mut imports = collections::Vec::new();
+        for function in self.functions.iter() {
+            if let FunctionDef::Import { module, name, .. } = &function.def {
+                imports.push(ImportDecl {
+                    module: module.as_str(),
+                    name: name.as_str(),
+                    kind: ImportKind::Func,
+                });
+            }
+        }
+        for table in self.tables.iter() {
+            if let TableDef::Import { module, name, .. } = table.def() {
+                imports.push(ImportDecl {
+                    module: module.as_str(),
+                    name: name.as_str(),
+                    kind: ImportKind::Table,
+                });
+            }
+        }
+        for memory in self.memories.iter() {
+            if let MemoryDef::Import { module, name, .. } = memory.def() {
+                imports.push(ImportDecl {
+                    module: module.as_str(),
+                    name: name.as_str(),
+                    kind: ImportKind::Memory,
+                });
+            }
+        }
+        for global in self.globals.iter() {
+            if let GlobalDef::Import { module, name, .. } = global.def() {
+                imports.push(ImportDecl {
+                    module: module.as_str(),
+                    name: name.as_str(),
+                    kind: ImportKind::Global,
+                });
+            }
+        }
+        for tag in self.tags.iter() {
+            if let TagDef::Import { module, name, .. } = tag.def() {
+                imports.push(ImportDecl {
+                    module: module.as_str(),
+                    name: name.as_str(),
+                    kind: ImportKind::Tag,
+                });
+            }
+        }
+        imports
     }
 
     pub(crate) fn version(&self) -> u32 {

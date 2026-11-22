@@ -35,7 +35,7 @@ pub use config::{Config, ConfigError};
 pub use constants::WASM_PAGE_SIZE;
 pub use error::WasmError;
 pub use module::type_defs::FunctionType;
-pub use module::Module;
+pub use module::{ImportDecl, ImportKind, Module};
 pub use utils::limits::Limits;
 pub use vm::engine::{Engine, Tier};
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
