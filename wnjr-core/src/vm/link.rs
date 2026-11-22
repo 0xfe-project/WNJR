@@ -1050,6 +1050,14 @@ pub(crate) struct LinkRegistry {
 }
 
 impl LinkRegistry {
+    /// Resolve a function reference to the instance and local index it names.
+    ///
+    /// The inverse of the handle a `Func` hands out, for a host that has to
+    /// turn a `funcref` it read out of a table back into something callable.
+    pub(crate) fn function_entry(&self, handle: RefValue) -> Option<FuncEntry> {
+        self.arenas.functions.entry_for_handle(handle)
+    }
+
     /// Value-based host global imports are checked before constant evaluation
     /// or active segments can consume a raw representation.
     pub(crate) fn validate_host_global(

@@ -219,6 +219,12 @@ impl Func {
     pub const fn arity(&self) -> (usize, usize) {
         (self.params, self.results)
     }
+
+    /// The owner this function belongs to, as a world-scoped identity.
+    #[inline]
+    pub const fn owner(&self) -> InstanceId {
+        self.owner
+    }
 }
 
 impl Instance {
@@ -382,6 +388,44 @@ impl Instance {
             params,
             results,
         })
+    }
+
+    /// Resolve a reference value back to a function of this instance.
+    ///
+    /// This is the inverse of [`Func::to_value`]: a host that read a `funcref`
+    /// out of a table, a global or a call result can turn it back into
+    /// something callable. `None` when the value is not a function reference,
+    /// or when the reference names a function that is not this instance's.
+    pub fn func_from_value(&self, value: &Value) -> Option<Func> {
+        let Value::Ref(reference, _) = value else {
+            return None;
+        };
+        if reference.world != 0 && reference.world != self.instance_id().world() {
+            return None;
+        }
+        let entry = self.registry.function_entry(reference.raw)?;
+        if entry.owner != self.instance_id() {
+            return None;
+        }
+        self.get_func_by_index(entry.local_index as usize)
+    }
+
+    /// Call the function a reference value names.
+    ///
+    /// The convenience form of [`Instance::func_from_value`] followed by
+    /// [`Instance::call`]; use those two to resolve once and call many times.
+    pub fn call_value(
+        &mut self,
+        value: &Value,
+        args: &[Value],
+        results: &mut [Value],
+    ) -> Result<(), WasmError> {
+        let Some(func) = self.func_from_value(value) else {
+            return Err(WasmError::invalid(
+                "the reference is not a function of this instance",
+            ));
+        };
+        self.call(&func, args, results)
     }
 
     /// Call a resolved export, writing results into `results`.
