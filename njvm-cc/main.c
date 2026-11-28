@@ -22,12 +22,14 @@ static bool opt_dump_escapes;
 static bool opt_dump_macros;
 static bool opt_dump_include_paths;
 static bool opt_emit_text;
+bool opt_import_memory;
+bool opt_shared_memory;
 bool opt_weld_tree;
 
 static void usage(int status) {
   fprintf(stderr,
           "njvm-cc (-E | --dump-ast | --deps | --dump-macros | --emit-njvm)"
-          " [-o <path>] [-I<dir>] [-D<m>] [--no-weld] <file>\n");
+          " [-o <path>] [-I<dir>] [-D<m>] [--no-weld] [--import-memory] [--shared-memory] <file>\n");
   exit(status);
 }
 
@@ -203,6 +205,17 @@ static void parse_args(int argc, char **argv) {
       opt_weld_tree = true;
       continue;
     }
+
+    if (!strcmp(argv[i], "--import-memory")) {
+      opt_import_memory = true;
+      continue;
+    }
+
+    if (!strcmp(argv[i], "--shared-memory")) {
+      opt_shared_memory = true;
+      continue;
+    }
+
 
     // Where this compiler looks for headers, in order. The generator of the
     // welded table needs to know: it welds a name from the directory that would

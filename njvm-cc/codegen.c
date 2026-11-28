@@ -2591,8 +2591,35 @@ void njvm_emit_module(Obj *prog, Mp *m) {
       nif++;
       mp_end_container(out, im, nif);
     }
-    mp_end_container(out, a, (size_t)nimports);
+    mp_end_container(out, a, (size_t)nimports + (opt_import_memory ? 1 : 0));
   }
+    // Memory import when --import-memory is set.
+    if (opt_import_memory) {
+      int im = mp_begin_map(out);
+      size_t nif = 0;
+      mp_key(out, "module");
+      mp_str(out, "env", 3);
+      nif++;
+      mp_key(out, "name");
+      mp_str(out, "memory", 6);
+      nif++;
+      mp_key(out, "kind");
+      int kind = mp_variant(out, "Memory");
+      int mt = mp_begin_map(out);
+      mp_key(out, "min");
+      mp_uint(out, MEMORY_PAGES);
+      mp_key(out, "max");
+      if (opt_shared_memory)
+        mp_uint(out, MEMORY_PAGES);
+      else
+        mp_nil(out);
+      mp_key(out, "shared");
+      mp_bool(out, opt_shared_memory);
+      mp_end_container(out, mt, 3);
+      mp_end_container(out, kind, 1);
+      nif++;
+      mp_end_container(out, im, nif);
+    }
   fields++;
 
   sp_global = 0;
@@ -2657,15 +2684,25 @@ void njvm_emit_module(Obj *prog, Mp *m) {
   mp_key(out, "memories");
   {
     int a = mp_begin_arr(out);
-    int t = mp_begin_map(out);
-    mp_key(out, "min");
-    mp_uint(out, MEMORY_PAGES);
-    mp_key(out, "max");
-    mp_nil(out);
-    mp_key(out, "shared");
-    mp_bool(out, false);
-    mp_end_container(out, t, 3);
-    mp_end_container(out, a, 1);
+    // When --import-memory is set, memory 0 is imported and not defined here.
+    // The import goes in the imports section above.
+    if (!opt_import_memory) {
+      int t = mp_begin_map(out);
+      mp_key(out, "min");
+      mp_uint(out, MEMORY_PAGES);
+      mp_key(out, "max");
+      // Shared memory requires a maximum (wasm threads spec).
+      if (opt_shared_memory)
+        mp_uint(out, MEMORY_PAGES);
+      else
+        mp_nil(out);
+      mp_key(out, "shared");
+      mp_bool(out, opt_shared_memory);
+      mp_end_container(out, t, 3);
+      mp_end_container(out, a, 1);
+    } else {
+      mp_end_container(out, a, 0);
+    }
   }
   fields++;
 

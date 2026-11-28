@@ -617,4 +617,6 @@ extern StringArray deps;
 void record_dep(char *path);
 extern bool opt_fpic;
 extern bool opt_fcommon;
+extern bool opt_import_memory;
+extern bool opt_shared_memory;
 extern char *base_file;
