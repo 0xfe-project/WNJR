@@ -127,7 +127,7 @@ for src in $cases; do
     echo '}'
   } > "$driver"
 
-  if ! "$CC" -O1 -o "$work/$name-native" $srcs "$driver" 2> "$work/$name-cc.log"; then
+  if ! "$CC" -O1 -fcommon -o "$work/$name-native" $srcs "$driver" 2> "$work/$name-cc.log"; then
     echo "[FAIL] $name: the host compiler rejected the source"
     sed 's/^/        /' "$work/$name-cc.log"
     fail=$((fail + 1))

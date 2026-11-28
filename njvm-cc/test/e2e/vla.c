@@ -36,7 +36,7 @@ int sizeof_elem(void) {
 int fill_2d(void) {
   int n = 10;
   int x[n + 1][n + 6];
-  int *p = x;
+  int *p = (int *)x;
   for (int i = 0; i < sizeof(x) / 4; i++)
     p[i] = i;
   return x[5][2];
@@ -45,7 +45,7 @@ int fill_2d(void) {
 int fill_2d_first(void) {
   int n = 10;
   int x[n + 1][n + 6];
-  int *p = x;
+  int *p = (int *)x;
   for (int i = 0; i < sizeof(x) / 4; i++)
     p[i] = i;
   return x[0][5];

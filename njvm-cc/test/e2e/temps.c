@@ -60,8 +60,13 @@ int loop_condition(void) {
 }
 
 int nested_call_args(void) {
+  // The operands of + are unsequenced, so the host may evaluate them in any
+  // order; sequence them with statements so both compilers must agree.
   int a = 0;
-  return next() * 100 + (a = next(), a * 10) + next();
+  int r = next() * 100;
+  r += (a = next(), a * 10);
+  r += next();
+  return r;
 }
 
 int reset(int v) {

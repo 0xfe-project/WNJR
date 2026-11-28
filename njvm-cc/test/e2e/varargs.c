@@ -79,9 +79,17 @@ int vsum(int n, va_list ap) {
 int sum_via_helper(int n, ...) {
   va_list ap;
   va_start(ap, n);
+#ifdef __chibicc__
   int s = vsum(n, ap);
-  // The caller's cursor is untouched by vsum's copy: this reads the first
-  // argument again, not the one after the last.
+  // wcc passes the va_list by value: the caller's cursor is untouched by vsum's
+  // copy, so this reads the first argument again, not the one after the last.
+  // C leaves ap indeterminate here (7.16.1), so the host build cannot say.
+#else
+  va_list cp;
+  va_copy(cp, ap);
+  int s = vsum(n, cp);
+  va_end(cp);
+#endif
   s += va_arg(ap, int);
   va_end(ap);
   return s;

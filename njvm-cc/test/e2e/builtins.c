@@ -2,6 +2,12 @@
 // backend already has rather than to a call into a library that does not exist
 // yet.
 
+#ifndef __chibicc__
+#ifndef __clang__
+#define __builtin_assume(x) do { if (!(x)) __builtin_unreachable(); } while (0)
+#endif
+#endif
+
 int clz32(int x) { return __builtin_clz(x); }
 int ctz32(int x) { return __builtin_ctz(x); }
 int pop32(unsigned int x) { return __builtin_popcount(x); }
