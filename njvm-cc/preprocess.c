@@ -454,6 +454,70 @@ static MacroArg *read_macro_arg_one(Token **rest, Token *tok, bool read_rest) {
   int level = 0;
 
   for (;;) {
+    // C11 §6.10.3p11: the argument list of a macro invocation may contain
+    // preprocessing directives (specifically conditional-inclusion blocks).
+    // The preprocessor must resolve those blocks before treating the tokens
+    // as argument text.  preprocess2 encounters this token stream from the
+    // top level; here we are inside read_macro_arg_one which runs BEFORE
+    // preprocess2 has had a chance to strip the #if/#ifdef/#endif tokens.
+    // So we replicate the same conditional-compilation logic inline.
+    if (is_hash(tok)) {
+      Token *hash = tok;
+      Token *dir  = tok->next;   /* the directive keyword */
+      if (equal(dir, "if")) {
+        long val = eval_const_expr(&dir, dir);
+        push_cond_incl(hash, val);
+        tok = val ? dir : skip_cond_incl(dir);
+        continue;
+      }
+      if (equal(dir, "ifdef")) {
+        bool defined = find_macro(dir->next);
+        push_cond_incl(dir, defined);
+        tok = skip_line(dir->next->next);
+        if (!defined)
+          tok = skip_cond_incl(tok);
+        continue;
+      }
+      if (equal(dir, "ifndef")) {
+        bool defined = find_macro(dir->next);
+        push_cond_incl(dir, !defined);
+        tok = skip_line(dir->next->next);
+        if (defined)
+          tok = skip_cond_incl(tok);
+        continue;
+      }
+      if (equal(dir, "elif")) {
+        if (!cond_incl || cond_incl->ctx == IN_ELSE)
+          error_tok(hash, "stray #elif");
+        cond_incl->ctx = IN_ELIF;
+        if (!cond_incl->included && eval_const_expr(&dir, dir))
+          cond_incl->included = true;
+        else
+          dir = skip_cond_incl(dir);
+        tok = dir;
+        continue;
+      }
+      if (equal(dir, "else")) {
+        if (!cond_incl || cond_incl->ctx == IN_ELSE)
+          error_tok(hash, "stray #else");
+        cond_incl->ctx = IN_ELSE;
+        tok = skip_line(dir->next);
+        if (cond_incl->included)
+          tok = skip_cond_incl(tok);
+        continue;
+      }
+      if (equal(dir, "endif")) {
+        if (!cond_incl)
+          error_tok(hash, "stray #endif");
+        cond_incl = cond_incl->next;
+        tok = skip_line(dir->next);
+        continue;
+      }
+      /* Any other directive inside a macro arg list: skip the line. */
+      tok = skip_line(dir->next);
+      continue;
+    }
+
     if (level == 0 && equal(tok, ")"))
       break;
     if (level == 0 && !read_rest && equal(tok, ","))
